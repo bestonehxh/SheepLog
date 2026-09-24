@@ -1035,6 +1035,7 @@ struct SNMPTestView: View {
     @State private var suggestions: [String] = []
 
     var body: some View {
+        let _ = PaneProbe.ran("body.snmpTest")
         VStack(spacing: 0) {
             PaneHeader(eyebrow: "SNMP", heading: model.heading, subtitle: model.subtitle) {
                 recentMenu

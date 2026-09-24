@@ -12,6 +12,7 @@ struct SettingsView: View {
     private var s: Binding<AppSettings> { $model.settings }
 
     var body: some View {
+        let _ = PaneProbe.ran("body.settings")
         VStack(spacing: 0) {
             PaneHeader(eyebrow: "App", heading: "Ports, buffers and files.",
                        subtitle: "Where SheepLog listens, how much it keeps, and where it writes")
@@ -30,6 +31,7 @@ struct SettingsView: View {
         }
         .task {
             // pcap_findalldevs walks every interface: never on the main thread.
+            PaneProbe.ran("settings.interfaces")
             interfaces = await Task.detached(priority: .userInitiated) { CaptureEngine.interfaces() }.value
         }
     }
@@ -218,7 +220,10 @@ struct CommitNumberField: View {
             .onSubmit { commit() }
             .onChange(of: focused) { _, f in if !f { commit() } }
             .onDisappear { commit() }
-            .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in commit() }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+                PaneProbe.ran("settings.commitOnQuit")
+                commit()
+            }
     }
 
     private func commit() {

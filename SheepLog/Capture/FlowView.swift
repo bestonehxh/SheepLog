@@ -155,6 +155,7 @@ struct FlowView: View {
     @State private var paneWidth: CGFloat = 0
 
     var body: some View {
+        let _ = PaneProbe.ran("body.flows")
         VStack(alignment: .leading, spacing: 0) {
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 PaneHeader(eyebrow: "Capture", heading: heading, subtitle: subtitle(now: context.date)) {
@@ -198,6 +199,7 @@ struct FlowView: View {
     }
 
     private func appeared() {
+        PaneProbe.ran("flows.appeared")
         if DemoFlags.flows { loadDemo(); return }
         // `-demoPane flows -demoPcap <file>`: the Packets pane (which opens it) never appeared.
         if store.fileURL == nil, store.packets.isEmpty, DemoFlags.openPcap() {
@@ -211,6 +213,7 @@ struct FlowView: View {
 
     /// Leaving the pane mid-run: stop the work, not just ignore its result.
     private func disappeared() {
+        PaneProbe.ran("flows.disappeared")
         visible = false
         scheduledTask?.cancel(); scheduledTask = nil
         analysisTask?.cancel(); analysisTask = nil

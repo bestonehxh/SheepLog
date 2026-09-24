@@ -135,6 +135,37 @@ enum PaneProbe {
         #endif
     }
 
+    #if DEBUG
+    /// How many times each pane's recurring work ran (`"status.addressLoop"`, `"packets.refresh"`,
+    /// `"body.log"` …): a pane that has left must add nothing.
+    private(set) static var runs: [String: Int] = [:]
+    #endif
+
+    /// One run of `name` (Debug only).
+    @inline(__always)
+    static func ran(_ name: String) {
+        #if DEBUG
+        runs[name, default: 0] += 1
+        if !name.hasPrefix("body.") {
+            order.append(name)
+            if order.count > 512 { order.removeFirst(256) }
+        }
+        #endif
+    }
+
+    #if DEBUG
+    /// The runs (not the body evaluations) in the order they happened, the last few hundred.
+    private(set) static var order: [String] = []
+    #endif
+
+    static func runs(_ name: String) -> Int {
+        #if DEBUG
+        return runs[name] ?? 0
+        #else
+        return 0
+        #endif
+    }
+
     @inline(__always)
     static func authAnalysisStarted() {
         #if DEBUG

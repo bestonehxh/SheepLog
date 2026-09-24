@@ -85,6 +85,26 @@ nonisolated struct ClientReport: Sendable {
     var generated = Date()
     var dataStart: Date?
     var dataEnd: Date?
+    /// `PacketStore.epoch` of the packets the report was read from: after a Clear the same frame
+    /// numbers — and the same `ip:` filter — are another capture's.
+    var packetEpoch = 0
+    /// Every log line and frame it counts (whether they are still in memory).
+    var logIDs: [Int] = []
+    var packetHitIDs: [Int] = []
+
+    /// What its links open, as the findings' evidence is (`TroubleshootJump.show(_:epoch:)`: said,
+    /// not opened, once it has rolled out or the capture was cleared).
+    var logEvidence: Evidence {
+        Evidence(kind: .logLines, label: "\(Format.count(logTotal)) log line\(logTotal == 1 ? "" : "s")", ids: logIDs, query: logQuery)
+    }
+
+    var packetEvidence: Evidence {
+        Evidence(kind: .packets, label: "\(Format.count(packetTotal)) packets", ids: packetHitIDs, query: packetQuery)
+    }
+
+    func flowEvidence(_ f: FlowLine) -> Evidence {
+        Evidence(kind: .flows, label: "flow", ids: [f.id], query: "", flows: [f.ref])
+    }
 
     var title: String {
         switch client {
@@ -136,6 +156,8 @@ nonisolated struct ClientReport: Sendable {
         let needles = r.macs.flatMap(ClientID.spellings(ofMAC:)) + r.ips
         let hits = ClientSearch.lines(input.entries, needles: needles)
         r.logTotal = hits.count
+        r.logIDs = hits.map(\.id)
+        r.packetEpoch = input.packetEpoch
         let devices = DeviceNames(input.entries)
         for e in hits.suffix(maxLogLines) {
             r.logLines.append(LogLine(id: e.id, time: e.deviceTime ?? e.received, device: devices.name(e), severity: e.severity,
@@ -210,6 +232,7 @@ nonisolated struct ClientReport: Sendable {
         let packetHits = ClientSearch.packets(input.packets, ips: ipSet, macs: macSet)
         r.packetTotal = packetHits.count
         r.packetIDs = Array(packetHits.prefix(50))
+        r.packetHitIDs = packetHits
 
         // Conversations.
         let mine = input.flows.filter { ipSet.contains($0.client) || ipSet.contains($0.server) }

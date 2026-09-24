@@ -343,9 +343,11 @@ final class PacketStore: ObservableObject {
         let token = saveToken
         savingCount = snapshot.count
         isSaving = true
+        PendingWrites.begin()          // ⌘Q waits for the write
         Task.detached(priority: .userInitiated) { [weak self] in
             var failure: String?
             do { try PcapFile.write(snapshot, linkType: lt, to: url, snapLength: snap) } catch { failure = error.localizedDescription }
+            PendingWrites.end()
             let message = failure
             await MainActor.run {
                 if let self, self.saveToken == token { self.isSaving = false }

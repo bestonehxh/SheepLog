@@ -20,6 +20,7 @@ struct LogView: View {
     @FocusState private var filterFocused: Bool
 
     var body: some View {
+        let _ = PaneProbe.ran("body.log")
         VStack(spacing: 0) {
             PaneHeader(eyebrow: "Syslog", heading: heading, subtitle: subtitle)
                 .paneColumn()
@@ -40,7 +41,10 @@ struct LogView: View {
         }
         .task {
             // The "point your devices at …" address follows a network change while shown.
+            LeakProbe.add("Log.addressLoop")
+            defer { LeakProbe.remove("Log.addressLoop") }
             while !Task.isCancelled {
+                PaneProbe.ran("log.addressLoop")
                 let a = HostAddresses.primaryIPv4() ?? "this Mac’s address"
                 if a != thisMac { thisMac = a }
                 try? await Task.sleep(for: .seconds(HostAddresses.cacheSeconds))

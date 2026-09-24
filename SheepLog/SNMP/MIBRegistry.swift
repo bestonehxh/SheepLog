@@ -117,7 +117,13 @@ final class MIBRegistry: ObservableObject {
                     // The file's bytes, never the link: a symlink copied as such would keep
                     // pointing wherever it pointed (and be re-read from there at every launch).
                     let data = try Data(contentsOf: src.resolvingSymlinksInPath())
-                    try? fm.removeItem(at: dest)
+                    // The atomic write replaces an earlier copy only once the new one is complete
+                    // (removed first, a write that failed — disk full, ⌘Q — lost the module).
+                    // A link or folder in the way goes first: the rename would not replace a folder.
+                    if let type = try? fm.attributesOfItem(atPath: dest.path)[.type] as? FileAttributeType,
+                       type != .typeRegular {
+                        try? fm.removeItem(at: dest)
+                    }
                     try data.write(to: dest, options: .atomic)
                     added.append(dest)
                 } catch {

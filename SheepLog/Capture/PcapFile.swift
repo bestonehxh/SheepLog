@@ -103,15 +103,38 @@ nonisolated enum PcapFile {
 
     /// `snapLength`: the header value to write (the opened file's own, so saving an unfiltered
     /// file gives the same bytes); used only when every packet fits in it.
+    /// Written next to `url` under a temporary name and renamed over it when complete: a Save
+    /// that fails part-way (disk full) or is cut short never leaves a truncated capture under the
+    /// chosen name, nor destroys the file it was replacing (libpcap truncated it on open).
     static func write(_ packets: [Packet], linkType: Int32, to url: URL, snapLength: Int? = nil) throws {
+        let dir = url.deletingLastPathComponent()
+        let temp = dir.appendingPathComponent(".\(url.lastPathComponent).sheeplog-\(UUID().uuidString.prefix(8))")
+        // A folder that takes no new file (but lets an existing one be overwritten) is written in place.
+        guard FileManager.default.createFile(atPath: temp.path(percentEncoded: false), contents: nil) else {
+            return try writeInPlace(packets, linkType: linkType, to: url, snapLength: snapLength)
+        }
+        do {
+            try writeInPlace(packets, linkType: linkType, to: temp, snapLength: snapLength, reportAs: url)
+            guard rename(temp.path(percentEncoded: false), url.path(percentEncoded: false)) == 0 else {
+                throw error(String(cString: strerror(errno)), url: url)
+            }
+        } catch {
+            unlink(temp.path(percentEncoded: false))
+            throw error
+        }
+    }
+
+    private static func writeInPlace(_ packets: [Packet], linkType: Int32, to url: URL, snapLength: Int?,
+                                     reportAs shown: URL? = nil) throws {
+        let reported = shown ?? url
         let largest = packets.reduce(0) { max($0, min($1.data.count, writeSnapLength)) }
         let headerSnap = snapLength.flatMap { $0 >= largest && $0 <= Int(Int32.max) ? $0 : nil } ?? writeSnapLength
         guard let dead = pcap_open_dead(linkType, Int32(headerSnap)) else {
-            throw error("pcap_open_dead failed for link type \(linkType)", url: url)
+            throw error("pcap_open_dead failed for link type \(linkType)", url: reported)
         }
         defer { pcap_close(dead) }
         guard let dumper = pcap_dump_open(dead, url.path(percentEncoded: false)) else {
-            throw error(String(cString: pcap_geterr(dead)), url: url)
+            throw error(String(cString: pcap_geterr(dead)), url: reported)
         }
         let user = UnsafeMutablePointer<UInt8>(dumper)
         var hdr = pcap_pkthdr()
@@ -136,7 +159,7 @@ nonisolated enum PcapFile {
         }
         let flushed = pcap_dump_flush(dumper)
         pcap_dump_close(dumper)
-        if flushed != 0 { throw error("Could not write every packet (disk full?)", url: url) }
+        if flushed != 0 { throw error("Could not write every packet (disk full?)", url: reported) }
     }
 
     /// A libpcap `errbuf` as text.

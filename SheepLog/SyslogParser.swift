@@ -232,6 +232,7 @@ nonisolated struct HeaderScan {
             h.time = ts.date
             p = ts.end
             if at(p) == Self.colon { p += 1 }        // Cisco-style "…:32: "
+            else if at(p) == Self.sp, at(p + 1) == Self.colon, at(p + 2) == Self.sp { p += 2 }   // IOS XR "…:10.123 : ifmgr[…]"
             p = skipZoneName(p)                      // Cisco "10:15:32.123 ICT: "
             p = skipSpaces(p)
             hostAndTag(from: p)
@@ -257,6 +258,20 @@ nonisolated struct HeaderScan {
         } else if let ts = parseISO(at: q) {
             time = ts.date
             q = ts.end
+        } else if let ts = epochStamp(at: q), at(ts.end) == Self.sp {
+            // Cisco Meraki: `1 1790134440.123456789 MS220-8P events port 3 status changed …` —
+            // version 1, then epoch seconds, the device, the log category and the text (no
+            // PROCID / MSGID / SD). Read as RFC 5424, the whole line was the message, no host.
+            h.time = ts.date
+            q = ts.end + 1
+            let he = tokenEnd(q)
+            guard he > q, isHostname(q, he) else { return false }
+            h.hostname = str(q, he)
+            q = skipSpaces(he)
+            let pe = tokenEnd(q)
+            h.program = str(q, pe)
+            h.message = str(skipSpaces(pe), n)
+            return true
         } else {
             return false
         }
@@ -332,6 +347,41 @@ nonisolated struct HeaderScan {
         return (out, q)
     }
 
+    /// `1790134440.123456789`: Unix seconds (10 digits) with a fraction (Meraki).
+    private func epochStamp(at p: Int) -> (date: Date, end: Int)? {
+        guard let secs = digits(p, 10), at(p + 10) == Self.dot, Self.isDigit(at(p + 11)) else { return nil }
+        var q = p + 11
+        let fracStart = q
+        while q < n, Self.isDigit(b[q]), q - fracStart < 9 { q += 1 }
+        while q < n, Self.isDigit(b[q]) { q += 1 }
+        var frac = 0.0, scale = 0.1
+        for k in fracStart..<min(q, fracStart + 6) { frac += Double(b[k] - 0x30) * scale; scale /= 10 }
+        return (Date(timeIntervalSince1970: Double(secs) + frac), q)
+    }
+
+    /// Cisco IOS XR's node before the timestamp: `RP/0/RSP0/CPU0:Sep 23 …`, `0/RP0/CPU0:2026 …`
+    /// (letters and digits in three or more `/` parts, a colon, the time right after it), with
+    /// `logging hostnameprefix`'s `HOST ` in front. Returns where the timestamp starts.
+    private func xrNode(at start: Int) -> (host: Range<Int>?, node: Range<Int>, next: Int)? {
+        func node(_ p: Int) -> Int? {
+            var q = p, slashes = 0
+            while q < n, q - p < 40 {
+                let c = b[q]
+                if Self.isAlpha(c) || Self.isDigit(c) { q += 1; continue }
+                if c == 0x2F, q > p, b[q - 1] != 0x2F { slashes += 1; q += 1; continue }
+                break
+            }
+            guard slashes >= 2, at(q) == Self.colon, b[q - 1] != 0x2F, parseTimestamp(at: q + 1) != nil else { return nil }
+            return q
+        }
+        if let q = node(start) { return (nil, start..<q, q + 1) }
+        let e = tokenEnd(start)
+        guard e > start, isHostname(start, e) else { return nil }
+        let r = skipSpaces(e)
+        guard let q = node(r) else { return nil }
+        return (start..<e, r..<q, q + 1)
+    }
+
     // MARK: Timestamps
 
     private func parseTimestamp(at p: Int) -> (date: Date?, end: Int)? {
@@ -358,9 +408,16 @@ nonisolated struct HeaderScan {
         var p = start
         // "35: "
         if let r = counter(at: p), timestampFollows(r) || originHost(at: r) != nil || sequenceBeforeTimestamp(r)
-            || (at(r) == Self.percent && Self.isAlpha(at(r + 1))) {
+            || (at(r) == Self.percent && Self.isAlpha(at(r + 1))) || xrNode(at: r) != nil {
             h.fields.append(LogField("seq", str(p, counterDigitsEnd(p))))
             p = r
+        }
+        // IOS XR: "[HOST ]RP/0/RSP0/CPU0:Sep 23 …" (the node is a field; the hostname only
+        // with `logging hostnameprefix`). The node was read as the message, the program lost.
+        if let xr = xrNode(at: p) {
+            if let host = xr.host { h.hostname = str(host.lowerBound, host.upperBound) }
+            h.fields.append(LogField("node", str(xr.node.lowerBound, xr.node.upperBound)))
+            return xr.next
         }
         // "CORE-RTR1: "
         if let host = originHost(at: p) {
