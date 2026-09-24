@@ -508,7 +508,13 @@ extension LogColumn {
     }
 
     static func restoreHidden(_ table: NSTableView) {
-        guard !AppSettings.isRunningTests, let hidden = UserDefaults.standard.stringArray(forKey: hiddenKey) else { return }
+        guard !AppSettings.isRunningTests else { return }
+        restoreHidden(table, from: .standard)
+    }
+
+    /// Anything but a list of column names under the key is no list (the columns as built).
+    static func restoreHidden(_ table: NSTableView, from defaults: UserDefaults) {
+        guard let hidden = defaults.object(forKey: hiddenKey) as? [String] else { return }
         for c in table.tableColumns where c.identifier != message { c.isHidden = hidden.contains(c.identifier.rawValue) }
     }
 }

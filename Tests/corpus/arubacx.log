@@ -8,3 +8,7 @@
 <190>1 2026-09-23T10:20:05.250+07:00 CX6300-CORE-01 hpe-restd 3345 - - Event|4691|LOG_INFO|UKWN|1|User admin logged in from 10.1.0.5 through REST session
 <190>1 2026-09-23T10:21:00.123+07:00 CX6300-CORE-01 intfd 1633 - [origin enterpriseId="47196"][meta sequenceId="12"] Event|403|LOG_INFO|AMM|1/1|Link status for interface 1/1/5 is down
 <190>1 2026-09-23T10:21:30.123+07:00 CX6300-CORE-01 intfd 1633 - [origin enterpriseId="47196"] Event|404|LOG_INFO|AMM|1/1|Link status for interface 1/1/5 is up
+<188>1 2026-09-23T10:22:00.100+07:00 CX8360-AGG-02 ospfv2 2940 - - Event|2004|LOG_WARN|OSPFV2|-|OSPFv2 neighbor 10.2.0.1 on interface vlan20 changed state from Full to Down (InactivityTimer)
+<190>1 2026-09-23T10:22:40.100+07:00 CX8360-AGG-02 ospfv2 2940 - - Event|2003|LOG_INFO|OSPFV2|-|OSPFv2 neighbor 10.2.0.1 on interface vlan20 changed state from Loading to Full
+<188>1 2026-09-23T10:23:00.100+07:00 CX8360-AGG-02 bgpd 2951 - - Event|4402|LOG_WARN|BGP|-|BGP peer 10.2.0.9 changed state from Established to Idle (hold timer expired)
+<190>1 2026-09-23T10:23:30.100+07:00 CX8360-AGG-02 bgpd 2951 - - Event|4401|LOG_INFO|BGP|-|BGP peer 10.2.0.9 changed state from OpenConfirm to Established

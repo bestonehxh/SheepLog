@@ -83,7 +83,15 @@ struct LogView: View {
     /// At most 32 % of the pane (and never under 220 pt).
     private var detailCap: CGFloat { max(220, (paneWidth > 0 ? paneWidth : 1000) * 0.32) }
     private var detailRange: ClosedRange<CGFloat> { min(260, detailCap)...max(min(260, detailCap), min(560, detailCap)) }
-    private var shownDetailWidth: CGFloat { min(max(CGFloat(detailWidth), detailRange.lowerBound), detailRange.upperBound) }
+    private var shownDetailWidth: CGFloat { Self.detailWidth(stored: detailWidth, range: detailRange) }
+
+    /// The stored width inside the range; a stored value that is no width (a real NaN or
+    /// infinity — `defaults write … -float nan`, which @AppStorage hands over as NaN, and
+    /// `max(NaN, 260)` is NaN: the panel got a NaN width) is the default 360 kept in the range.
+    static func detailWidth(stored: Double, range: ClosedRange<CGFloat>) -> CGFloat {
+        let w = stored.isFinite ? CGFloat(stored) : 360
+        return min(max(w, range.lowerBound), range.upperBound)
+    }
     private var detailWidthBinding: Binding<CGFloat> {
         Binding(get: { shownDetailWidth }, set: { detailWidth = Double($0) })
     }

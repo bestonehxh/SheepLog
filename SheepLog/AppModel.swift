@@ -135,8 +135,17 @@ nonisolated struct AppSettings: Codable, Equatable, Sendable {
         return try? enc.encode(copy)
     }
 
-    func save(to url: URL = file) {
-        if let data = encoded() { try? data.write(to: url, options: .atomic) }
+    /// Writes a temporary file and renames it over settings.json (a full disk or ⌘Q never
+    /// leaves half a file). The error text, or nil.
+    @discardableResult
+    func save(to url: URL = file) -> String? {
+        guard let data = encoded() else { return "the settings could not be encoded" }
+        do {
+            try data.write(to: url, options: .atomic)
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
     }
 }
 
@@ -150,7 +159,7 @@ final class AppModel: ObservableObject {
     @Published var settings: AppSettings {
         didSet {
             guard settings != oldValue else { return }
-            settings.save()
+            saveSettings()
             applySettings(previous: oldValue)
         }
     }
@@ -514,6 +523,22 @@ final class AppModel: ObservableObject {
 
     /// Shows the error sheet. While one is already up the error waits its turn (a duplicate of
     /// the one on screen or of a waiting one is dropped).
+    /// A settings.json that could not be written is said once (a full disk failed every
+    /// change silently: the settings were back to the old ones at the next launch), and again
+    /// only after a save has worked.
+    private(set) var settingsSaveFailing = false
+
+    func saveSettings(to url: URL = AppSettings.file) {
+        if let failure = settings.save(to: url) {
+            guard !settingsSaveFailing else { return }
+            settingsSaveFailing = true
+            report("Settings could not be saved.",
+                   detail: "\(url.path(percentEncoded: false)): \(failure) The changes apply until SheepLog quits; they are saved again with the next change.")
+        } else {
+            settingsSaveFailing = false
+        }
+    }
+
     func report(_ message: String, detail: String? = nil) {
         // Between two sheets (the next one is on its way) a new error waits its turn too: shown
         // at once, it jumped the queue and the waiting one went to the back.

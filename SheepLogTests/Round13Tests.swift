@@ -268,6 +268,13 @@ final class Round13Tests: XCTestCase {
                                   l.add(0, "R1", "OSPF neighbor 10.0.0.2 changed to Down: dead timer expired", sev: 3)
                                   l.add(40, "R1", "OSPF neighbor 10.0.0.2 changed to Full: loading done", sev: 5)
                               }))
+        // Round 15: a peer that only steps between states for minutes has not come up.
+        func steps(_ times: [Double]) -> (inout Lines) -> Void {
+            { l in for (k, t) in times.enumerated() { l.add(t, "R1", "BGP peer 10.0.0.9 changed state from \(k % 2 == 0 ? "Idle to Connect" : "Connect to Idle")", sev: 5) } }
+        }
+        cases.append(RuleCase(rule: "routing.notUp", severity: .bad,
+                              title: "BGP neighbor 10.0.0.9 on R1 has not come up: 3 state changes from \(c(0)) to \(c(120)), none to Established.",
+                              make: logs(steps([0, 60, 120])), below: logs(steps([0, 60, 110]))))
         cases.append(RuleCase(rule: "config.change", severity: .info, title: "Configuration changed on R1 by admin at \(c(0)).",
                               make: logs { $0.add(0, "R1", "%SYS-5-CONFIG_I: Configured from console by admin on vty0 (10.1.0.5)") }))
         cases.append(RuleCase(rule: "device.restart", severity: .warn, title: "R1 restarted at \(c(0)).",
@@ -895,9 +902,9 @@ final class Round13Tests: XCTestCase {
         let dir = Round12Tests.testsDir.appending(path: "corpus")
         let other = try String(contentsOf: dir.appending(path: "other.log"), encoding: .utf8).split(whereSeparator: \.isNewline).map(String.init)
         let forti = try String(contentsOf: dir.appending(path: "fortigate.log"), encoding: .utf8).split(whereSeparator: \.isNewline).map(String.init)
-        XCTAssertEqual(other.count, 53, "round 14 added lines 39–53 (Round14Tests reads them)")
-        XCTAssertEqual(forti.count, 10)
-        let read = (other[21..<38] + forti[8...]).map { LineClassifier.line(parsedLine($0, from: "10.9.9.9")).map { "\($0)" } ?? "nil" }
+        XCTAssertEqual(other.count, 63, "round 14 added lines 39–53 (Round14Tests reads them), round 15 lines 54–63 (Round15Tests)")
+        XCTAssertEqual(forti.count, 14, "round 15 added lines 11–14")
+        let read = (other[21..<38] + forti[8..<10]).map { LineClassifier.line(parsedLine($0, from: "10.9.9.9")).map { "\($0)" } ?? "nil" }
         XCTAssertEqual(read, [
             "routing(proto: \"OSPF\", neighbor: \"10.0.12.2\", up: false)", "routing(proto: \"OSPF\", neighbor: \"10.0.12.2\", up: true)",
             "config(user: Optional(\"netops\"))", "hardware(SheepLog.HardwareKind.psu, recovered: false)",

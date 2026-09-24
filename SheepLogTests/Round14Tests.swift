@@ -466,7 +466,7 @@ final class Round14Tests: XCTestCase {
         let dir = Round12Tests.testsDir.appending(path: "corpus")
         let other = try String(contentsOf: dir.appending(path: "other.log"), encoding: .utf8).split(whereSeparator: \.isNewline).map(String.init)
         let cx = try String(contentsOf: dir.appending(path: "arubacx.log"), encoding: .utf8).split(whereSeparator: \.isNewline).map(String.init)
-        let read = (other[38...] + cx[8...]).map { LineClassifier.line(parsedLine($0, from: "10.9.9.9")).map { "\($0)" } ?? "nil" }
+        let read = (other[38..<53] + cx[8..<10]).map { LineClassifier.line(parsedLine($0, from: "10.9.9.9")).map { "\($0)" } ?? "nil" }
         XCTAssertEqual(read, [
             "link(iface: \"Ethernet5\", up: false)", "link(iface: \"Ethernet5\", up: true)", "config(user: Optional(\"admin\"))",
             "routingNotice(proto: \"BGP\", neighbor: \"10.0.0.2\", reason: \"Hold Timer Expired Error/Unspecific\", sent: false)",
@@ -579,7 +579,8 @@ final class Round14Tests: XCTestCase {
             ("<187>Sep 23 10:42:01 R1 bgpd[99]: %BGP-3-BADPATH: AS path loop detected from neighbor 10.0.0.7", "nil"),
             ("<189>Sep 23 10:42:02 R1 isisd[99]: IS-IS topology changed, SPF run", "nil"),
             // A BGP session's steps between Idle and Established are no adjacency change.
-            ("<189>Sep 23 10:42:10 LEAF-EOS-1 Bgp: %BGP-5-ADJCHANGE: peer 10.0.0.2 (VRF default AS 65002) old state Idle event Start new state Connect", "nil"),
+            ("<189>Sep 23 10:42:10 LEAF-EOS-1 Bgp: %BGP-5-ADJCHANGE: peer 10.0.0.2 (VRF default AS 65002) old state Idle event Start new state Connect",
+             "routingStep(proto: \"BGP\", neighbor: \"10.0.0.2\")"),
             ("<189>Sep 23 10:42:11 LEAF-EOS-1 Bgp: %BGP-5-ADJCHANGE: peer 10.0.0.2 (VRF default AS 65002) old state Idle event RecvOpen new state Established",
              "routing(proto: \"BGP\", neighbor: \"10.0.0.2\", up: true)"),
             ("<189>Sep 23 10:42:12 LEAF-EOS-1 Bgp: %BGP-5-ADJCHANGE: peer 10.0.0.2 (VRF default AS 65002) old state Established event Stop new state Idle",

@@ -272,8 +272,9 @@ final class CorpusTests: XCTestCase {
         await expect(s, "vendor:cppm sev:<=warn", ["clearpass:0", "clearpass:2", "clearpass:3", "clearpass:4"])
         // Huawei
         await expect(s, #"huawei IFNET/4 "DOWN state""#, ["huawei:0", "huawei:7"])
-        await expect(s, "vendor:vrp f:NeighborAddress=10.0.0.", ["huawei:2"])
-        await expect(s, "huawei sev:<=err -OSPF", ["huawei:5"])
+        // (round 15: HW-NE40E's OSPF neighbor 10.0.0.10 too; its BGP peer lines are error-level)
+        await expect(s, "vendor:vrp f:NeighborAddress=10.0.0.", ["huawei:2", "huawei:10", "huawei:11", "huawei:12"])
+        await expect(s, "huawei sev:<=err -OSPF", ["huawei:5", "huawei:8", "huawei:9"])
         // Check Point
         await expect(s, #"checkpoint action:"Drop""#, ["checkpoint:0"])
         await expect(s, "checkpoint f:action=Drop", ["checkpoint:0"])
@@ -335,10 +336,10 @@ final class CorpusTests: XCTestCase {
         await expect(s, "foo:bar", [])
         await expect(s, "service:22", ["checkpoint:0"])
         // A log key whose value does not parse falls back to the line's field of that name.
-        await expect(s, "severity:high", ["checkpoint:3"])
+        await expect(s, "severity:high", ["checkpoint:3", "paloalto:10"])
         // …but a severity word that parses is the syslog severity (PAN-OS "critical" → error).
         await expect(s, "severity:informational vendor:palo",
-                     ["paloalto:0", "paloalto:2", "paloalto:6", "paloalto:7", "paloalto:8", "paloalto:9"])
+                     ["paloalto:0", "paloalto:2", "paloalto:6", "paloalto:7", "paloalto:8", "paloalto:9", "paloalto:11", "paloalto:13"])
         await expect(s, "proto:udp vendor:palo", ["paloalto:0"])
         // Numbers are whole: 44 is not 443/445; leading zeros do not matter.
         await expect(s, "f:dport=44", [])

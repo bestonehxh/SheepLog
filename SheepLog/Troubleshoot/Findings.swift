@@ -214,6 +214,10 @@ nonisolated enum FindingRules {
     static let recentBoot: UInt32 = 60_000        // ticks = 10 min
     /// A restart line this soon after a requested reload of the same device is that reload.
     static let plannedBoot: Double = 1_800
+    /// A routing neighbor that only steps between states (never Full / Established) this many
+    /// times over at least this long has not come up (a session coming up takes seconds).
+    static let notUpSteps = 3
+    static let notUpSpan: Double = 120
     /// NXDOMAIN counts as a DNS failure from this many different names (one mistyped name, with
     /// its search-domain variants, is the user's typo, not the resolver's fault).
     static let nxNames = 3
@@ -394,6 +398,9 @@ nonisolated enum FactKind: Sendable {
     /// `%BGP-3-NOTIFICATION`): why the session that the adjacency line reports ended — never a
     /// down of its own (with the ADJCHANGE after it, one reset read as two downs, "flapping").
     case routingNotice(proto: String, neighbor: String, reason: String, sent: Bool)
+    /// A step between states that is neither up nor down (BGP Idle → Connect → Active, OSPF
+    /// Init → 2-Way → ExStart): a peer that only ever does these never came up.
+    case routingStep(proto: String, neighbor: String)
     case reboot(cold: Bool, planned: Bool)
     case loginFail(ip: String?, user: String?)
     case loginOK(ip: String?, user: String?)
@@ -510,10 +517,17 @@ nonisolated final class Needles: @unchecked Sendable {
     private init() {
         let words: [[String]] = [
             ["link", "-line", "line protocol", "turned into down state", "turned into up state", "if_up", "if_down",
-             "interface-stat-change", "interface status changed", ", state down", ", state up", "status changed from"],
+             "interface-stat-change", "interface status changed", ", state down", ", state up", "status changed from",
+             // FRR / Quagga zebra: "interface eth0 index 2 changed <UP,BROADCAST,MULTICAST>".
+             "multicast>", "running>", "lower_up>"],
             ["power", "psu", "fan", "temperat", "thermal", "poe", "overheat", "pem"],
             ["stp", "topology", "bpdu", "loop", "storm", "spanning", "root bridge"],
-            ["neighbo", "adjchg", "adjchange", "nbr"],
+            // "peer" / "bgp" / "ospf": Huawei `BGP/3/STATE_CHG_UPDOWN` ("The status of the peer …
+            // changed from ESTABLISHED to IDLE"), PAN-OS "BGP peer session left established
+            // state" and Junos `bgp_hold_timeout: NOTIFICATION sent to …` never say "neighbor"
+            // (they were never read). `routing` still needs a protocol, and a neighbor it can
+            // name unless the line says "neighbor".
+            ["neighbo", "adjchg", "adjchange", "nbr", "peer", "bgp", "ospf"],
             ["reboot", "restart", "reload", "cold start", "coldstart", "booted", "boot up", "bootup", "booting"],
             ["login", "logon", "log in", "logging in", "logged in", "password", "authenticat", "invalid user"],
             ["config", "commit", "write mem", "-111010", "-111008"],
@@ -687,6 +701,7 @@ nonisolated enum LineClassifier {
             guard let iface else { return nil }
             return .link(iface: iface, up: status.hasPrefix("up"))
         }
+        if let k = kernelFlagsLink(e, c) { return k.up.map { .link(iface: k.iface, up: $0) } }
         var up: Bool?
         if let s = e.field("OperStatus") { up = s.uppercased().hasPrefix("UP") }
         // Ruckus ICX: "Interface ethernet 1/1/5, state down"; Meraki MS: "port 3 status changed
@@ -710,6 +725,20 @@ nonisolated enum LineClassifier {
         guard let up else { return nil }
         guard let iface = interfaceName(e) else { return nil }
         return .link(iface: iface, up: up)
+    }
+
+    /// FRR / Quagga zebra's "interface eth0 index 2 changed <UP,BROADCAST,MULTICAST>": the
+    /// kernel's flags — RUNNING (carrier) gone with UP (admin) kept is the link down, RUNNING
+    /// back is up, no UP is an admin's shutdown (nothing), a loopback is nothing. nil: not
+    /// such a line; `up` nil: such a line that is no link event.
+    static func kernelFlagsLink(_ e: LogEntry, _ c: UnsafePointer<CChar>) -> (iface: String, up: Bool?)? {
+        let m = e.message
+        guard CText.has(c, " index "), let open = m.lastIndex(of: "<"), let close = m[open...].firstIndex(of: ">"),
+              let iface = FText.token(after: "interface ", in: m) else { return nil }
+        let flags = Set(m[m.index(after: open)..<close].uppercased().split(separator: ",").map(String.init))
+        guard !flags.isDisjoint(with: ["BROADCAST", "POINTOPOINT", "MULTICAST", "LOOPBACK", "RUNNING", "UP"]) else { return nil }
+        if flags.contains("LOOPBACK") || !flags.contains("UP") { return (iface, nil) }
+        return (iface, flags.contains("RUNNING") || flags.contains("LOWER_UP"))
     }
 
     static func interfaceName(_ e: LogEntry) -> String? {
@@ -842,17 +871,24 @@ nonisolated enum LineClassifier {
         else if CText.has(c, "bfd") || CText.contains(p, "BFD") { proto = "BFD" }
         else { return nil }
         var up: Bool?
-        if let s = e.field("NeighborCurrentState") { up = !s.lowercased().hasPrefix("down") && !s.lowercased().hasPrefix("init") }
-        // Arista / FRR: "old state X event Y new state Z" — a session reaching Established is up,
-        // one leaving it is down, and the steps between (Idle → Connect → OpenSent) are neither
-        // (the word "Idle" in "old state Idle … new state Connect" read as a down).
-        else if let r = e.message.range(of: "new state ", options: .caseInsensitive) {
-            let new = e.message[r.upperBound...].prefix { $0.isLetter }.lowercased()
-            let old = FText.token(after: "old state ", in: e.message)?.lowercased() ?? ""
-            if new == "established" || new == "full" { up = old == new ? nil : true }
-            else if old == "established" || old == "full" { up = false }
-            else { return nil }
+        // A change from one state to another (Arista / FRR "old state X … new state Y", Junos
+        // "changed state from X to Y", Huawei "changed from ESTABLISHED to IDLE" and its
+        // NeighborPreviousState / NeighborCurrentState, FRR / Quagga / FortiOS ospfd "Full ->
+        // Deleted"): reaching Full / Established is up, leaving it is down, reaching Down is
+        // down, and the steps between are neither ("Idle" in Junos's "from Idle to Connect"
+        // read as a down; Huawei's Down → Init was a down and Init → 2Way an up, so one OSPF
+        // reset read as "went down 2 times" and a neighbor stuck before Full as back up).
+        if let change = stateChange(e) {
+            guard let u = transitionUp(old: change.old, new: change.new) else {
+                guard change.old != change.new else { return nil }
+                let neighbor = e.field("NeighborAddress") ?? e.field("PeerAddress") ?? neighborAddress(e.message) ?? "?"
+                return neighbor == "?" ? nil : .routingStep(proto: proto, neighbor: neighbor)
+            }
+            up = u
         }
+        // PAN-OS SYSTEM routing: "BGP peer session entered / left established state".
+        else if CText.hasAny(c, ["entered established", "enter-established", "enter established"]) { up = true }
+        else if CText.hasAny(c, ["left established", "left-established", "leave established"]) { up = false }
         else if CText.hasAny(c, ["to down", "neighbor down", "neighbour down", "changed to down", "state down", " down", "idle", "dead timer", "hold time expired"]) {
             up = CText.hasAny(c, ["to full", "to up"]) && !CText.has(c, "to down") ? true : false
         } else if CText.hasAny(c, ["to full", " up", "established", "to up", "went full"]) {
@@ -860,10 +896,76 @@ nonisolated enum LineClassifier {
             up = true
         }
         guard let up else { return nil }
-        let neighbor = e.field("NeighborAddress") ?? e.field("PeerAddress")
-            ?? FText.firstIPv4(after: "neighbor", in: e.message) ?? FText.firstIPv4(after: "nbr", in: e.message)
-            ?? FText.firstIPv4(after: "peer", in: e.message) ?? "?"
+        let neighbor = e.field("NeighborAddress") ?? e.field("PeerAddress") ?? neighborAddress(e.message) ?? "?"
+        // A line that names no neighbor is about one only when it says so ("neighbor down"):
+        // "bgpd shutting down" or "OSPF process 1 is down" are no neighbor that went down.
+        if neighbor == "?", !CText.hasAny(c, ["neighbo", "nbr", "adjch"]) { return nil }
         return .routing(proto: proto, neighbor: neighbor, up: up)
+    }
+
+    /// The neighbor a routing line names: the first IPv4 after "neighbor" / "nbr" / "peer", else
+    /// an IPv6 one there (FRR "neighbor 2001:db8::2 Down": every IPv6 peer of a router was "?",
+    /// one neighbor, so one peer coming up hid another that stayed down).
+    static func neighborAddress(_ m: String) -> String? {
+        for marker in ["neighbor", "nbr", "peer"] {
+            if let v4 = FText.firstIPv4(after: marker, in: m) { return v4 }
+        }
+        for marker in ["neighbor", "nbr", "peer"] {
+            if let v6 = FText.firstIPv6(after: marker, in: m) { return v6 }
+        }
+        return nil
+    }
+
+    /// Adjacency states as the vendors spell them, reduced to a word ("FULL/DR" → full,
+    /// "2-Way" → 2way, "ESTABLISHED." → established).
+    static let adjacencyStates: Set<String> = ["established", "idle", "connect", "active", "opensent", "openconfirm", "full", "down",
+                                               "init", "attempt", "2way", "exstart", "exchange", "loading", "deleted", "up"]
+
+    static func stateWord(_ s: Substring) -> String? {
+        let w = s.drop { !$0.isLetter && !$0.isNumber }.prefix { $0.isLetter || $0.isNumber || $0 == "-" }
+            .lowercased().replacingOccurrences(of: "-", with: "")
+        return adjacencyStates.contains(w) ? w : nil
+    }
+
+    /// The previous and the new adjacency state a line reports (the previous one may be unknown).
+    static func stateChange(_ e: LogEntry) -> (old: String?, new: String)? {
+        if let cur = e.field("NeighborCurrentState"), let new = stateWord(Substring(cur)) {
+            return (e.field("NeighborPreviousState").flatMap { stateWord(Substring($0)) }, new)
+        }
+        let m = e.message
+        if let r = m.range(of: "new state ", options: .caseInsensitive), let new = stateWord(m[r.upperBound...]) {
+            let old = m.range(of: "old state ", options: .caseInsensitive).flatMap { stateWord(m[$0.upperBound...]) }
+            return (old, new)
+        }
+        // "from X to Y", both of them states (not "received from neighbor 10.0.0.2 to …").
+        var search = m.startIndex..<m.endIndex
+        while let r = m.range(of: "from ", options: .caseInsensitive, range: search) {
+            search = r.upperBound..<m.endIndex
+            let rest = m[r.upperBound...]
+            guard let old = stateWord(rest), let to = rest.range(of: " to ", options: .caseInsensitive),
+                  rest.distance(from: rest.startIndex, to: to.lowerBound) <= 14, let new = stateWord(rest[to.upperBound...]) else { continue }
+            return (old, new)
+        }
+        // ospfd's AdjChg: "… on eth0:10.0.0.1: Full -> Deleted (InactivityTimer)".
+        if let r = m.range(of: " -> ") {
+            let before = m[..<r.lowerBound].split(separator: " ").last ?? ""
+            if let new = stateWord(m[r.upperBound...]), let old = stateWord(before) { return (old, new) }
+        }
+        return nil
+    }
+
+    /// Up (reached Full / Established), down (left it, or reached Down / Deleted), or nothing
+    /// (a step between, or no change).
+    static func transitionUp(old: String?, new: String) -> Bool? {
+        let upStates: Set<String> = ["full", "established", "up"]
+        if old == new { return nil }
+        if upStates.contains(new) { return true }
+        if let old, upStates.contains(old) { return false }
+        if new == "down" || new == "deleted" { return false }
+        // BGP Idle from anything but Established (Active → Idle while it retries a peer that
+        // is not there) is the session not up yet; with no previous state, the session gone.
+        if new == "idle", old == nil { return false }
+        return nil
     }
 
     /// `%BGP-3-NOTIFICATION: sent to neighbor 10.0.0.2 4/0 (hold time expired) 0 bytes` (IOS),
@@ -874,14 +976,27 @@ nonisolated enum LineClassifier {
         let m = e.message
         let sent: Bool
         let after: String
-        if let r = m.range(of: "sent to neighbor", options: .caseInsensitive) { sent = true; after = String(m[r.upperBound...]) }
-        else if let r = m.range(of: "received from neighbor", options: .caseInsensitive) { sent = false; after = String(m[r.upperBound...]) }
-        else { return nil }
+        // Junos: `bgp_peer_mgmt_clear:6969: NOTIFICATION sent to 10.0.0.2 (External AS 65002):
+        // code 6 (Cease) subcode 4 (Administratively Reset), Reason: …` (no "neighbor": it was
+        // never read, and the Junos peer's down had no reason).
+        if let r = m.range(of: "sent to neighbor", options: .caseInsensitive) ?? m.range(of: "notification sent to", options: .caseInsensitive) {
+            sent = true; after = String(m[r.upperBound...])
+        } else if let r = m.range(of: "received from neighbor", options: .caseInsensitive)
+                    ?? m.range(of: "notification received from", options: .caseInsensitive) {
+            sent = false; after = String(m[r.upperBound...])
+        } else { return nil }
         guard let neighbor = FText.firstIPv4(after: "", in: after) ?? FText.token(after: " ", in: after) else { return nil }
-        // The reason: the parentheses after the "code/subcode" pair.
+        // The reason: the parentheses after the "code/subcode" pair (IOS, Arista), or Junos's
+        // "code 6 (Cease) subcode 4 (Administratively Reset)".
         var reason = ""
         if let code = after.range(of: #"\d+/\d+\s*\("#, options: .regularExpression) {
             reason = String(after[code.upperBound...].prefix { $0 != ")" })
+        } else if let code = after.range(of: #"code \d+ \("#, options: .regularExpression) {
+            reason = String(after[code.upperBound...].prefix { $0 != ")" })
+            let tail = after[code.upperBound...]
+            if let sub = tail.range(of: #"^[^)]*\) subcode \d+ \("#, options: .regularExpression) {
+                reason += "/" + String(tail[sub.upperBound...].prefix { $0 != ")" })
+            }
         }
         return .routingNotice(proto: "BGP", neighbor: neighbor, reason: reason, sent: sent)
     }
@@ -1190,9 +1305,14 @@ nonisolated extension FindingRules {
         struct Key: Hashable { let device: String; let proto: String; let neighbor: String }
         var groups: [Key: [(t: Date, up: Bool, f: LineFact)]] = [:]
         var notices: [Key: [(t: Date, reason: String, sent: Bool, f: LineFact)]] = [:]
+        var steps: [Key: [(t: Date, f: LineFact)]] = [:]
         for f in ctx.facts {
             if case .routingNotice(let proto, let nb, let reason, let sent) = f.kind {
                 notices[Key(device: ctx.device(f), proto: proto, neighbor: nb), default: []].append((ctx.time(f), reason, sent, f))
+                continue
+            }
+            if case .routingStep(let proto, let nb) = f.kind {
+                steps[Key(device: ctx.device(f), proto: proto, neighbor: nb), default: []].append((ctx.time(f), f))
                 continue
             }
             guard case .routing(let proto, let nb, let up) = f.kind else { continue }
@@ -1201,7 +1321,9 @@ nonisolated extension FindingRules {
         var out: [Finding] = []
         for (key, raw) in groups {
             let items = raw.sorted { $0.t < $1.t }
-            let downs = items.filter { !$0.up }
+            // Outages, not down lines: a down right after a down is the same outage (OSPF's
+            // Full → Init then Init → Down, IOS's ADJCHANGE and its BGP_SESSION twin).
+            let downs = items.indices.filter { i in !items[i].up && (i == 0 || items[i - 1].up) }.map { items[$0] }
             guard !downs.isEmpty else { continue }
             let stillDown = !items.last!.up
             let address = items[0].f.address
@@ -1234,6 +1356,29 @@ nonisolated extension FindingRules {
                             nextSteps: ["Check the \(key.proto) neighbor table on \(key.device) (show ip \(key.proto.lowercased()) neighbor).",
                                         "Check the link towards \(nb) for flaps and errors."])
             out.append(f)
+        }
+        // A neighbor that only ever steps between states (BGP Idle → Connect → Active → Idle,
+        // OSPF stuck in ExStart) for minutes never came up. Its steps were "downs" before round
+        // 15 ("went down and has not come back"); read as nothing, it was silent.
+        for (key, raw) in steps where groups[key] == nil {
+            let items = raw.sorted { $0.t < $1.t }
+            guard items.count >= notUpSteps, let first = items.first, let last = items.last,
+                  last.t.timeIntervalSince(first.t) >= notUpSpan else { continue }
+            let nb = key.neighbor
+            let target = key.proto == "OSPF" || key.proto == "IS-IS" ? "Full" : "Established"
+            let why = key.proto == "OSPF"
+                ? "The adjacency keeps starting and stops before Full: an MTU mismatch (stuck in ExStart / Exchange), an area, timer or authentication mismatch, or hellos that only one side hears."
+                : "The session keeps starting and fails before it is established: the peer is unreachable or refuses TCP \(key.proto == "BGP" ? "179" : "connections"), is not configured for this router (address or AS), or the authentication (MD5 / TTL security) does not match."
+            out.append(Finding(id: "routing.notUp|\(key.device)|\(key.proto)|\(nb)", rule: "routing.notUp", severity: .bad, category: .routing, source: .logs,
+                               title: "\(key.proto) neighbor \(nb) on \(key.device) has not come up: \(items.count) state changes from \(FText.clock(first.t)) to \(FText.clock(last.t)), none to \(target).",
+                               detail: why + " Nothing is learned from \(nb) meanwhile.",
+                               evidence: logEvidence(ids: items.map(\.f.id), trapIDs: [],
+                                                     query: ctx.hostTerm(address: first.f.address, name: key.device) + " " + key.proto.lowercased() + " " + FText.quote(nb),
+                                                     trapQuery: ""),
+                               firstSeen: first.t, lastSeen: last.t, count: items.count,
+                               device: key.device, deviceAddress: first.f.address,
+                               nextSteps: ["Check \(nb) answers from \(key.device) (ping with the session's source address)\(key.proto == "BGP" ? " and that TCP 179 is allowed" : "").",
+                                           "Compare the neighbor configuration on both sides (\(key.proto == "OSPF" ? "area, MTU, timers, authentication" : "addresses, AS numbers, authentication"))."]))
         }
         return out
     }
@@ -2177,17 +2322,58 @@ nonisolated extension FindingRules {
     /// rate. A smaller value was read as "counters cleared" (the walk's totals) and the wrap's
     /// discards were lost or the rate taken over all time. A wrap needs the earlier reading in
     /// the counter's upper half and the new one in its lower half; anything else smaller is a
-    /// `clear counters` (nil).
-    static func delta32(_ now: UInt64, _ before: UInt64) -> UInt64? {
+    /// `clear counters` (nil) — and so is a "wrap" of more than the port could have carried
+    /// (`limit`, `maxFrames`): a counter cleared from its upper half (3,000,000,000 → 5) read as
+    /// 1,294,967,301 errors in five minutes on a 1 Gb/s port that can carry 446 million frames.
+    static func delta32(_ now: UInt64, _ before: UInt64, limit: UInt64? = nil) -> UInt64? {
         if now >= before { return now - before }
         let half: UInt64 = 1 << 31
         guard before <= UInt64(UInt32.max), before >= half, now < half else { return nil }
-        return now + (UInt64(UInt32.max) + 1) - before
+        let d = now + (UInt64(UInt32.max) + 1) - before
+        if let limit, d > limit { return nil }
+        return d
+    }
+
+    /// The most frames a port of `speedBits` can carry in `seconds` (minimum frames: 84 bytes on
+    /// the wire), with room to spare; nil when the speed is not known.
+    static func maxFrames(speedBits: UInt64, seconds: Double) -> UInt64? {
+        guard speedBits > 0, seconds > 0 else { return nil }
+        let frames = Double(speedBits) / 672 * seconds * 1.1 + 10_000
+        return frames >= Double(UInt64.max) ? nil : UInt64(frames)
+    }
+
+    /// The device restarted between two walks: its uptime at the second is shorter than the
+    /// time between them, or shorter than it was at the first (clocks of the two walks aside).
+    static func restartedBetween(_ before: SNMPSnapshot, _ now: SNMPSnapshot) -> Bool {
+        guard let up = now.sysUpTime else { return false }
+        if Double(up) / 100 < now.taken.timeIntervalSince(before.taken) { return true }
+        if let was = before.sysUpTime, up < was { return true }
+        return false
+    }
+
+    static let ifCounterDiscontinuityTime = OID([1, 3, 6, 1, 2, 1, 31, 1, 1, 1, 19])
+
+    /// Both walks' counters of this ifIndex count the same port since the same start: the same
+    /// ifName / ifDescr (a module pulled and another put in may give its ifIndex to a new port,
+    /// whose small counters read as a wrap of the old port's big ones) and the same
+    /// ifCounterDiscontinuityTime when the agent has it (RFC 2863 §3.1.5).
+    static func sameCounters(_ r: InterfaceRow, in s: SNMPSnapshot, as p: InterfaceRow, in old: SNMPSnapshot) -> Bool {
+        // ifDescr (ifTable, in every Interfaces walk); the name only when one walk has no
+        // ifDescr (a walk without ifXTable names ports by ifDescr, one with it by ifName).
+        if !r.descr.isEmpty, !p.descr.isEmpty { if r.descr != p.descr { return false } }
+        else if r.name != p.name { return false }
+        return sameDiscontinuity(r.index, s, old)
+    }
+
+    static func sameDiscontinuity(_ idx: UInt32, _ s: SNMPSnapshot, _ old: SNMPSnapshot) -> Bool {
+        let oid = ifCounterDiscontinuityTime.appending(idx)
+        guard let a = s.values[oid], let b = old.values[oid] else { return true }
+        return a == b
     }
 
     /// Packets through one direction between two walks: the Counter64 columns when both walks
     /// have them (they never wrap: smaller means cleared), else the Counter32 ones, column by column.
-    static func packetDelta(_ now: PortFlow, _ before: PortFlow) -> UInt64? {
+    static func packetDelta(_ now: PortFlow, _ before: PortFlow, limit: UInt64? = nil) -> UInt64? {
         if !now.pHC.isEmpty, Set(now.pHC.keys) == Set(before.pHC.keys) {
             var sum: UInt64 = 0
             for (c, v) in now.pHC { guard let b = before.pHC[c], v >= b else { return nil }; sum &+= v - b }
@@ -2195,7 +2381,7 @@ nonisolated extension FindingRules {
         }
         if !now.p32.isEmpty, Set(now.p32.keys) == Set(before.p32.keys) {
             var sum: UInt64 = 0
-            for (c, v) in now.p32 { guard let b = before.p32[c], let d = delta32(v, b) else { return nil }; sum &+= d }
+            for (c, v) in now.p32 { guard let b = before.p32[c], let d = delta32(v, b, limit: limit) else { return nil }; sum &+= d }
             return sum
         }
         return nil
@@ -2248,14 +2434,22 @@ nonisolated extension FindingRules {
                                              recent.isEmpty ? "Check the ports that should be up." : "Check what was connected to \(names[recent[0].index] ?? "") and whether it has power."],
                                     count: downs.count, taken: s.taken))
                 }
-                // Errors: growth since the previous walk, or a total.
-                let before = prev.map { Dictionary($0.interfaces.map { ($0.index, $0) }, uniquingKeysWith: { a, _ in a }) }
+                // Errors: growth since the previous walk, or a total. Each Counter32 column on
+                // its own (ifInErrors wrapping past 4,294,967,295 made the in + out sum smaller:
+                // the growth was lost); a port whose counters started again (cleared, the device
+                // restarted, a module swapped under the same ifIndex) compares nothing.
+                let restarted = prev.map { Self.restartedBetween($0, s) } ?? false
+                let before = restarted ? nil : prev.map { Dictionary($0.interfaces.map { ($0.index, $0) }, uniquingKeysWith: { a, _ in a }) }
                 var grown: [(String, UInt64)] = []
                 var totals: [(String, UInt64)] = []
                 for r in s.interfaces where r.totalErrors > 0 {
                     let n = names[r.index] ?? "\(r.index)"
-                    if let p = before?[r.index] {
-                        let d = r.totalErrors >= p.totalErrors ? r.totalErrors - p.totalErrors : 0
+                    if let p = before?[r.index], let old = prev, Self.sameCounters(r, in: s, as: p, in: old) {
+                        // A column that went down without wrapping was cleared since: what it
+                        // holds now all came after the clear, between the walks.
+                        let limit = Self.maxFrames(speedBits: r.speedBits, seconds: s.taken.timeIntervalSince(old.taken))
+                        let d = (Self.delta32(r.inErrors, p.inErrors, limit: limit) ?? r.inErrors)
+                            &+ (Self.delta32(r.outErrors, p.outErrors, limit: limit) ?? r.outErrors)
                         if d > 0 { grown.append((n, d)) }
                     } else {
                         totals.append((n, r.totalErrors))
@@ -2264,16 +2458,18 @@ nonisolated extension FindingRules {
                 if !grown.isEmpty, let p = prev {
                     let top = grown.sorted { $0.1 > $1.1 }
                     out.append(base("errors", "snmp.errorsGrowing", .warn,
-                                    "Interface errors are growing on \(name): \(top.prefix(4).map { "\($0.0) +\(Format.count(Int($0.1)))" }.joined(separator: ", ")) in \(FText.duration(s.taken.timeIntervalSince(p.taken))).",
+                                    "Interface errors are growing on \(name): \(top.prefix(4).map { "\($0.0) +\(Format.count(Int(clamping: $0.1)))" }.joined(separator: ", ")) in \(FText.duration(s.taken.timeIntervalSince(p.taken))).",
                                     "ifInErrors / ifOutErrors went up between two walks: frames are arriving damaged (CRC) or cannot be sent — a bad cable or optic, a duplex mismatch, or interference. Errors turn into retransmissions and slow applications.",
                                     ["Check the cable / optic on \(top[0].0) (show interface \(top[0].0): CRC, runts, input errors).", "Check both ends agree on speed and duplex."],
                                     count: top.count, taken: s.taken))
                 } else if !totals.isEmpty {
                     let top = totals.sorted { $0.1 > $1.1 }
+                    let since = restarted
+                        ? "These are counts since \(name) restarted (\(FText.duration(Double(s.sysUpTime ?? 0) / 100)) before the walk): SheepLog cannot tell whether they came with the restart or after it. Walk the Interfaces table again in a few minutes: SheepLog compares the two walks and says whether they grow."
+                        : "These are totals since the counters were last cleared, so they may be old. Walk the Interfaces table again in a few minutes: SheepLog compares the two walks and says whether they grow."
                     out.append(base("errors", "snmp.errors", .info,
-                                    "\(top.count) interface\(top.count == 1 ? "" : "s") on \(name) \(top.count == 1 ? "has" : "have") error counts: \(top.prefix(4).map { "\($0.0) \(Format.count(Int($0.1)))" }.joined(separator: ", ")).",
-                                    "These are totals since the counters were last cleared, so they may be old. Walk the Interfaces table again in a few minutes: SheepLog compares the two walks and says whether they grow.",
-                                    ["Run Interfaces again on the SNMP Test pane in a few minutes."], count: top.count, taken: s.taken))
+                                    "\(top.count) interface\(top.count == 1 ? "" : "s") on \(name) \(top.count == 1 ? "has" : "have") error counts: \(top.prefix(4).map { "\($0.0) \(Format.count(Int(clamping: $0.1)))" }.joined(separator: ", ")).",
+                                    since, ["Run Interfaces again on the SNMP Test pane in a few minutes."], count: top.count, taken: s.taken))
                 }
             }
             // Half duplex: the newest result with dot3StatsDuplexStatus (a walk of dot3StatsTable,
@@ -2307,11 +2503,10 @@ nonisolated extension FindingRules {
         let now = portFlows(cur.values)
         // A device that restarted between the walks cleared its counters: smaller values are
         // then a new start, not a wrap (its uptime is shorter than the time between the walks).
-        let restarted: Bool = {
-            guard let p = prev, let up = cur.sysUpTime else { return false }
-            return Double(up) / 100 < cur.taken.timeIntervalSince(p.taken)
-        }()
+        let restarted = prev.map { restartedBetween($0, cur) } ?? false
         let before = restarted ? nil : prev.map { portFlows($0.values) }
+        let rowsNow = Dictionary(cur.interfaces.map { ($0.index, $0) }, uniquingKeysWith: { a, _ in a })
+        let rowsBefore = Dictionary((prev?.interfaces ?? []).map { ($0.index, $0) }, uniquingKeysWith: { a, _ in a })
         let dirWord = ["in", "out"]
         var growing: [(text: String, weight: Double)] = []
         var totals: [(text: String, weight: Double)] = []
@@ -2322,14 +2517,22 @@ nonisolated extension FindingRules {
                 let pkts = flows[dir].packets
                 // Per 10,000 packets through the port (a received packet that was discarded is not
                 // in ifInUcastPkts; one that was to be sent is in ifOutUcastPkts).
-                func rate(_ d: UInt64, _ p: UInt64) -> Double { Double(d) / Double(max(1, p &+ (dir == 0 ? d : 0))) * 10_000 }
-                if let b = before?[idx]?[dir], let d0 = b.discards, let d = delta32(disc, d0) {
+                // Never more than all of them (an agent's absurd counter overflowed `p + d` to a
+                // rate of 10^23 per 10,000).
+                func rate(_ d: UInt64, _ p: UInt64) -> Double {
+                    let (sum, over) = p.addingReportingOverflow(dir == 0 ? d : 0)
+                    return min(10_000, Double(d) / Double(max(1, over ? UInt64.max : sum)) * 10_000)
+                }
+                let same = rowsNow[idx].flatMap { r in rowsBefore[idx].map { p in sameCounters(r, in: cur, as: p, in: prev!) } }
+                    ?? prev.map { sameDiscontinuity(idx, cur, $0) } ?? false
+                let limit = prev.flatMap { p in rowsNow[idx].flatMap { maxFrames(speedBits: $0.speedBits, seconds: cur.taken.timeIntervalSince(p.taken)) } }
+                if same, let b = before?[idx]?[dir], let d0 = b.discards, let d = delta32(disc, d0, limit: limit) {
                     guard d > 0 else { continue }
-                    if let dp = packetDelta(flows[dir], b) {
+                    if let dp = packetDelta(flows[dir], b, limit: limit) {
                         let r = rate(d, dp)
-                        if r >= discardRate { growing.append(("\(n) \(dirWord[dir]) \(rateText(r)) per 10,000 packets (+\(Format.count(Int(d))))", r)) }
+                        if r >= discardRate { growing.append(("\(n) \(dirWord[dir]) \(rateText(r)) per 10,000 packets (+\(Format.count(Int(clamping: d))))", r)) }
                     } else if d >= discardGrowth {
-                        growing.append(("\(n) \(dirWord[dir]) +\(Format.count(Int(d)))", Double(d)))
+                        growing.append(("\(n) \(dirWord[dir]) +\(Format.count(Int(clamping: d)))", Double(d)))
                     }
                 } else if let p = pkts {
                     // One walk (or the counters were reset since): totals since they were cleared.
@@ -2452,6 +2655,19 @@ nonisolated enum FText {
     static func isIPv4(_ s: String) -> Bool {
         let parts = s.split(separator: ".", omittingEmptySubsequences: false)
         return parts.count == 4 && parts.allSatisfy { p in !p.isEmpty && p.count <= 3 && p.allSatisfy(\.isNumber) && (Int(p) ?? 999) <= 255 }
+    }
+
+    /// The first IPv6 address after `marker`: a word (up to space, comma, parenthesis or
+    /// quote; a trailing "." or ":" dropped) that parses as one.
+    static func firstIPv6(after marker: String, in s: String) -> String? {
+        guard let r = s.range(of: marker, options: .caseInsensitive) else { return nil }
+        for word in s[r.upperBound...].split(whereSeparator: { " ,;()[]\"'=\t".contains($0) }) where word.contains(":") {
+            var w = String(word)
+            while let l = w.last, l == "." || (l == ":" && !w.hasSuffix("::")) { w.removeLast() }
+            var a6 = in6_addr()
+            if w.count >= 2, inet_pton(AF_INET6, w, &a6) == 1 { return w.lowercased() }
+        }
+        return nil
     }
 
     /// The first IPv4 address after `marker` ("" = anywhere), not `excluding`.

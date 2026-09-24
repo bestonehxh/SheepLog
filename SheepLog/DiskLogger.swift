@@ -30,9 +30,12 @@ nonisolated final class DiskLogger: @unchecked Sendable {
 
     /// Told (on the logger's queue) the first time a write or open fails.
     private let onError: (@Sendable (String) -> Void)?
+    /// The wall clock that says which day it is (tests step it over midnight).
+    private let clock: @Sendable () -> Date
 
-    init(directory: URL, onError: (@Sendable (String) -> Void)? = nil) {
+    init(directory: URL, onError: (@Sendable (String) -> Void)? = nil, clock: @escaping @Sendable () -> Date = { Date() }) {
         self.directory = directory
+        self.clock = clock
         self.onError = onError
     }
 
@@ -84,7 +87,7 @@ nonisolated final class DiskLogger: @unchecked Sendable {
     }
 
     /// The file today's lines go to (whether or not it exists yet).
-    var todaysFile: URL { directory.appending(path: "\(Self.dayString(Date())).log") }
+    var todaysFile: URL { directory.appending(path: "\(Self.dayString(clock())).log") }
 
     /// Why `directory` must not receive log files, or nil. `/`, the system's own folders and
     /// a path that is a file are refused (a mistyped setting must not scatter files there).
@@ -129,23 +132,74 @@ nonisolated final class DiskLogger: @unchecked Sendable {
 
     private func write(_ count: Int, _ line: (Int) -> (received: Date, address: String, raw: String)) {
         guard !retired else { return }
-        let today = Self.dayString(Date())
+        let now = clock()
+        let today = Self.dayString(now)
+        // Lines that arrived before midnight and reach this queue after it (a flood's backlog
+        // at 23:59:59) belong to the day they arrived: they were the first lines of the next
+        // day's file, and the day's own file lacked its last second.
+        // (Older lines — a file replayed into the store — go to today's file, as they always did.)
+        let calendar = Calendar(identifier: .gregorian)
+        let midnight = calendar.startOfDay(for: now)
+        let dayBefore = calendar.date(byAdding: .day, value: -1, to: midnight) ?? midnight
+        var data = Data()
+        var late = Data()
+        data.reserveCapacity(count * 160)
+        for i in 0..<count {
+            let e = line(i)
+            if e.received < midnight, e.received >= dayBefore {
+                append(e, to: &late)
+            } else {
+                append(e, to: &data)
+            }
+        }
+        if !late.isEmpty { writeYesterday(late, day: Self.dayString(midnight.addingTimeInterval(-1))) }
+        if data.isEmpty { return }
         if today != day || fd < 0 || fileWasRemoved() {
             open(day: today)
         }
         guard fd >= 0 else { return }
-        var data = Data()
-        data.reserveCapacity(count * 160)
-        for i in 0..<count {
-            let e = line(i)
-            data.append(contentsOf: stamp(e.received).utf8)
-            data.append(0x20)
-            Self.appendOneLine(e.address, to: &data)
-            data.append(0x20)
-            Self.appendOneLine(e.raw, to: &data)
-            data.append(0x0A)
+        let ok = Self.writeWhole(fd, data)
+        if ok != 0 {
+            report("SheepLog: writing \(currentFile?.path ?? "the log file") failed: \(String(cString: strerror(ok)))"
+                   + (ok == ENOSPC ? " (the disk is full)" : "") + ". Lines are kept in memory only until this is fixed.")
+        } else {
+            // Writing works (again): a later failure is worth another report.
+            reportedError = false
         }
-        let ok = data.withUnsafeBytes { raw -> Int32 in
+    }
+
+    private func append(_ e: (received: Date, address: String, raw: String), to data: inout Data) {
+        data.append(contentsOf: stamp(e.received).utf8)
+        data.append(0x20)
+        Self.appendOneLine(e.address, to: &data)
+        data.append(0x20)
+        Self.appendOneLine(e.raw, to: &data)
+        data.append(0x0A)
+    }
+
+    /// The lines of the day before, appended to its file (opened for them, as `open` opens
+    /// today's: no symlink, 0600, a regular file).
+    private func writeYesterday(_ data: Data, day: String) {
+        guard Self.unsuitableReason(directory) == nil, Self.missingVolume(directory) == nil else { return }
+        let path = directory.appending(path: "\(day).log").path(percentEncoded: false)
+        let f = Darwin.open(path, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard f >= 0 else { return }
+        defer { Darwin.close(f) }
+        var st = stat()
+        guard fstat(f, &st) == 0, st.st_mode & S_IFMT == S_IFREG else { return }
+        let ok = Self.writeWhole(f, data)
+        if ok != 0 {
+            report("SheepLog: writing \(path) failed: \(String(cString: strerror(ok)))"
+                   + (ok == ENOSPC ? " (the disk is full)" : "") + ". Lines are kept in memory only until this is fixed.")
+        }
+    }
+
+    /// Writes all of `data` or none of it: a write the disk cut short (ENOSPC part-way through
+    /// a batch) is taken back to where it started, so the file never ends in half a line — the
+    /// next line written after space was freed used to continue that half line. errno, or 0.
+    static func writeWhole(_ fd: Int32, _ data: Data) -> Int32 {
+        let start = lseek(fd, 0, SEEK_END)
+        let failure = data.withUnsafeBytes { raw -> Int32 in
             var p = 0
             while p < raw.count {
                 let n = Darwin.write(fd, raw.baseAddress! + p, raw.count - p)
@@ -155,13 +209,8 @@ nonisolated final class DiskLogger: @unchecked Sendable {
             }
             return 0
         }
-        if ok != 0 {
-            report("SheepLog: writing \(currentFile?.path ?? "the log file") failed: \(String(cString: strerror(ok)))"
-                   + (ok == ENOSPC ? " (the disk is full)" : "") + ". Lines are kept in memory only until this is fixed.")
-        } else {
-            // Writing works (again): a later failure is worth another report.
-            reportedError = false
-        }
+        if failure != 0, start >= 0 { _ = ftruncate(fd, start) }
+        return failure
     }
 
     /// The folder (or today's file) was deleted or replaced under us: the descriptor still

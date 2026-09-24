@@ -42,6 +42,16 @@ corpus["arubacx"] = [
      "info", "CX6300-CORE-01", "intfd", 6, "2026-09-23T10:21:00.123+07:00"),
     ('<190>1 2026-09-23T10:21:30.123+07:00 CX6300-CORE-01 intfd 1633 - [origin enterpriseId="47196"] Event|404|LOG_INFO|AMM|1/1|Link status for interface 1/1/5 is up',
      "info", "CX6300-CORE-01", "intfd", 5, "2026-09-23T10:21:30.123+07:00"),
+    # Round 15: an OSPFv2 neighbor and a BGP peer down and back ("on interface vlan20" is no
+    # link event).
+    ('<188>1 2026-09-23T10:22:00.100+07:00 CX8360-AGG-02 ospfv2 2940 - - Event|2004|LOG_WARN|OSPFV2|-|OSPFv2 neighbor 10.2.0.1 on interface vlan20 changed state from Full to Down (InactivityTimer)',
+     "warning", "CX8360-AGG-02", "ospfv2", 4, "2026-09-23T10:22:00.100+07:00"),
+    ('<190>1 2026-09-23T10:22:40.100+07:00 CX8360-AGG-02 ospfv2 2940 - - Event|2003|LOG_INFO|OSPFV2|-|OSPFv2 neighbor 10.2.0.1 on interface vlan20 changed state from Loading to Full',
+     "info", "CX8360-AGG-02", "ospfv2", 4, "2026-09-23T10:22:40.100+07:00"),
+    ('<188>1 2026-09-23T10:23:00.100+07:00 CX8360-AGG-02 bgpd 2951 - - Event|4402|LOG_WARN|BGP|-|BGP peer 10.2.0.9 changed state from Established to Idle (hold timer expired)',
+     "warning", "CX8360-AGG-02", "bgpd", 4, "2026-09-23T10:23:00.100+07:00"),
+    ('<190>1 2026-09-23T10:23:30.100+07:00 CX8360-AGG-02 bgpd 2951 - - Event|4401|LOG_INFO|BGP|-|BGP peer 10.2.0.9 changed state from OpenConfirm to Established',
+     "info", "CX8360-AGG-02", "bgpd", 4, "2026-09-23T10:23:30.100+07:00"),
 ]
 
 # ---------------------------------------------------------------- Aruba AOS 8 / Instant AP
@@ -125,6 +135,18 @@ corpus["huawei"] = [
      "notice", "HW-AR6120", "SSH/5/SSH_USER_LOGIN", 9, "2026-09-23T10:16:40"),
     ('<188>Sep 23 2026 10:16:50 S5720-CORE %%01IFNET/4/IF_STATE(l)[18]:Interface GigabitEthernet0/0/3 has turned into DOWN state.',
      "warning", "S5720-CORE", "IFNET/4/IF_STATE", 4, "2026-09-23T10:16:50"),
+    # Round 15: a BGP peer (STATE_CHG_UPDOWN says "peer", never "neighbor") and an OSPF
+    # neighbor down and back — with the step Down -> Init between, which is neither.
+    ('<187>Sep 23 2026 10:20:00 HW-NE40E %%01BGP/3/STATE_CHG_UPDOWN(l)[21]:The status of the peer 10.0.0.9 changed from ESTABLISHED to IDLE. (InstanceName=Public, StateChangeReason=Hold Timer Expire)',
+     "error", "HW-NE40E", "BGP/3/STATE_CHG_UPDOWN", 6, "2026-09-23T10:20:00"),
+    ('<187>Sep 23 2026 10:20:40 HW-NE40E %%01BGP/3/STATE_CHG_UPDOWN(l)[22]:The status of the peer 10.0.0.9 changed from OPENCONFIRM to ESTABLISHED. (InstanceName=Public, StateChangeReason=Up)',
+     "error", "HW-NE40E", "BGP/3/STATE_CHG_UPDOWN", 6, "2026-09-23T10:20:40"),
+    ('<187>Sep 23 2026 10:21:00 HW-NE40E %%01OSPF/3/NBR_CHG_DOWN(l)[23]:Neighbor event:neighbor state changed to Down. (ProcessId=1, NeighborAddress=10.0.0.10, NeighborEvent=InactivityTimer, NeighborPreviousState=Full, NeighborCurrentState=Down)',
+     "error", "HW-NE40E", "OSPF/3/NBR_CHG_DOWN", 9, "2026-09-23T10:21:00"),
+    ('<189>Sep 23 2026 10:21:20 HW-NE40E %%01OSPF/4/NBR_CHANGE_E(l)[24]:Neighbor changes event: neighbor status changed. (ProcessId=1, NeighborAddress=10.0.0.10, NeighborEvent=HelloReceived, NeighborPreviousState=Down, NeighborCurrentState=Init)',
+     "warning", "HW-NE40E", "OSPF/4/NBR_CHANGE_E", 9, "2026-09-23T10:21:20"),
+    ('<189>Sep 23 2026 10:21:40 HW-NE40E %%01OSPF/4/NBR_CHANGE_E(l)[25]:Neighbor changes event: neighbor status changed. (ProcessId=1, NeighborAddress=10.0.0.10, NeighborEvent=LoadingDone, NeighborPreviousState=Loading, NeighborCurrentState=Full)',
+     "warning", "HW-NE40E", "OSPF/4/NBR_CHANGE_E", 9, "2026-09-23T10:21:40"),
 ]
 
 # ---------------------------------------------------------------- Check Point R81 (log_exporter)
@@ -192,8 +214,8 @@ def threat(t, sub, src, dst, app, dport, action, misc, tid, cat, sev):
     return row(120, c)
 
 
-def system(t, eventid, module, sev, desc):
-    c = common(t, "SYSTEM", "general" if eventid == "general" else "auth")
+def system(t, eventid, module, sev, desc, sub=None):
+    c = common(t, "SYSTEM", sub or ("general" if eventid == "general" else "auth"))
     c.update({8: eventid, 10: "0", 11: "0", 12: module, 13: sev, 14: desc, 15: "1234", 16: "0x0",
               17: "0", 18: "0", 19: "0", 20: "0", 22: "PA-3220", 23: "0", 24: "0",
               25: "2026-09-23T10:17:00.000+07:00"})
@@ -222,6 +244,16 @@ corpus["paloalto"] = [
      "info", "PA-3220", "GLOBALPROTECT/gateway-connected", 8, "2026-09-23T10:17:30"),
     ("<14>Sep 23 10:17:40 PA-3220 " + row(95, {**common("2026/09/23 10:17:40", "DECRYPTION", "0"), 7: "10.1.0.5", 8: "142.250.66.78", 9: "203.0.113.10", 10: "142.250.66.78", 11: "decrypt-web", 12: "corp\\alice", 14: "ssl", 15: "vsys1", 16: "trust", 17: "untrust", 18: "ethernet1/2", 19: "ethernet1/1", 20: "default", 21: "2026/09/23 10:17:40", 22: "123460", 23: "1", 24: "53300", 25: "443", 26: "41500", 27: "443", 28: "0x400000", 29: "tcp", 30: "allow", 31: "0", 60: "www.google.com", 90: "2026-09-23T10:17:40.000+07:00"}),
      "info", "PA-3220", "DECRYPTION", 20, "2026-09-23T10:17:40"),
+    # Round 15: SYSTEM routing — a BGP peer leaving Established and back (the text says "peer",
+    # never "neighbor"), an OSPF neighbor down and back to Full.
+    ("<12>Sep 23 10:18:00 PA-3220 " + system("2026/09/23 10:18:00", "routed-bgp-peer-left-established", "routing", "high", "BGP peer session left established state. VR: default, peer: 10.3.0.2 (AS 65010), reason: hold timer expired", sub="routing"),
+     "error", "PA-3220", "SYSTEM/routing", 6, "2026-09-23T10:18:00"),
+    ("<14>Sep 23 10:18:30 PA-3220 " + system("2026/09/23 10:18:30", "routed-bgp-peer-enter-established", "routing", "informational", "BGP peer session entered established state. VR: default, peer: 10.3.0.2 (AS 65010)", sub="routing"),
+     "info", "PA-3220", "SYSTEM/routing", 6, "2026-09-23T10:18:30"),
+    ("<12>Sep 23 10:19:00 PA-3220 " + system("2026/09/23 10:19:00", "routed-ospf-neighbor-state-change", "routing", "medium", "OSPF neighbor 10.3.0.6 state changed from Full to Down (VR default, interface ethernet1/5, event InactivityTimer)", sub="routing"),
+     "warning", "PA-3220", "SYSTEM/routing", 6, "2026-09-23T10:19:00"),
+    ("<14>Sep 23 10:19:40 PA-3220 " + system("2026/09/23 10:19:40", "routed-ospf-neighbor-state-change", "routing", "informational", "OSPF neighbor 10.3.0.6 state changed from Loading to Full (VR default, interface ethernet1/5, event LoadingDone)", sub="routing"),
+     "info", "PA-3220", "SYSTEM/routing", 6, "2026-09-23T10:19:40"),
 ]
 
 # ---------------------------------------------------------------- FortiOS 7.x
@@ -253,6 +285,16 @@ corpus["fortigate"] = [
      "warning", "FGT-100F-HQ", "event/system", 15, "2026-09-23T10:30:00.123+07:00"),
     ('<189>date=2026-09-23 time=10:30:40 devname="FGT-100F-HQ" devid="FGT1HFTK21000000" eventtime=1790134240123456789 tz="+0700" logid="0100020022" type="event" subtype="system" level="notice" vd="root" logdesc="Interface status changed" action="interface-stat-change" status="UP" msg="Interface port3 changed status to UP."',
      "notice", "FGT-100F-HQ", "event/system", 15, "2026-09-23T10:30:40.123+07:00"),
+    # Round 15: routing events — a BGP neighbor and an OSPF adjacency (ospfd's AdjChg in msg=)
+    # down and back.
+    ('<188>date=2026-09-23 time=10:31:00 devname="FGT-100F-HQ" devid="FGT1HFTK21000000" eventtime=1790134260123456789 tz="+0700" logid="0103020301" type="event" subtype="router" level="warning" vd="root" logdesc="BGP neighbor status changed" msg="BGP: %BGP-5-ADJCHANGE: neighbor 169.254.10.1 Down Hold Timer Expired"',
+     "warning", "FGT-100F-HQ", "event/router", 13, "2026-09-23T10:31:00.123+07:00"),
+    ('<189>date=2026-09-23 time=10:31:40 devname="FGT-100F-HQ" devid="FGT1HFTK21000000" eventtime=1790134300123456789 tz="+0700" logid="0103020301" type="event" subtype="router" level="notice" vd="root" logdesc="BGP neighbor status changed" msg="BGP: %BGP-5-ADJCHANGE: neighbor 169.254.10.1 Up"',
+     "notice", "FGT-100F-HQ", "event/router", 13, "2026-09-23T10:31:40.123+07:00"),
+    ('<188>date=2026-09-23 time=10:32:00 devname="FGT-100F-HQ" devid="FGT1HFTK21000000" eventtime=1790134320123456789 tz="+0700" logid="0103020302" type="event" subtype="router" level="warning" vd="root" logdesc="OSPF neighbor state changed" msg="OSPF: AdjChg: Nbr 10.9.0.2 on port5:10.9.0.1: Full -> Deleted (InactivityTimer)"',
+     "warning", "FGT-100F-HQ", "event/router", 13, "2026-09-23T10:32:00.123+07:00"),
+    ('<189>date=2026-09-23 time=10:32:40 devname="FGT-100F-HQ" devid="FGT1HFTK21000000" eventtime=1790134360123456789 tz="+0700" logid="0103020302" type="event" subtype="router" level="notice" vd="root" logdesc="OSPF neighbor state changed" msg="OSPF: AdjChg: Nbr 10.9.0.2 on port5:10.9.0.1: Loading -> Full (LoadingDone)"',
+     "notice", "FGT-100F-HQ", "event/router", 13, "2026-09-23T10:32:40.123+07:00"),
 ]
 
 # ---------------------------------------------------------------- Other (must stay .unknown)
@@ -379,6 +421,30 @@ corpus["other"] = [
      "notice", "-", "ifmgr", 2, "2026-09-23T10:25:30.123Z"),
     ("<189>102: XR-PE1 RP/0/RSP0/CPU0:Sep 23 10:25:40.123 UTC: config[65727]: %MGBL-CONFIG-6-DB_COMMIT : Configuration committed by user 'admin'. Use 'show configuration commit changes 1000000021' to view the changes.",
      "notice", "XR-PE1", "config", 2, "2026-09-23T10:25:40.123Z"),
+    # Round 15: Junos BGP — the NOTIFICATION of a `clear bgp neighbor`, the peer leaving
+    # Established, a step between (Idle -> Connect: nothing), back to Established.
+    ('<28>Sep 23 10:26:00 MX204-EDGE rpd[1811]: bgp_peer_mgmt_clear:6969: NOTIFICATION sent to 10.0.14.2 (External AS 65014): code 6 (Cease) subcode 4 (Administratively Reset), Reason: Management session cleared BGP neighbor',
+     "warning", "MX204-EDGE", "rpd", 0, "2026-09-23T10:26:00"),
+    ('<28>Sep 23 10:26:00 MX204-EDGE rpd[1811]: RPD_BGP_NEIGHBOR_STATE_CHANGED: BGP peer 10.0.14.2 (External AS 65014) changed state from Established to Idle (event Stop) (instance master)',
+     "warning", "MX204-EDGE", "rpd", 0, "2026-09-23T10:26:00"),
+    ('<29>Sep 23 10:26:10 MX204-EDGE rpd[1811]: RPD_BGP_NEIGHBOR_STATE_CHANGED: BGP peer 10.0.14.2 (External AS 65014) changed state from Idle to Connect (event Start) (instance master)',
+     "notice", "MX204-EDGE", "rpd", 0, "2026-09-23T10:26:10"),
+    ('<29>Sep 23 10:26:12 MX204-EDGE rpd[1811]: RPD_BGP_NEIGHBOR_STATE_CHANGED: BGP peer 10.0.14.2 (External AS 65014) changed state from OpenConfirm to Established (event RecvKeepAlive) (instance master)',
+     "notice", "MX204-EDGE", "rpd", 0, "2026-09-23T10:26:12"),
+    # FRR on Linux: a BGP peer, an OSPF adjacency (ospfd's "Full -> Deleted") and a port
+    # (zebra's kernel flags: RUNNING gone is the carrier lost) — each down and back.
+    ('<30>Sep 23 10:27:00 frr-edge1 bgpd[912]: [M59KS-A3ZXZ] %ADJCHANGE: neighbor 10.0.15.2(spine1) in vrf default Down Peer closed the session',
+     "info", "frr-edge1", "bgpd", 0, "2026-09-23T10:27:00"),
+    ('<30>Sep 23 10:27:30 frr-edge1 bgpd[912]: [M59KS-A3ZXZ] %ADJCHANGE: neighbor 10.0.15.2(spine1) in vrf default Up',
+     "info", "frr-edge1", "bgpd", 0, "2026-09-23T10:27:30"),
+    ('<30>Sep 23 10:28:00 frr-edge1 ospfd[915]: [AZ9HJ-RQ2WX] AdjChg: Nbr 10.0.15.6(default) on eth2:10.0.15.5 vrf default: Full -> Deleted (InactivityTimer)',
+     "info", "frr-edge1", "ospfd", 0, "2026-09-23T10:28:00"),
+    ('<30>Sep 23 10:28:40 frr-edge1 ospfd[915]: [AZ9HJ-RQ2WX] AdjChg: Nbr 10.0.15.6(default) on eth2:10.0.15.5 vrf default: Loading -> Full (LoadingDone)',
+     "info", "frr-edge1", "ospfd", 0, "2026-09-23T10:28:40"),
+    ('<30>Sep 23 10:29:00 frr-edge1 zebra[870]: interface eth3 index 5 changed <UP,BROADCAST,MULTICAST>.',
+     "info", "frr-edge1", "zebra", 0, "2026-09-23T10:29:00"),
+    ('<30>Sep 23 10:29:20 frr-edge1 zebra[870]: interface eth3 index 5 changed <UP,BROADCAST,RUNNING,MULTICAST>.',
+     "info", "frr-edge1", "zebra", 0, "2026-09-23T10:29:20"),
 ]
 
 total = 0

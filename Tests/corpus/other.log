@@ -51,3 +51,13 @@
 <187>100: RP/0/RSP0/CPU0:Sep 23 10:25:00.123 UTC: ifmgr[245]: %PKT_INFRA-LINK-3-UPDOWN : Interface GigabitEthernet0/0/0/1, changed state to Down
 <189>101: RP/0/RSP0/CPU0:Sep 23 10:25:30.123 UTC: ifmgr[245]: %PKT_INFRA-LINK-3-UPDOWN : Interface GigabitEthernet0/0/0/1, changed state to Up
 <189>102: XR-PE1 RP/0/RSP0/CPU0:Sep 23 10:25:40.123 UTC: config[65727]: %MGBL-CONFIG-6-DB_COMMIT : Configuration committed by user 'admin'. Use 'show configuration commit changes 1000000021' to view the changes.
+<28>Sep 23 10:26:00 MX204-EDGE rpd[1811]: bgp_peer_mgmt_clear:6969: NOTIFICATION sent to 10.0.14.2 (External AS 65014): code 6 (Cease) subcode 4 (Administratively Reset), Reason: Management session cleared BGP neighbor
+<28>Sep 23 10:26:00 MX204-EDGE rpd[1811]: RPD_BGP_NEIGHBOR_STATE_CHANGED: BGP peer 10.0.14.2 (External AS 65014) changed state from Established to Idle (event Stop) (instance master)
+<29>Sep 23 10:26:10 MX204-EDGE rpd[1811]: RPD_BGP_NEIGHBOR_STATE_CHANGED: BGP peer 10.0.14.2 (External AS 65014) changed state from Idle to Connect (event Start) (instance master)
+<29>Sep 23 10:26:12 MX204-EDGE rpd[1811]: RPD_BGP_NEIGHBOR_STATE_CHANGED: BGP peer 10.0.14.2 (External AS 65014) changed state from OpenConfirm to Established (event RecvKeepAlive) (instance master)
+<30>Sep 23 10:27:00 frr-edge1 bgpd[912]: [M59KS-A3ZXZ] %ADJCHANGE: neighbor 10.0.15.2(spine1) in vrf default Down Peer closed the session
+<30>Sep 23 10:27:30 frr-edge1 bgpd[912]: [M59KS-A3ZXZ] %ADJCHANGE: neighbor 10.0.15.2(spine1) in vrf default Up
+<30>Sep 23 10:28:00 frr-edge1 ospfd[915]: [AZ9HJ-RQ2WX] AdjChg: Nbr 10.0.15.6(default) on eth2:10.0.15.5 vrf default: Full -> Deleted (InactivityTimer)
+<30>Sep 23 10:28:40 frr-edge1 ospfd[915]: [AZ9HJ-RQ2WX] AdjChg: Nbr 10.0.15.6(default) on eth2:10.0.15.5 vrf default: Loading -> Full (LoadingDone)
+<30>Sep 23 10:29:00 frr-edge1 zebra[870]: interface eth3 index 5 changed <UP,BROADCAST,MULTICAST>.
+<30>Sep 23 10:29:20 frr-edge1 zebra[870]: interface eth3 index 5 changed <UP,BROADCAST,RUNNING,MULTICAST>.

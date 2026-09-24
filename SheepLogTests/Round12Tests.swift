@@ -320,8 +320,11 @@ final class Round12Tests: XCTestCase {
             // "Link status for interface 1/1/24 is down" and no up; a config change; PSU and fan failures.
             "arubacx": ["link.down|CX6300-CORE-01", "config.change|CX8360-AGG-02", "hw.psu|CX6300-ACC-12", "hw.fan|CX6300-ACC-12"],
             "arubaos": [], "arubasw": [], "clearpass": [], "checkpoint": [], "fortigate": [],
-            // "neighbor state changed to Down", never back.
-            "huawei": ["routing.neighbor|S5720-CORE"],
+            // "neighbor state changed to Down", never back. Round 15's HW-NE40E peer and neighbor
+            // came back (nothing); its lines run the file to 10:21, so the two ports that went
+            // DOWN at 10:16 with no UP (10GE1/0/24, GigabitEthernet0/0/3) are now long down, as
+            // they are in the files together.
+            "huawei": ["routing.neighbor|S5720-CORE", "link.down|S5720-CORE", "link.down|HW-CE6881"],
             // A CONFIG log.
             "paloalto": ["config.change|PA-3220"],
             // Four interfaces down with no up line (CORE-RTR1's own clock is UTC: seven hours of

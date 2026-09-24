@@ -109,10 +109,18 @@ nonisolated enum PcapFile {
     static func write(_ packets: [Packet], linkType: Int32, to url: URL, snapLength: Int? = nil) throws {
         let dir = url.deletingLastPathComponent()
         let temp = dir.appendingPathComponent(".\(url.lastPathComponent).sheeplog-\(UUID().uuidString.prefix(8))")
-        // A folder that takes no new file (but lets an existing one be overwritten) is written in place.
-        guard FileManager.default.createFile(atPath: temp.path(percentEncoded: false), contents: nil) else {
-            return try writeInPlace(packets, linkType: linkType, to: url, snapLength: snapLength)
+        // A folder that takes no new file (but lets an existing one be overwritten) is written in
+        // place. Only over a file that is there: a new name the folder refused as a temporary
+        // file (a full disk) was created in place, part-written, and left behind.
+        let fd = open(temp.path(percentEncoded: false), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o644)
+        guard fd >= 0 else {
+            let e = errno
+            if FileManager.default.fileExists(atPath: url.path(percentEncoded: false)), e != ENOSPC {
+                return try writeInPlace(packets, linkType: linkType, to: url, snapLength: snapLength)
+            }
+            throw error("Could not create the file: \(String(cString: strerror(e)))" + (e == ENOSPC ? " (the disk is full)" : ""), url: url)
         }
+        Darwin.close(fd)
         do {
             try writeInPlace(packets, linkType: linkType, to: temp, snapLength: snapLength, reportAs: url)
             guard rename(temp.path(percentEncoded: false), url.path(percentEncoded: false)) == 0 else {
@@ -157,9 +165,16 @@ nonisolated enum PcapFile {
                 pcap_dump(user, &hdr, base)
             }
         }
+        // A write that failed earlier (the disk filled part-way) leaves the stream's error flag
+        // set even when the last flush has nothing left to write: both are checked.
         let flushed = pcap_dump_flush(dumper)
+        let failed = flushed != 0 || ferror(pcap_dump_file(dumper)) != 0
+        let e = errno
         pcap_dump_close(dumper)
-        if flushed != 0 { throw error("Could not write every packet (disk full?)", url: reported) }
+        if failed {
+            throw error("Could not write every packet: \(String(cString: strerror(e == 0 ? EIO : e)))"
+                        + (e == ENOSPC ? " (the disk is full)" : ""), url: reported)
+        }
     }
 
     /// A libpcap `errbuf` as text.

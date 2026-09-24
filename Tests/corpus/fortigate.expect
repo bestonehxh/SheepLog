@@ -8,3 +8,7 @@ notice	FGT-60F-Branch	traffic/local	25	2026-09-23T10:16:40.123+07:00
 notice	FGT-60F-Branch	traffic/forward	18	2026-09-23T10:16:50
 warning	FGT-100F-HQ	event/system	15	2026-09-23T10:30:00.123+07:00
 notice	FGT-100F-HQ	event/system	15	2026-09-23T10:30:40.123+07:00
+warning	FGT-100F-HQ	event/router	13	2026-09-23T10:31:00.123+07:00
+notice	FGT-100F-HQ	event/router	13	2026-09-23T10:31:40.123+07:00
+warning	FGT-100F-HQ	event/router	13	2026-09-23T10:32:00.123+07:00
+notice	FGT-100F-HQ	event/router	13	2026-09-23T10:32:40.123+07:00

@@ -67,7 +67,14 @@ enum LastPane {
     }
 
     static func restore() -> MainPane? {
-        guard !isEphemeralRun, let raw = UserDefaults.standard.string(forKey: key) else { return nil }
+        guard !isEphemeralRun else { return nil }
+        return restore(from: .standard)
+    }
+
+    /// The pane the defaults name; nil for anything else stored under the key (a number, an
+    /// array, a pane an older or newer build had).
+    static func restore(from defaults: UserDefaults) -> MainPane? {
+        guard let raw = defaults.object(forKey: key) as? String else { return nil }
         return MainPane(rawValue: raw)
     }
 
@@ -136,7 +143,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             view.cacheDisplay(in: view.bounds, to: rep)
             guard let data = rep.representation(using: .png, properties: [:]) else { print("[shot] no png"); exit(1) }
             do {
-                try data.write(to: URL(fileURLWithPath: path))
+                try data.write(to: URL(fileURLWithPath: path), options: .atomic)
                 print("[shot] \(Int(view.bounds.width))x\(Int(view.bounds.height)) \(path)")
             } catch {
                 print("[shot] \(error.localizedDescription)"); exit(1)
