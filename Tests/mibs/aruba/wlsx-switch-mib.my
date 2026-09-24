@@ -1,0 +1,108 @@
+-- WLSX-SWITCH-MIB: Mobility Controller system objects (the shapes of the vendor module;
+-- written for SheepLog's tests).
+
+WLSX-SWITCH-MIB DEFINITIONS ::= BEGIN
+
+IMPORTS
+    MODULE-IDENTITY, OBJECT-TYPE, OBJECT-IDENTITY, Integer32, IpAddress, TimeTicks, Unsigned32
+        FROM SNMPv2-SMI
+    DisplayString, MacAddress, TruthValue
+        FROM SNMPv2-TC
+    ArubaEnableValue, ArubaSwitchRole
+        FROM ARUBA-TC
+    wlsxEnterpriseMibModules
+        FROM ARUBA-MIB;
+
+wlsxSwitchMIB MODULE-IDENTITY
+    LAST-UPDATED "0804160206Z"
+    ORGANIZATION "Aruba Wireless Networks"
+    CONTACT-INFO "support@arubanetworks.com"
+    DESCRIPTION  "This MIB module defines MIB objects which provide information about the
+                  switch (controller)."
+    ::= { wlsxEnterpriseMibModules 1 }
+
+wlsxSystemXGroup OBJECT-IDENTITY
+    STATUS      current
+    DESCRIPTION "System group"
+    ::= { wlsxSwitchMIB 1 }
+
+wlsxSwitchIpAddress OBJECT-TYPE
+    SYNTAX      IpAddress
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "IP address of the controller."
+    ::= { wlsxSystemXGroup 1 }
+
+wlsxSwitchRole OBJECT-TYPE
+    SYNTAX      ArubaSwitchRole
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Role of the controller."
+    ::= { wlsxSystemXGroup 2 }
+
+wlsxSwitchMasterIp OBJECT-TYPE
+    SYNTAX      IpAddress
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "IP address of the master (conductor)."
+    ::= { wlsxSystemXGroup 3 }
+
+wlsxSwitchLicenseSerialNumber OBJECT-TYPE
+    SYNTAX      DisplayString (SIZE(0..64))
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "License serial number."
+    ::= { wlsxSystemXGroup 12 }
+
+wlsxSysXProcessorTable OBJECT-TYPE
+    SYNTAX      SEQUENCE OF WlsxSysXProcessorEntry
+    MAX-ACCESS  not-accessible
+    STATUS      current
+    DESCRIPTION "Processors of the controller."
+    ::= { wlsxSystemXGroup 13 }
+
+wlsxSysXProcessorEntry OBJECT-TYPE
+    SYNTAX      WlsxSysXProcessorEntry
+    MAX-ACCESS  not-accessible
+    STATUS      current
+    DESCRIPTION "One processor."
+    INDEX       { sysXProcessorID }
+    ::= { wlsxSysXProcessorTable 1 }
+
+WlsxSysXProcessorEntry ::= SEQUENCE {
+    sysXProcessorID     Integer32,
+    sysXProcessorDescr  DisplayString,
+    sysXProcessorLoad   Integer32
+}
+
+sysXProcessorID OBJECT-TYPE
+    SYNTAX      Integer32 (1..64)
+    MAX-ACCESS  not-accessible
+    STATUS      current
+    DESCRIPTION "Processor index."
+    ::= { wlsxSysXProcessorEntry 1 }
+
+sysXProcessorDescr OBJECT-TYPE
+    SYNTAX      DisplayString (SIZE(0..64))
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Processor description."
+    ::= { wlsxSysXProcessorEntry 2 }
+
+sysXProcessorLoad OBJECT-TYPE
+    SYNTAX      Integer32 (0..100)
+    UNITS       "%"
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Load, percent."
+    ::= { wlsxSysXProcessorEntry 3 }
+
+wlsxSwitchStpEnable OBJECT-TYPE
+    SYNTAX      ArubaEnableValue
+    MAX-ACCESS  read-write
+    STATUS      current
+    DESCRIPTION "Spanning tree enabled."
+    DEFVAL      { disable }
+    ::= { wlsxSystemXGroup 20 }
+
+END

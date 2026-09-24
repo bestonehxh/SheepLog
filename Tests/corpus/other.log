@@ -1,0 +1,21 @@
+<187>123: Sep 23 10:15:32.123: %LINK-3-UPDOWN: Interface GigabitEthernet0/1, changed state to down
+<189>124: CORE-RTR1: Sep 23 10:15:33.456 UTC: %SYS-5-CONFIG_I: Configured from console by admin on vty0 (10.1.0.5)
+<189>125: CORE-RTR1: *Sep 23 10:15:34.789: %LINEPROTO-5-UPDOWN: Line protocol on Interface GigabitEthernet0/1, changed state to down
+<189>126: CORE-RTR1: Sep 23 10:15:35.000 ICT: %LLDP-5-NEIGHBOR_ADDED: LLDP neighbor SW-2930F-01 added on GigabitEthernet0/2
+<189>2026 Sep 23 10:15:35 N9K-LEAF-01 %ETHPORT-5-IF_DOWN_LINK_FAILURE: Interface Ethernet1/1 is down (Link failure)
+<166>Sep 23 2026 10:15:36: %ASA-6-302013: Built outbound TCP connection 12345 for outside:8.8.8.8/443 (8.8.8.8/443) to inside:10.1.0.5/51234 (203.0.113.10/51234)
+<164>Sep 23 2026 10:15:37 ASA-FW01 : %ASA-4-106023: Deny tcp src outside:203.0.113.9/51234 dst inside:10.1.0.80/22 by access-group "outside_in" [0x0, 0x0]
+<86>Sep 23 10:15:38 web01 sshd[1234]: Accepted publickey for deploy from 10.1.0.5 port 51234 ssh2: ED25519 SHA256:q9Yx2bXgT0y
+<38>Sep 23 10:15:39 web01 sshd[1240]: Failed password for invalid user admin from 203.0.113.9 port 51234 ssh2
+<30>Sep 23 10:15:40 web01 systemd[1]: Started Session 42 of user deploy.
+<4>Sep 23 10:15:41 web01 kernel: [123456.789012] e1000e: eth0 NIC Link is Down
+<78>Sep 23 10:16:01 web01 CRON[2345]: (root) CMD (run-parts /etc/cron.hourly)
+<85>Sep 23 10:16:02 web01 sudo:    alice : TTY=pts/0 ; PWD=/home/alice ; USER=root ; COMMAND=/usr/bin/systemctl restart nginx
+<13>1 2026-09-23T10:16:03.123456+07:00 web01 myapp 4321 - - hello from rsyslog
+<30>Sep 23 10:16:04 RB4011-HQ system,info,account user admin logged in from 10.1.0.5 via winbox
+<30>Sep 23 10:16:05 RB4011-HQ firewall,info input: in:ether1 out:(unknown 0), src-mac 02:00:5e:aa:bb:cc, proto TCP (SYN), 203.0.113.9:51234->203.0.113.1:22, len 60
+<4>Sep 23 10:16:06 ER-4 kernel: [WAN_LOCAL-default-D]IN=eth0 OUT= MAC=02:00:5e:aa:bb:cc:02:00:5e:dd:ee:ff:08:00 SRC=203.0.113.9 DST=203.0.113.1 LEN=60 TOS=0x00 PREC=0x00 TTL=52 ID=4242 DF PROTO=TCP SPT=51234 DPT=22 WINDOW=29200 RES=0x00 SYN URGP=0
+<30>Sep 23 10:16:07 U6-Pro-Lobby,f4e2c6aabbcc,v6.6.55.15189 hostapd: ra0: STA 02:00:5e:10:00:09 IEEE 802.11: associated
+<85>Sep 23 10:16:09 web01 portal-auth[812]: user=alice; action=login; result=failure; src=10.1.0.5
+<38>Sep 23 10:16:10 2001:db8::10 sshd[2200]: Accepted publickey for deploy from 2001:db8::5 port 50222 ssh2
+<13>Sep 23 10:16:11 - logger: relayed without a hostname

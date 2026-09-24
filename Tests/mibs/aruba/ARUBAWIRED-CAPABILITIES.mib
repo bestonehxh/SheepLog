@@ -1,0 +1,49 @@
+-- ARUBAWIRED-CAPABILITIES: an AGENT-CAPABILITIES module (what an AOS-CX agent implements),
+-- in the vendor's shapes; SUPPORTS / INCLUDES / VARIATION with SYNTAX, ACCESS, DEFVAL and
+-- CREATION-REQUIRES clauses. Nothing in it is an object.
+
+ARUBAWIRED-CAPABILITIES DEFINITIONS ::= BEGIN
+
+IMPORTS
+    MODULE-IDENTITY
+        FROM SNMPv2-SMI
+    AGENT-CAPABILITIES
+        FROM SNMPv2-CONF
+    arubaWiredCapabilities
+        FROM ARUBAWIRED-NETWORKING-OID;
+
+arubaWiredCapabilitiesMIB MODULE-IDENTITY
+    LAST-UPDATED "202104050000Z"
+    ORGANIZATION "HPE Aruba Networking"
+    CONTACT-INFO "Hewlett Packard Enterprise"
+    DESCRIPTION  "Agent capabilities of AOS-CX."
+    ::= { arubaWiredCapabilities 1 }
+
+arubaWiredAosCx1008 AGENT-CAPABILITIES
+    PRODUCT-RELEASE "AOS-CX 10.08"
+    STATUS          current
+    DESCRIPTION     "AOS-CX 10.08 SNMP agent capabilities."
+
+    SUPPORTS        IF-MIB
+    INCLUDES        { ifGeneralInformationGroup, ifCounterDiscontinuityGroup }
+
+    VARIATION       ifAdminStatus
+    SYNTAX          INTEGER { up(1), down(2) }
+    DESCRIPTION     "testing(3) is not supported."
+
+    VARIATION       ifLinkUpDownTrapEnable
+    ACCESS          read-only
+    DEFVAL          { enabled }
+    DESCRIPTION     "Link traps are configured per interface in the CLI."
+
+    SUPPORTS        ARUBAWIRED-POWERSUPPLY-MIB
+    INCLUDES        { arubaWiredPowerSupplyGroup }
+
+    VARIATION       arubaWiredPSUState
+    SYNTAX          INTEGER { ok(1), fault-absent(2) }
+    CREATION-REQUIRES { arubaWiredPSUName }
+    DESCRIPTION     "Only ok and fault-absent are reported."
+
+    ::= { arubaWiredCapabilities 2 }
+
+END

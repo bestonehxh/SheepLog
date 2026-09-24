@@ -1,0 +1,142 @@
+-- ARUBAWIRED-POWERSUPPLY-MIB: power supplies of AOS-CX switches (the shapes of the vendor
+-- module; written for SheepLog's tests).
+
+ARUBAWIRED-POWERSUPPLY-MIB DEFINITIONS ::= BEGIN
+
+IMPORTS
+    MODULE-IDENTITY, OBJECT-TYPE, NOTIFICATION-TYPE, Integer32, Gauge32
+        FROM SNMPv2-SMI
+    TEXTUAL-CONVENTION, DisplayString
+        FROM SNMPv2-TC
+    MODULE-COMPLIANCE, OBJECT-GROUP, NOTIFICATION-GROUP
+        FROM SNMPv2-CONF
+    arubaWiredChassisMIB
+        FROM ARUBAWIRED-NETWORKING-OID;
+
+arubaWiredPowerSupplyMIB MODULE-IDENTITY
+    LAST-UPDATED "202104050000Z"
+    ORGANIZATION "HPE Aruba Networking"
+    CONTACT-INFO "Hewlett Packard Enterprise"
+    DESCRIPTION  "This MIB module describes objects for power supplies."
+    REVISION     "202104050000Z"
+    DESCRIPTION  "Added notifications."
+    ::= { arubaWiredChassisMIB 2 }
+
+ArubaWiredPSUState ::= TEXTUAL-CONVENTION
+    STATUS      current
+    DESCRIPTION "The state of a power supply unit."
+    SYNTAX      INTEGER {
+                    ok(1),
+                    fault-absent(2),
+                    fault-input(3),
+                    fault-output(4),
+                    fault-power(5),
+                    fault-no-recov(6),
+                    fault-airflow(7),
+                    unknown(8)
+                }
+
+arubaWiredPowerSupplyNotifications OBJECT IDENTIFIER ::= { arubaWiredPowerSupplyMIB 0 }
+arubaWiredPowerSupplyObjects OBJECT IDENTIFIER ::= { arubaWiredPowerSupplyMIB 1 }
+
+arubaWiredPowerSupplyTable OBJECT-TYPE
+    SYNTAX      SEQUENCE OF ArubaWiredPowerSupplyEntry
+    MAX-ACCESS  not-accessible
+    STATUS      current
+    DESCRIPTION "This table contains one row per power supply entity."
+    ::= { arubaWiredPowerSupplyObjects 1 }
+
+arubaWiredPowerSupplyEntry OBJECT-TYPE
+    SYNTAX      ArubaWiredPowerSupplyEntry
+    MAX-ACCESS  not-accessible
+    STATUS      current
+    DESCRIPTION "Information about a power supply."
+    INDEX       { arubaWiredPSUGroupIndex, arubaWiredPSUTypeIndex, arubaWiredPSUSlotIndex }
+    ::= { arubaWiredPowerSupplyTable 1 }
+
+ArubaWiredPowerSupplyEntry ::=
+    SEQUENCE {
+        arubaWiredPSUGroupIndex       Integer32,
+        arubaWiredPSUTypeIndex        Integer32,
+        arubaWiredPSUSlotIndex        Integer32,
+        arubaWiredPSUName             DisplayString,
+        arubaWiredPSUState            ArubaWiredPSUState,
+        arubaWiredPSUInstantaneousPower Gauge32
+    }
+
+arubaWiredPSUGroupIndex OBJECT-TYPE
+    SYNTAX      Integer32 (1..2147483647)
+    MAX-ACCESS  not-accessible
+    STATUS      current
+    DESCRIPTION "Group index (member of a VSF stack)."
+    ::= { arubaWiredPowerSupplyEntry 1 }
+
+arubaWiredPSUTypeIndex OBJECT-TYPE
+    SYNTAX      Integer32 (1..2147483647)
+    MAX-ACCESS  not-accessible
+    STATUS      current
+    DESCRIPTION "Type index."
+    ::= { arubaWiredPowerSupplyEntry 2 }
+
+arubaWiredPSUSlotIndex OBJECT-TYPE
+    SYNTAX      Integer32 (1..2147483647)
+    MAX-ACCESS  not-accessible
+    STATUS      current
+    DESCRIPTION "Slot index."
+    ::= { arubaWiredPowerSupplyEntry 3 }
+
+arubaWiredPSUName OBJECT-TYPE
+    SYNTAX      DisplayString (SIZE(0..20))
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Name of the power supply."
+    ::= { arubaWiredPowerSupplyEntry 4 }
+
+arubaWiredPSUState OBJECT-TYPE
+    SYNTAX      ArubaWiredPSUState
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "The current state of the power supply."
+    ::= { arubaWiredPowerSupplyEntry 5 }
+
+arubaWiredPSUInstantaneousPower OBJECT-TYPE
+    SYNTAX      Gauge32
+    UNITS       "Watts"
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Instantaneous power of the power supply."
+    ::= { arubaWiredPowerSupplyEntry 6 }
+
+arubaWiredPowerSupplyStateNotification NOTIFICATION-TYPE
+    OBJECTS     { arubaWiredPSUName, arubaWiredPSUState }
+    STATUS      current
+    DESCRIPTION "A power supply changed state."
+    ::= { arubaWiredPowerSupplyNotifications 1 }
+
+arubaWiredPowerSupplyConformance OBJECT IDENTIFIER ::= { arubaWiredPowerSupplyMIB 99 }
+
+arubaWiredPowerSupplyGroup OBJECT-GROUP
+    OBJECTS     { arubaWiredPSUName, arubaWiredPSUState, arubaWiredPSUInstantaneousPower }
+    STATUS      current
+    DESCRIPTION "Power supply objects."
+    ::= { arubaWiredPowerSupplyConformance 1 }
+
+arubaWiredPowerSupplyNotificationGroup NOTIFICATION-GROUP
+    NOTIFICATIONS { arubaWiredPowerSupplyStateNotification }
+    STATUS      current
+    DESCRIPTION "Power supply notifications."
+    ::= { arubaWiredPowerSupplyConformance 2 }
+
+arubaWiredPowerSupplyCompliance MODULE-COMPLIANCE
+    STATUS      current
+    DESCRIPTION "The compliance statement for power supplies."
+    MODULE      -- this module
+        MANDATORY-GROUPS { arubaWiredPowerSupplyGroup }
+        GROUP       arubaWiredPowerSupplyNotificationGroup
+        DESCRIPTION "Optional."
+        OBJECT      arubaWiredPSUState
+        MIN-ACCESS  read-only
+        DESCRIPTION "Write access is not required."
+    ::= { arubaWiredPowerSupplyConformance 3 }
+
+END

@@ -1,0 +1,152 @@
+-- Palo Alto Networks-style common MIB (the shapes of PAN-COMMON-MIB; written for SheepLog's
+-- tests, a subset).
+
+PAN-COMMON-MIB DEFINITIONS ::= BEGIN
+
+IMPORTS
+	MODULE-IDENTITY, OBJECT-TYPE, OBJECT-IDENTITY, NOTIFICATION-TYPE,
+	Integer32, Gauge32, Counter64
+		FROM SNMPv2-SMI
+	DisplayString, TruthValue
+		FROM SNMPv2-TC
+	MODULE-COMPLIANCE, OBJECT-GROUP, NOTIFICATION-GROUP
+		FROM SNMPv2-CONF
+	panModules, panMibs
+		FROM PAN-GLOBAL-REG
+	PanHAState, PanSessionUtil
+		FROM PAN-GLOBAL-TC;
+
+panCommonMibModule MODULE-IDENTITY
+	LAST-UPDATED "201909271200Z"
+	ORGANIZATION "Palo Alto Networks"
+	CONTACT-INFO "support@paloaltonetworks.com"
+	DESCRIPTION  "MIB objects common to all Palo Alto Networks firewalls"
+	REVISION     "201909271200Z"
+	DESCRIPTION  "Added panSysHAState, panSessionUtilization"
+	::= { panModules 3 }
+
+panCommonMib OBJECT-IDENTITY
+	STATUS	current
+	DESCRIPTION
+		"Sub-tree for common MIB objects"
+	::= { panMibs 3 }
+
+panCommonConfMib OBJECT IDENTIFIER ::= { panCommonMib 1 }
+panCommonObjs OBJECT IDENTIFIER ::= { panCommonMib 2 }
+panCommonEvents OBJECT IDENTIFIER ::= { panCommonMib 3 }
+
+panSys OBJECT IDENTIFIER ::= { panCommonObjs 1 }
+panChassis OBJECT IDENTIFIER ::= { panCommonObjs 2 }
+panSession OBJECT IDENTIFIER ::= { panCommonObjs 3 }
+panMgmt OBJECT IDENTIFIER ::= { panCommonObjs 4 }
+
+panSysSwVersion OBJECT-TYPE
+	SYNTAX		DisplayString (SIZE(0..128))
+	MAX-ACCESS	read-only
+	STATUS		current
+	DESCRIPTION	"Full software version."
+	::= { panSys 1 }
+
+panSysHwVersion OBJECT-TYPE
+	SYNTAX		DisplayString (SIZE(0..128))
+	MAX-ACCESS	read-only
+	STATUS		current
+	DESCRIPTION	"Hardware version."
+	::= { panSys 2 }
+
+panSysSerialNumber OBJECT-TYPE
+	SYNTAX		DisplayString (SIZE(0..128))
+	MAX-ACCESS	read-only
+	STATUS		current
+	DESCRIPTION	"The serial number of this device"
+	::= { panSys 3 }
+
+panSysHAState OBJECT-TYPE
+	SYNTAX		PanHAState
+	MAX-ACCESS	read-only
+	STATUS		current
+	DESCRIPTION	"Current high-availability state."
+	::= { panSys 11 }
+
+panSysHAMode OBJECT-TYPE
+	SYNTAX		DisplayString (SIZE(0..128))
+	MAX-ACCESS	read-only
+	STATUS		current
+	DESCRIPTION	"Current high-availability mode (disabled, active-passive, active-active)."
+	::= { panSys 13 }
+
+panSessionUtilization OBJECT-TYPE
+	SYNTAX		PanSessionUtil
+	UNITS		"%"
+	MAX-ACCESS	read-only
+	STATUS		current
+	DESCRIPTION	"Session table utilization percentage."
+	::= { panSession 1 }
+
+panSessionMax OBJECT-TYPE
+	SYNTAX		Integer32
+	MAX-ACCESS	read-only
+	STATUS		current
+	DESCRIPTION	"Total number of sessions supported."
+	::= { panSession 2 }
+
+panSessionActive OBJECT-TYPE
+	SYNTAX		Integer32
+	MAX-ACCESS	read-only
+	STATUS		current
+	DESCRIPTION	"Total number of active sessions."
+	::= { panSession 3 }
+
+panMgmtPanoramaConnected OBJECT-TYPE
+	SYNTAX		DisplayString (SIZE(0..128))
+	MAX-ACCESS	read-only
+	STATUS		current
+	DESCRIPTION	"Current connection state to Panorama."
+	::= { panMgmt 3 }
+
+-- Event objects and the event notification: the traps in PAN-TRAPS hang under
+-- panCommonEventObjs / panCommonEventEventsV2.
+
+panCommonEventObjs OBJECT IDENTIFIER ::= { panCommonEvents 1 }
+panCommonEventEvents OBJECT IDENTIFIER ::= { panCommonEvents 2 }
+panCommonEventEventsV2 OBJECT IDENTIFIER ::= { panCommonEventEvents 0 }
+
+panCommonEventDescr OBJECT-TYPE
+	SYNTAX		OCTET STRING
+	MAX-ACCESS	accessible-for-notify
+	STATUS		current
+	DESCRIPTION	"A string describing the event."
+	::= { panCommonEventObjs 1 }
+
+panCommonEventLog NOTIFICATION-TYPE
+	OBJECTS		{ panCommonEventDescr }
+	STATUS		current
+	DESCRIPTION	"A generic event notification."
+	::= { panCommonEventEventsV2 1 }
+
+-- Conformance
+
+panCommonConformance OBJECT IDENTIFIER ::= { panCommonConfMib 1 }
+
+panCommonSysGroup OBJECT-GROUP
+	OBJECTS		{ panSysSwVersion, panSysHwVersion, panSysSerialNumber, panSysHAState, panSysHAMode }
+	STATUS		current
+	DESCRIPTION	"System objects"
+	::= { panCommonConformance 1 }
+
+panCommonEventGroup NOTIFICATION-GROUP
+	NOTIFICATIONS	{ panCommonEventLog }
+	STATUS		current
+	DESCRIPTION	"Events"
+	::= { panCommonConformance 2 }
+
+panCommonCompliance MODULE-COMPLIANCE
+	STATUS		current
+	DESCRIPTION	"Compliance statement"
+	MODULE
+		MANDATORY-GROUPS { panCommonSysGroup }
+		GROUP panCommonEventGroup
+		DESCRIPTION "Optional"
+	::= { panCommonConformance 100 }
+
+END

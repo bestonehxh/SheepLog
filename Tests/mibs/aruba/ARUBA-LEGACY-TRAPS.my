@@ -1,0 +1,56 @@
+-- An old SMIv1 module of the kind still found in vendor bundles: RFC1155-SMI / RFC-1212 /
+-- RFC-1215 imports, ACCESS instead of MAX-ACCESS, and TRAP-TYPE definitions (for SheepLog's
+-- tests).
+
+ARUBA-LEGACY-TRAPS DEFINITIONS ::= BEGIN
+
+IMPORTS
+    enterprises, IpAddress
+        FROM RFC1155-SMI
+    OBJECT-TYPE
+        FROM RFC-1212
+    TRAP-TYPE
+        FROM RFC-1215
+    DisplayString
+        FROM RFC1213-MIB;
+
+arubaLegacy OBJECT IDENTIFIER ::= { enterprises 14823 9 }
+
+legacyTrapVars OBJECT IDENTIFIER ::= { arubaLegacy 1 }
+
+legacySwitchIp OBJECT-TYPE
+    SYNTAX      IpAddress
+    ACCESS      read-only
+    STATUS      mandatory
+    DESCRIPTION "Controller address in legacy traps."
+    ::= { legacyTrapVars 1 }
+
+legacyReason OBJECT-TYPE
+    SYNTAX      INTEGER { power-cycle(1), watchdog(2), user-reboot(3) }
+    ACCESS      read-only
+    STATUS      mandatory
+    DESCRIPTION "Why the controller restarted."
+    ::= { legacyTrapVars 2 }
+
+legacyMessage OBJECT-TYPE
+    SYNTAX      DisplayString (SIZE (0..255))
+    ACCESS      read-only
+    STATUS      mandatory
+    DESCRIPTION "Free text."
+    ::= { legacyTrapVars 3 }
+
+legacyControllerRestart TRAP-TYPE
+    ENTERPRISE  arubaLegacy
+    VARIABLES   { legacySwitchIp, legacyReason }
+    DESCRIPTION "The controller restarted."
+    --#TYPE "Controller restart"
+    --#SEVERITY MAJOR
+    ::= 1
+
+legacyConfigChanged TRAP-TYPE
+    ENTERPRISE  arubaLegacy
+    VARIABLES   { legacySwitchIp, legacyMessage }
+    DESCRIPTION "The configuration changed."
+    ::= 2
+
+END

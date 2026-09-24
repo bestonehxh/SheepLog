@@ -1,0 +1,61 @@
+-- Palo Alto Networks-style global registration module (the shapes of PAN-GLOBAL-REG; written
+-- for SheepLog's tests). Forward references: panGlobalRegModule is registered under
+-- panModules, which is defined further down.
+
+PAN-GLOBAL-REG DEFINITIONS ::= BEGIN
+
+IMPORTS
+	MODULE-IDENTITY, OBJECT-IDENTITY, enterprises
+		FROM SNMPv2-SMI;
+
+panGlobalRegModule MODULE-IDENTITY
+	LAST-UPDATED "201004221700Z"
+	ORGANIZATION "Palo Alto Networks"
+	CONTACT-INFO
+		"Customer Support
+		Palo Alto Networks
+		support@paloaltonetworks.com"
+	DESCRIPTION
+		"The root of the Palo Alto Networks OID sub-tree"
+	REVISION "201004221700Z"
+	DESCRIPTION
+		"Initial revision"
+	::= { panModules 1 }
+
+panRoot OBJECT-IDENTITY
+	STATUS	current
+	DESCRIPTION
+		"The root of the Palo Alto Networks OID sub-tree"
+	::= { enterprises 25461 }
+
+panReg OBJECT-IDENTITY
+	STATUS	current
+	DESCRIPTION
+		"Sub-tree for registrations"
+	::= { panRoot 1 }
+
+panModules OBJECT-IDENTITY
+	STATUS	current
+	DESCRIPTION
+		"Sub-tree for module registrations"
+	::= { panReg 1 }
+
+panMibs OBJECT-IDENTITY
+	STATUS	current
+	DESCRIPTION
+		"Sub-tree for all Palo Alto MIB object definitions"
+	::= { panRoot 2 }
+
+panProducts OBJECT-IDENTITY
+	STATUS	current
+	DESCRIPTION
+		"Sub-tree for product (sysObjectID) registrations"
+	::= { panReg 2 }
+
+panExperiment OBJECT-IDENTITY
+	STATUS	current
+	DESCRIPTION
+		"Sub-tree for experimental definitions"
+	::= { panRoot 3 }
+
+END

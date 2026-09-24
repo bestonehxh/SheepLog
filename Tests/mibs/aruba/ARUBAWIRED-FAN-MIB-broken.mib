@@ -1,0 +1,41 @@
+-- A deliberately broken sibling: the file was cut short in transit (no END), and one object
+-- has no OID value. Its errors are reported; the other modules of the bundle are unaffected.
+
+ARUBAWIRED-FAN-MIB DEFINITIONS ::= BEGIN
+
+IMPORTS
+    MODULE-IDENTITY, OBJECT-TYPE, Integer32
+        FROM SNMPv2-SMI
+    DisplayString
+        FROM SNMPv2-TC
+    arubaWiredChassisMIB
+        FROM ARUBAWIRED-NETWORKING-OID;
+
+arubaWiredFanMIB MODULE-IDENTITY
+    LAST-UPDATED "202104050000Z"
+    ORGANIZATION "HPE Aruba Networking"
+    CONTACT-INFO "Hewlett Packard Enterprise"
+    DESCRIPTION  "Fans."
+    ::= { arubaWiredChassisMIB 3 }
+
+arubaWiredFanObjects OBJECT IDENTIFIER ::= { arubaWiredFanMIB 1 }
+
+arubaWiredFanName OBJECT-TYPE
+    SYNTAX      DisplayString
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Name of the fan."
+    ::= { arubaWiredFanObjects 1 }
+
+arubaWiredFanRPM OBJECT-TYPE
+    SYNTAX      Integer32
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Speed of the fan (RPM)."
+    ::=
+
+arubaWiredFanState OBJECT-TYPE
+    SYNTAX      DisplayString
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "State of the fan

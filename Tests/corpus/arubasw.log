@@ -1,0 +1,8 @@
+<14> Sep 23 10:15:32 10.1.0.20 00076 ports: port 24 is now off-line
+<14>Sep 23 10:15:40 SW-2930F-01 00076 ports: port 1/1/24 is now on-line
+<12>Sep 23 10:16:00 SW-2930F-01 00331 FFI: port 1/1/5-Excessive CRC/alignment errors. See help.
+<14>Sep 23 10:16:10 SW-5406R-CORE 02101 802.1x: port A5 - client 02:00:5e:10:00:07 authenticated
+<13>Sep 23 10:16:20 SW-5406R-CORE 00435 ports: port B2 is Blocked by STP
+<14>Sep 23 10:16:30 SW-5406R-CORE 00179 mgr: SME SSH from 10.1.0.5 - MANAGER Mode
+<12>Sep 23 10:16:40 SW-2930F-01 03129 dhcp-snoop: Ceasing untrusted server logs for 5 min
+<14>Sep 23 10:16:50 00076 ports: port 12 is now off-line

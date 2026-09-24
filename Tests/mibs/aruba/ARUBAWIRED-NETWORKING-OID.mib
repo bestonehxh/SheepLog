@@ -1,0 +1,45 @@
+-- ARUBAWIRED-NETWORKING-OID: the registration tree of AOS-CX switches, in the shapes of the
+-- vendor module (written for SheepLog's tests).
+
+ARUBAWIRED-NETWORKING-OID DEFINITIONS ::= BEGIN
+
+IMPORTS
+    MODULE-IDENTITY, OBJECT-IDENTITY, enterprises
+        FROM SNMPv2-SMI;
+
+arubaWiredNetworking MODULE-IDENTITY
+    LAST-UPDATED "202201250000Z"  -- January 25, 2022
+    ORGANIZATION "HPE Aruba Networking"
+    CONTACT-INFO "Hewlett Packard Enterprise
+                  3000 Hanover St.
+                  Palo Alto, CA 94304-1112"
+    DESCRIPTION  "This MIB module describes the object identifiers of the AOS-CX switches."
+    REVISION     "202201250000Z"
+    DESCRIPTION  "Initial revision."
+    ::= { enterprises 47196 4 1 1 }
+
+arubaWiredSwitchProducts OBJECT-IDENTITY
+    STATUS      current
+    DESCRIPTION "Products (sysObjectID) of the AOS-CX family."
+    ::= { arubaWiredNetworking 1 }
+
+arubaWiredSwitchMibs OBJECT-IDENTITY
+    STATUS      current
+    DESCRIPTION "The MIB modules of AOS-CX."
+    ::= { arubaWiredNetworking 3 }
+
+arubaWiredChassisMIB OBJECT IDENTIFIER ::= { arubaWiredSwitchMibs 11 }
+
+arubaWiredCapabilities OBJECT IDENTIFIER ::= { arubaWiredSwitchMibs 99 }
+
+aruba6300 OBJECT-IDENTITY
+    STATUS      current
+    DESCRIPTION "Aruba 6300 switch series"
+    ::= { arubaWiredSwitchProducts 1 }
+
+aruba8325 OBJECT-IDENTITY
+    STATUS      current
+    DESCRIPTION "Aruba 8325 switch series"
+    ::= { arubaWiredSwitchProducts 2 }
+
+END

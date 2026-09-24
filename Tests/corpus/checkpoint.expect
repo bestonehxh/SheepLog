@@ -1,0 +1,7 @@
+info	cp-gw-01	VPN-1 & FireWall-1	24	2026-09-23T03:15:32Z
+info	cp-gw-01	VPN-1 & FireWall-1	14	2026-09-23T03:15:40Z
+critical	cp-gw-01	IPS	16	2026-09-23T03:16:00Z
+error	cp-gw-01	Threat Emulation	12	2026-09-23T03:16:10Z
+info	cp-mgmt	SmartConsole	11	2026-09-23T03:16:20Z
+notice	cp-gw-01	VPN-1 & FireWall-1	9	2026-09-23T03:16:30Z
+info	cp-mgmt	VPN-1 & FireWall-1	7	2026-09-23T10:16:40

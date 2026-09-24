@@ -1,0 +1,473 @@
+--
+-- FORTINET-FORTIGATE-MIB.mib: FortiGate-specific objects in the shapes of the real module
+-- (written for SheepLog's tests; a subset, descriptions shortened).
+--
+
+FORTINET-FORTIGATE-MIB DEFINITIONS ::= BEGIN
+
+IMPORTS
+    fnAdminEntry, fnGenTrapMsg, fnSysSerial, fortinet, FnBoolState, FnIndex,
+    FnSessionProto
+        FROM FORTINET-CORE-MIB
+    ifIndex, ifName
+        FROM IF-MIB
+    InetAddress, InetAddressPrefixLength, InetAddressType, InetPortNumber
+        FROM INET-ADDRESS-MIB
+    MODULE-COMPLIANCE, NOTIFICATION-GROUP, OBJECT-GROUP
+        FROM SNMPv2-CONF
+    sysName
+        FROM SNMPv2-MIB
+    Counter32, Counter64, Gauge32, Integer32, IpAddress, MODULE-IDENTITY,
+    NOTIFICATION-TYPE, OBJECT-IDENTITY, OBJECT-TYPE, TimeTicks, Unsigned32
+        FROM SNMPv2-SMI
+    DisplayString, TEXTUAL-CONVENTION, TruthValue, MacAddress
+        FROM SNMPv2-TC;
+
+fnFortiGateMib MODULE-IDENTITY
+    LAST-UPDATED "202104190000Z"
+    ORGANIZATION
+        "Fortinet Technologies, Inc."
+    CONTACT-INFO
+        "Technical Support
+         email: support@fortinet.com
+         http://www.fortinet.com"
+    DESCRIPTION
+        "MIB module for Fortinet FortiGate devices."
+    REVISION    "202104190000Z"
+    DESCRIPTION "Added fgHaTrapMemberSerial."
+    ::= { fortinet 101 }
+
+--
+-- FortiGate MIB Textual Conventions
+--
+
+FgHaMode ::= TEXTUAL-CONVENTION
+    STATUS      current
+    DESCRIPTION "enumerated type for HA cluster modes"
+    SYNTAX      INTEGER {
+        standalone(1),
+        activeActive(2),
+        activePassive(3)
+    }
+
+FgHaState ::= TEXTUAL-CONVENTION
+    STATUS      current
+    DESCRIPTION "Enumerated type for HA cluster member states"
+    SYNTAX      INTEGER { master(1), backup(2), standalone(3) }
+
+FgVdIndex ::= TEXTUAL-CONVENTION
+    DISPLAY-HINT "d"
+    STATUS       current
+    DESCRIPTION  "data type for virtual domain indexes"
+    SYNTAX       Integer32 (1..2147483647)
+
+FgOpMode ::= TEXTUAL-CONVENTION
+    STATUS      current
+    DESCRIPTION "enumerated type for device operation modes"
+    SYNTAX      INTEGER { nat(1), transparent(2) }
+
+FgSessProto ::= TEXTUAL-CONVENTION
+    STATUS      deprecated
+    DESCRIPTION "Session protocol (use FnSessionProto)"
+    SYNTAX      FnSessionProto
+
+--
+-- fgModel: FortiGate product OIDs (sysObjectID values)
+--
+
+fgModel OBJECT IDENTIFIER ::= { fnFortiGateMib 1 }
+
+fgt60F OBJECT-IDENTITY
+    STATUS      current
+    DESCRIPTION "FortiGate 60F"
+    ::= { fgModel 60006 }
+
+fgt100F OBJECT-IDENTITY
+    STATUS      current
+    DESCRIPTION "FortiGate 100F"
+    ::= { fgModel 1041 }
+
+fgTraps OBJECT IDENTIFIER ::= { fnFortiGateMib 2 }
+
+fgTrapPrefix OBJECT IDENTIFIER ::= { fgTraps 0 }
+
+--
+-- Virtual domains
+--
+
+fgVirtualDomain OBJECT IDENTIFIER ::= { fnFortiGateMib 3 }
+
+fgVdInfo OBJECT IDENTIFIER ::= { fgVirtualDomain 1 }
+
+fgVdNumber OBJECT-TYPE
+    SYNTAX      Integer32
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "The number of virtual domains in vdTable"
+    ::= { fgVdInfo 1 }
+
+fgVdEnabled OBJECT-TYPE
+    SYNTAX      FnBoolState
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Whether virtual domains are enabled on this device"
+    ::= { fgVdInfo 3 }
+
+fgVdTables OBJECT IDENTIFIER ::= { fgVirtualDomain 2 }
+
+fgVdTable OBJECT-TYPE
+    SYNTAX      SEQUENCE OF FgVdEntry
+    MAX-ACCESS  not-accessible
+    STATUS      current
+    DESCRIPTION "A table of virtual domains configured on the device"
+    ::= { fgVdTables 1 }
+
+fgVdEntry OBJECT-TYPE
+    SYNTAX      FgVdEntry
+    MAX-ACCESS  not-accessible
+    STATUS      current
+    DESCRIPTION "An entry containing information applicable to a particular virtual domain"
+    INDEX       { fgVdEntIndex }
+    ::= { fgVdTable 1 }
+
+FgVdEntry ::= SEQUENCE {
+    fgVdEntIndex     FgVdIndex,
+    fgVdEntName      DisplayString,
+    fgVdEntOpMode    FgOpMode,
+    fgVdEntHaState   FgHaState,
+    fgVdEntCpuUsage  Gauge32,
+    fgVdEntMemUsage  Gauge32,
+    fgVdEntSesCount  Gauge32
+}
+
+fgVdEntIndex OBJECT-TYPE
+    SYNTAX      FgVdIndex
+    MAX-ACCESS  not-accessible
+    STATUS      current
+    DESCRIPTION "Internal virtual domain index used to uniquely identify rows in this table."
+    ::= { fgVdEntry 1 }
+
+fgVdEntName OBJECT-TYPE
+    SYNTAX      DisplayString (SIZE (0..32))
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "The name of the virtual domain"
+    ::= { fgVdEntry 2 }
+
+fgVdEntOpMode OBJECT-TYPE
+    SYNTAX      FgOpMode
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Operation mode of the virtual domain (NAT or Transparent)"
+    ::= { fgVdEntry 3 }
+
+fgVdEntHaState OBJECT-TYPE
+    SYNTAX      FgHaState
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "HA cluster member state of the virtual domain on this device"
+    ::= { fgVdEntry 4 }
+
+fgVdEntCpuUsage OBJECT-TYPE
+    SYNTAX      Gauge32 (0..100)
+    UNITS       "%"
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "CPU usage of the virtual domain (percentage)."
+    ::= { fgVdEntry 5 }
+
+fgVdEntMemUsage OBJECT-TYPE
+    SYNTAX      Gauge32 (0..100)
+    UNITS       "%"
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Memory usage of the virtual domain (percentage)."
+    ::= { fgVdEntry 6 }
+
+fgVdEntSesCount OBJECT-TYPE
+    SYNTAX      Gauge32
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Number of active sessions on the virtual domain."
+    ::= { fgVdEntry 7 }
+
+--
+-- System
+--
+
+fgSystem OBJECT IDENTIFIER ::= { fnFortiGateMib 4 }
+
+fgSystemInfo OBJECT IDENTIFIER ::= { fgSystem 1 }
+
+fgSysVersion OBJECT-TYPE
+    SYNTAX      DisplayString (SIZE (0..128))
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Firmware version of the device"
+    ::= { fgSystemInfo 1 }
+
+fgSysMgmtVdom OBJECT-TYPE
+    SYNTAX      FgVdIndex
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Index that identifies the management virtual domain."
+    ::= { fgSystemInfo 2 }
+
+fgSysCpuUsage OBJECT-TYPE
+    SYNTAX      Gauge32 (0..100)
+    UNITS       "%"
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Current CPU usage (percentage)"
+    ::= { fgSystemInfo 3 }
+
+fgSysMemUsage OBJECT-TYPE
+    SYNTAX      Gauge32 (0..100)
+    UNITS       "%"
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Current memory utilization (percentage)"
+    ::= { fgSystemInfo 4 }
+
+fgSysMemCapacity OBJECT-TYPE
+    SYNTAX      Gauge32
+    UNITS       "KB"
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Total physical memory (RAM) installed (KB)"
+    ::= { fgSystemInfo 5 }
+
+fgSysSesCount OBJECT-TYPE
+    SYNTAX      Gauge32
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Number of active sessions on the device"
+    ::= { fgSystemInfo 8 }
+
+fgSysUpTime OBJECT-TYPE
+    SYNTAX      Counter64
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Firewall uptime, in 0.01s. (seconds × 100)"
+    ::= { fgSystemInfo 20 }
+
+--
+-- High availability
+--
+
+fgHighAvailability OBJECT IDENTIFIER ::= { fnFortiGateMib 13 }
+
+fgHaInfo OBJECT IDENTIFIER ::= { fgHighAvailability 1 }
+
+fgHaSystemMode OBJECT-TYPE
+    SYNTAX      FgHaMode
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "High-availability mode (Standalone, A-A or A-P)"
+    ::= { fgHaInfo 1 }
+
+fgHaGroupId OBJECT-TYPE
+    SYNTAX      Integer32 (0..255)
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "HA cluster group ID device is configured for"
+    ::= { fgHaInfo 2 }
+
+fgHaPriority OBJECT-TYPE
+    SYNTAX      Integer32 (0..255)
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "HA clustering priority of the device (default = 127)"
+    ::= { fgHaInfo 3 }
+
+fgHaOverride OBJECT-TYPE
+    SYNTAX      FnBoolState
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Status of a master override flag"
+    ::= { fgHaInfo 4 }
+
+fgHaAutoSync OBJECT-TYPE
+    SYNTAX      FnBoolState
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Configuration of an automatic configuration synchronization (enabled or disabled)"
+    ::= { fgHaInfo 5 }
+
+fgHaTrapObjects OBJECT IDENTIFIER ::= { fgHighAvailability 3 }
+
+fgHaTrapMemberSerial OBJECT-TYPE
+    SYNTAX      DisplayString
+    MAX-ACCESS  accessible-for-notify
+    STATUS      current
+    DESCRIPTION "Serial number of an HA cluster member. Used to identify the origin of a trap
+                 when a cluster is configured."
+    ::= { fgHaTrapObjects 1 }
+
+--
+-- Sessions (protocol from the core TC)
+--
+
+fgIntf OBJECT IDENTIFIER ::= { fnFortiGateMib 7 }
+
+fgSessions OBJECT IDENTIFIER ::= { fnFortiGateMib 12 }
+
+fgSessInfo OBJECT IDENTIFIER ::= { fgSessions 1 }
+
+fgSessTable OBJECT-TYPE
+    SYNTAX      SEQUENCE OF FgSessEntry
+    MAX-ACCESS  not-accessible
+    STATUS      deprecated
+    DESCRIPTION "A table of IP sessions active on the device"
+    ::= { fgSessInfo 2 }
+
+fgSessEntry OBJECT-TYPE
+    SYNTAX      FgSessEntry
+    MAX-ACCESS  not-accessible
+    STATUS      deprecated
+    DESCRIPTION "Information on a specific session"
+    INDEX       { fgSessIndex }
+    ::= { fgSessTable 1 }
+
+FgSessEntry ::= SEQUENCE {
+    fgSessIndex   FnIndex,
+    fgSessProto   FgSessProto,
+    fgSessFromAddr IpAddress,
+    fgSessFromPort InetPortNumber,
+    fgSessToAddr  IpAddress,
+    fgSessToPort  InetPortNumber,
+    fgSessExp     Counter32,
+    fgSessVdom    FgVdIndex
+}
+
+fgSessIndex OBJECT-TYPE
+    SYNTAX      FnIndex
+    MAX-ACCESS  not-accessible
+    STATUS      deprecated
+    DESCRIPTION "An index value that uniquely identifies an IP session"
+    ::= { fgSessEntry 1 }
+
+fgSessProto OBJECT-TYPE
+    SYNTAX      FgSessProto
+    MAX-ACCESS  read-only
+    STATUS      deprecated
+    DESCRIPTION "The protocol the session is using (IP, TCP, UDP, etc.)"
+    ::= { fgSessEntry 2 }
+
+fgSessFromAddr OBJECT-TYPE
+    SYNTAX      IpAddress
+    MAX-ACCESS  read-only
+    STATUS      deprecated
+    DESCRIPTION "Source IP address (IPv4 only) of the session"
+    ::= { fgSessEntry 3 }
+
+fgSessFromPort OBJECT-TYPE
+    SYNTAX      InetPortNumber
+    MAX-ACCESS  read-only
+    STATUS      deprecated
+    DESCRIPTION "Source port number (UDP and TCP only) of the session"
+    ::= { fgSessEntry 4 }
+
+fgSessToAddr OBJECT-TYPE
+    SYNTAX      IpAddress
+    MAX-ACCESS  read-only
+    STATUS      deprecated
+    DESCRIPTION "Destination IP address (IPv4 only) of the session"
+    ::= { fgSessEntry 5 }
+
+fgSessToPort OBJECT-TYPE
+    SYNTAX      InetPortNumber
+    MAX-ACCESS  read-only
+    STATUS      deprecated
+    DESCRIPTION "Destination Port number (UDP and TCP only) of the session"
+    ::= { fgSessEntry 6 }
+
+fgSessExp OBJECT-TYPE
+    SYNTAX      Counter32
+    UNITS       "seconds"
+    MAX-ACCESS  read-only
+    STATUS      deprecated
+    DESCRIPTION "Number of seconds remaining before the session expires (if idle)"
+    ::= { fgSessEntry 7 }
+
+fgSessVdom OBJECT-TYPE
+    SYNTAX      FgVdIndex
+    MAX-ACCESS  read-only
+    STATUS      deprecated
+    DESCRIPTION "Virtual domain the session is part of."
+    ::= { fgSessEntry 8 }
+
+--
+-- FortiGate traps
+--
+
+fgTrapVpnTunUp NOTIFICATION-TYPE
+    OBJECTS     { fnSysSerial, sysName, fgHaTrapMemberSerial }
+    STATUS      current
+    DESCRIPTION "Indicates that the specified VPN tunnel has been brought up."
+    ::= { fgTrapPrefix 301 }
+
+fgTrapVpnTunDown NOTIFICATION-TYPE
+    OBJECTS     { fnSysSerial, sysName, fgHaTrapMemberSerial }
+    STATUS      current
+    DESCRIPTION "The specified VPN tunnel has been brought down."
+    ::= { fgTrapPrefix 302 }
+
+fgTrapHaSwitch NOTIFICATION-TYPE
+    OBJECTS     { fnSysSerial, sysName, fgHaTrapMemberSerial }
+    STATUS      current
+    DESCRIPTION "The specified cluster member has transitioned from a slave role to a master role."
+    ::= { fgTrapPrefix 401 }
+
+fgTrapHaHBFail NOTIFICATION-TYPE
+    OBJECTS     { fnSysSerial, sysName }
+    STATUS      current
+    DESCRIPTION "The heartbeat device failure count has exceeded the configured threshold."
+    ::= { fgTrapPrefix 403 }
+
+--
+-- Conformance
+--
+
+fnFortiGateConformance OBJECT IDENTIFIER ::= { fnFortiGateMib 100 }
+
+fgSystemObjectGroup OBJECT-GROUP
+    OBJECTS     { fgSysVersion, fgSysMgmtVdom, fgSysCpuUsage, fgSysMemUsage, fgSysMemCapacity,
+                  fgSysSesCount, fgSysUpTime }
+    STATUS      current
+    DESCRIPTION "Objects pertaining to the system status of the device."
+    ::= { fnFortiGateConformance 1 }
+
+fgHaObjectGroup OBJECT-GROUP
+    OBJECTS     { fgHaSystemMode, fgHaGroupId, fgHaPriority, fgHaOverride, fgHaAutoSync,
+                  fgHaTrapMemberSerial }
+    STATUS      current
+    DESCRIPTION "Objects pertaining to High-Availability clustering of FortiGate devices."
+    ::= { fnFortiGateConformance 2 }
+
+fgTrapsGroup NOTIFICATION-GROUP
+    NOTIFICATIONS { fgTrapVpnTunUp, fgTrapVpnTunDown, fgTrapHaSwitch, fgTrapHaHBFail }
+    STATUS      current
+    DESCRIPTION "Traps are intended for FortiGate devices."
+    ::= { fnFortiGateConformance 3 }
+
+fnFortiGateCompliance MODULE-COMPLIANCE
+    STATUS      current
+    DESCRIPTION "The compliance statement for the application MIB."
+
+    MODULE      -- this module
+        MANDATORY-GROUPS { fgSystemObjectGroup }
+
+        GROUP       fgHaObjectGroup
+        DESCRIPTION "This group is mandatory for devices in an HA cluster."
+
+        OBJECT      fgHaSystemMode
+        SYNTAX      INTEGER { standalone(1), activePassive(3) }
+        DESCRIPTION "Active-active is not required."
+
+        GROUP       fgTrapsGroup
+        DESCRIPTION "Traps are optional. Not all models support all traps."
+
+    ::= { fnFortiGateConformance 100 }
+
+END -- end of module FORTINET-FORTIGATE-MIB.

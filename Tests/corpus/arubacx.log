@@ -1,0 +1,8 @@
+<187>1 2026-09-23T10:15:32.123+07:00 CX6300-CORE-01 lldpd 2512 - - Event|1302|LOG_WARN|AMM|1/1|LLDP neighbor 10.1.0.9 removed on port 1/1/24
+<190>1 2026-09-23T10:15:40.512004+07:00 CX6300-CORE-01 intfd 1633 - - Event|403|LOG_INFO|AMM|1/1|Link status for interface 1/1/24 is down
+<189>1 2026-09-23T10:16:02+07:00 CX8360-AGG-02 hpe-config 2211 - - Event|6801|LOG_NOTICE|UKWN|-|Configuration change by admin via REST: interface 1/1/12 no shutdown
+<185>1 2026-09-23T03:17:10.000Z CX6300-ACC-12 ops-switchd 1432 - - Event|1105|LOG_CRIT|AMM|1/1|Power supply 2 in slot 1/1 failed
+<177>1 2026-09-23T03:17:11Z CX6300-ACC-12 fand 1433 - - Event|1403|LOG_ALERT|AMM|1/1|Fan tray 1 fault detected, system temperature rising
+<187>Sep 23 10:18:00 CX6200-ACC-03 port-access[3201]: Event|10505|LOG_ERR|AMM|1/1|Port 1/1/7 MAC-auth failed for client 02:00:5e:10:00:22
+<191>1 2026-09-23T10:19:00+07:00 CX6300-CORE-01 ntpd 1502 - - Event|1101|LOG_DEBUG|AMM|-|NTP server 10.1.0.1 selected as reference
+<190>1 2026-09-23T10:20:05.250+07:00 CX6300-CORE-01 hpe-restd 3345 - - Event|4691|LOG_INFO|UKWN|1|User admin logged in from 10.1.0.5 through REST session

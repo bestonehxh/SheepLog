@@ -1,0 +1,8 @@
+build/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+.DS_Store
+tests-scratch/
+.claude/
+.dd/

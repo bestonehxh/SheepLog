@@ -1,0 +1,8 @@
+<187>Sep 23 2026 10:15:32 HW-CE6881 %%01IFNET/4/LINK_STATE(l)[12]:The line protocol IP on the interface 10GE1/0/24 has entered the DOWN state.
+<189>Sep 23 2026 10:15:40 S5720-CORE %%01SHELL/5/CMDRECORD(s)[13]:Recorded command information. (Task=VT0, Ip=10.1.0.5, VpnName=, User=admin, AuthenticationMethod="Local-user", Command="display interface brief")
+<188>Sep 23 2026 10:16:00 S5720-CORE %%01OSPF/3/NBR_CHG_DOWN(l)[14]:Neighbor event:neighbor state changed to Down. (ProcessId=1, NeighborAddress=10.0.0.2, NeighborEvent=KillNbr, NeighborPreviousState=Full, NeighborCurrentState=Down)
+<190>Sep 23 2026 10:16:10 S5720-CORE %%01AAA/6/LOCALACCOUNT_LOGIN(s)[15]:Local account admin login succeeded. (UserIp=10.1.0.5, UserName=admin)
+<188>Sep 23 2026 10:16:20 S5720-ACC-07 %%01LLDP/4/NBRCHGTRAP(l)[16]:Neighbor information of the interface was changed. (NeighborIndex=1, Action=delete, Interface=GigabitEthernet0/0/12, RemoteChassisType=4, RemoteChassisId=02:00:5e:aa:bb:07, RemotePortIdType=5, RemotePortId=GE0/0/1, RemoteSystemName=AP-Lobby)
+<185>Sep 23 2026 10:16:30+07:00 HW-CE6881 %%01IFNET/1/linkDown_active(l):CID=0x80fa0002-alarmID=0x08520003;The interface status changes. (ifName=10GE1/0/24, AdminStatus=UP, OperStatus=DOWN, Reason=The link protocol is down, mainIfname=10GE1/0/24)
+<189>Sep 23 2026 10:16:40 HW-AR6120 %%01SSH/5/SSH_USER_LOGIN(s)[17]:The SSH user succeeded in logging in. (ServiceType=stelnet, UserName=admin, UserAddress=10.1.0.5, LocalAddress=10.1.0.1, VPNInstanceName=_public_)
+<188>Sep 23 2026 10:16:50 S5720-CORE %%01IFNET/4/IF_STATE(l)[18]:Interface GigabitEthernet0/0/3 has turned into DOWN state.

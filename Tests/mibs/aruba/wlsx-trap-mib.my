@@ -1,0 +1,79 @@
+-- WLSX-TRAP-MIB: Mobility Controller notifications (the shapes of the vendor module; written
+-- for SheepLog's tests).
+
+WLSX-TRAP-MIB DEFINITIONS ::= BEGIN
+
+IMPORTS
+    MODULE-IDENTITY, OBJECT-TYPE, NOTIFICATION-TYPE, OBJECT-IDENTITY, Integer32, IpAddress
+        FROM SNMPv2-SMI
+    DisplayString, MacAddress
+        FROM SNMPv2-TC
+    ArubaAPStatus
+        FROM ARUBA-TC
+    wlsxEnterpriseMibModules
+        FROM ARUBA-MIB;
+
+wlsxTrapMIB MODULE-IDENTITY
+    LAST-UPDATED "0804160206Z"
+    ORGANIZATION "Aruba Wireless Networks"
+    CONTACT-INFO "support@arubanetworks.com"
+    DESCRIPTION  "Traps of the Mobility Controller."
+    ::= { wlsxEnterpriseMibModules 3 }
+
+wlsxTrapObjectsGroup OBJECT-IDENTITY
+    STATUS      current
+    DESCRIPTION "Objects carried in traps."
+    ::= { wlsxTrapMIB 1 }
+
+wlsxTrapDefinitionsGroup OBJECT-IDENTITY
+    STATUS      current
+    DESCRIPTION "Trap definitions."
+    ::= { wlsxTrapMIB 2 }
+
+wlsxTrapTime OBJECT-TYPE
+    SYNTAX      DisplayString
+    MAX-ACCESS  accessible-for-notify
+    STATUS      current
+    DESCRIPTION "Time of the event."
+    ::= { wlsxTrapObjectsGroup 1 }
+
+wlsxTrapUserMacAddress OBJECT-TYPE
+    SYNTAX      MacAddress
+    MAX-ACCESS  accessible-for-notify
+    STATUS      current
+    DESCRIPTION "MAC address of the user."
+    ::= { wlsxTrapObjectsGroup 2 }
+
+wlsxTrapAPStatus OBJECT-TYPE
+    SYNTAX      ArubaAPStatus
+    MAX-ACCESS  accessible-for-notify
+    STATUS      current
+    DESCRIPTION "AP status."
+    ::= { wlsxTrapObjectsGroup 3 }
+
+wlsxTrapAPName OBJECT-TYPE
+    SYNTAX      DisplayString
+    MAX-ACCESS  accessible-for-notify
+    STATUS      current
+    DESCRIPTION "AP name."
+    ::= { wlsxTrapObjectsGroup 4 }
+
+wlsxNUserAuthenticationFailed NOTIFICATION-TYPE
+    OBJECTS     { wlsxTrapTime, wlsxTrapUserMacAddress }
+    STATUS      current
+    DESCRIPTION "A user failed to authenticate."
+    ::= { wlsxTrapDefinitionsGroup 1013 }
+
+wlsxNAccessPointIsDown NOTIFICATION-TYPE
+    OBJECTS     { wlsxTrapTime, wlsxTrapAPName, wlsxTrapAPStatus }
+    STATUS      current
+    DESCRIPTION "An access point is down."
+    ::= { wlsxTrapDefinitionsGroup 1036 }
+
+wlsxNAccessPointIsUp NOTIFICATION-TYPE
+    OBJECTS     { wlsxTrapTime, wlsxTrapAPName, wlsxTrapAPStatus }
+    STATUS      current
+    DESCRIPTION "An access point is up."
+    ::= { wlsxTrapDefinitionsGroup 1037 }
+
+END

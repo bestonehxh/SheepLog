@@ -1,0 +1,44 @@
+-- Palo Alto Networks-style product registrations (the shapes of PAN-PRODUCTS-MIB; for
+-- SheepLog's tests). Names with a hyphen and digits, as the vendor writes them.
+
+PAN-PRODUCTS-MIB DEFINITIONS ::= BEGIN
+
+IMPORTS
+	MODULE-IDENTITY, OBJECT-IDENTITY
+		FROM SNMPv2-SMI
+	panModules, panProducts
+		FROM PAN-GLOBAL-REG;
+
+panProductsMibsModule MODULE-IDENTITY
+	LAST-UPDATED "202001151200Z"
+	ORGANIZATION "Palo Alto Networks"
+	CONTACT-INFO "support@paloaltonetworks.com"
+	DESCRIPTION  "Product sysObjectID values"
+	::= { panModules 4 }
+
+panPA-220 OBJECT-IDENTITY
+	STATUS	current
+	DESCRIPTION "PA-220"
+	::= { panProducts 42 }
+
+panPA-3220 OBJECT-IDENTITY
+	STATUS	current
+	DESCRIPTION "PA-3220"
+	::= { panProducts 46 }
+
+panPA-5250 OBJECT-IDENTITY
+	STATUS	current
+	DESCRIPTION "PA-5250"
+	::= { panProducts 51 }
+
+panPA-VM OBJECT-IDENTITY
+	STATUS	current
+	DESCRIPTION "VM-Series"
+	::= { panProducts 29 }
+
+panPanorama OBJECT-IDENTITY
+	STATUS	current
+	DESCRIPTION "Panorama"
+	::= { panProducts 30 }
+
+END

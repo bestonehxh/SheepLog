@@ -1,0 +1,7 @@
+error	cppm01	CPPM_RADIUS_Logs	6	2026-09-23T10:15:32
+info	cppm01	CPPM_RADIUS_Logs	8	2026-09-23T10:15:40
+error	cppm01	CPPM_TACACS_Logs	6	2026-09-23T10:16:00
+warning	10.1.1.50	CPPM_Session_Logs	6	2026-09-23T10:16:10.123
+error	cppm01	CPPM_System_Events	5	2026-09-23T10:16:20
+notice	cppm01	CPPM_Audit_Records	5	2026-09-23T10:16:30
+info	cppm01	CPPM_Endpoint_Logs	4	2026-09-23T10:16:40

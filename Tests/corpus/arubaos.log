@@ -1,0 +1,10 @@
+<133>Sep 23 10:12:01 2026 MM-1 authmgr[4211]: <522008> <4211> <NOTI> <MM-1 10.1.1.10>  User Authentication Successful: username=alice MAC=02:00:5e:10:00:01 IP=10.20.0.15 role=employee VLAN=20 AP=AP-Lobby SSID=Corp auth method=802.1x auth server=CPPM
+<131>Sep 23 10:12:03 2026 MD-7210-1 authmgr[4211]: <522275> <4211> <ERRS> <MD-7210-1 10.1.1.11>  User Authentication failed. username=bob MAC=02:00:5e:10:00:02 IP=0.0.0.0 auth method=802.1x auth server=CPPM
+<134>Sep 23 10:12:04 2026 MD-7210-1 stm[3456]: <501093> <3456> <NOTI> <MD-7210-1 10.1.1.11>  Auth success: 02:00:5e:10:00:03: AP 10.1.2.21-24:de:c6:aa:bb:cc-AP-315-Floor2
+<135>Sep 23 10:12:05 2026 MD-7210-1 stm[3456]: <501106> <3456> <DBUG> <MD-7210-1 10.1.1.11>  Deauth to sta: 02:00:5e:10:00:03: Ageout AP 10.1.2.21-24:de:c6:aa:bb:cc-AP-315-Floor2 Sapcp Ageout
+<132>Sep 23 10:12:06 2026 MD-7210-1 sapd[2345]: <404400> <WARN> |AP AP-315-Floor2@10.1.2.21 sapd|  AM: Interfering AP detected with SSID Guest and BSSID 02:00:5e:aa:bb:01
+<132>Sep 23 10:12:07 2026 10.1.1.21 cli[3510]: <341004> <WARN> |AP IAP-305-Lobby@10.1.1.21 cli| Recv image upgrade request
+<134>Sep 23 10:12:08 2026 20:4c:03:aa:bb:cc sapd[1996]: <326278> <NOTI> |AP 20:4c:03:aa:bb:cc@10.1.1.22 sapd|  AM: New Node Detected Node = 02:00:5e:10:00:05 SSID = Corp BSSID 20:4c:03:aa:bb:c0
+<130>Sep 23 10:12:09 2026 MM-1 fpapps[3001]: <399816> <CRIT> <MM-1 10.1.1.10>  Controller-to-controller IPsec tunnel to 10.1.1.12 is down
+<133>Sep 23 10:12:10 MM-1 mgmd[2511]: <506010> <NOTI> <MM-1 10.1.1.10>  Heartbeat miss from MD 10.1.1.11
+<132>Sep 23 10:12:11 2026 MM-1 stm[3456]: <303022> <3456> <WARN> <MM-1 10.1.1.10>  AP AP-315-Floor2 is down; last heard from 10.1.2.21

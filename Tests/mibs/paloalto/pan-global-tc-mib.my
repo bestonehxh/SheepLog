@@ -1,0 +1,43 @@
+-- Palo Alto Networks-style textual conventions (the shapes of PAN-GLOBAL-TC; for SheepLog's
+-- tests).
+
+PAN-GLOBAL-TC DEFINITIONS ::= BEGIN
+
+IMPORTS
+	MODULE-IDENTITY
+		FROM SNMPv2-SMI
+	TEXTUAL-CONVENTION
+		FROM SNMPv2-TC
+	panModules
+		FROM PAN-GLOBAL-REG;
+
+panGlobalTcModule MODULE-IDENTITY
+	LAST-UPDATED "201004221700Z"
+	ORGANIZATION "Palo Alto Networks"
+	CONTACT-INFO "support@paloaltonetworks.com"
+	DESCRIPTION  "Palo Alto Networks textual conventions"
+	::= { panModules 2 }
+
+PanHAState ::= TEXTUAL-CONVENTION
+	STATUS	current
+	DESCRIPTION
+		"Current high-availability state of a firewall"
+	SYNTAX	INTEGER {
+		initial(1),
+		active(2),
+		passive(3),
+		active-primary(4),
+		active-secondary(5),
+		tentative(6),
+		non-functional(7),
+		suspended(8),
+		unknown(9)
+	}
+
+PanSessionUtil ::= TEXTUAL-CONVENTION
+	DISPLAY-HINT "d"
+	STATUS	current
+	DESCRIPTION "Session table utilization percentage"
+	SYNTAX	Integer32 (0..100)
+
+END

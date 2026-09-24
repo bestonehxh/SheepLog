@@ -1,0 +1,296 @@
+--
+-- FORTINET-CORE-MIB.mib: a Fortinet-style core MIB (the shapes of the real one; written for
+-- SheepLog's tests, descriptions shortened). CRLF line ends, as the vendor ships them.
+--
+
+FORTINET-CORE-MIB DEFINITIONS ::= BEGIN
+
+IMPORTS
+    MODULE-COMPLIANCE, NOTIFICATION-GROUP, OBJECT-GROUP
+        FROM SNMPv2-CONF
+    ifIndex, ifName
+        FROM IF-MIB
+    InetAddress, InetAddressPrefixLength, InetAddressType
+        FROM INET-ADDRESS-MIB
+    sysName
+        FROM SNMPv2-MIB
+    enterprises, Integer32, MODULE-IDENTITY, NOTIFICATION-TYPE,
+    OBJECT-IDENTITY, OBJECT-TYPE
+        FROM SNMPv2-SMI
+    DisplayString, TEXTUAL-CONVENTION
+        FROM SNMPv2-TC;
+
+fortinet MODULE-IDENTITY
+    LAST-UPDATED "202106010000Z"
+    ORGANIZATION
+        "Fortinet Technologies, Inc."
+    CONTACT-INFO
+        "Technical Support
+         email: support@fortinet.com
+         http://www.fortinet.com"
+    DESCRIPTION
+        "Registered as Fortinet Technologies, Inc. enterprise number 12356.
+         Core definitions shared by every Fortinet product (FortiGate, FortiAnalyzer, …)."
+    REVISION    "202106010000Z"
+    DESCRIPTION "Added fnTrapIpChange."
+    REVISION    "201807100000Z"
+    DESCRIPTION "Initial version (©Fortinet)."
+    ::= { enterprises 12356 }
+
+--
+-- Fortinet MIB Textual Conventions (TC)
+--
+
+FnBoolState ::= TEXTUAL-CONVENTION
+    STATUS      current
+    DESCRIPTION
+        "Boolean data type"
+    SYNTAX      INTEGER {
+        disabled (1),
+        enabled  (2)
+    }
+
+FnIndex ::= TEXTUAL-CONVENTION
+    DISPLAY-HINT "d"
+    STATUS       current
+    DESCRIPTION
+        "Data type for table index values"
+    SYNTAX       Integer32 (0..2147483647)
+
+FnSessionProto ::= TEXTUAL-CONVENTION
+    STATUS      current
+    DESCRIPTION
+        "Data type for session protocols"
+    SYNTAX      INTEGER {
+        ip      (0),
+        icmp    (1),
+        igmp    (2),
+        ipip    (4),
+        tcp     (6),
+        egp     (8),
+        pup     (12),
+        udp     (17),
+        idp     (22),
+        ipv6    (41),
+        rsvp    (46),
+        gre     (47),
+        esp     (50),
+        ah      (51),
+        ospf    (89),
+        pim     (103),
+        comp    (108),
+        raw     (255)
+    }
+
+FnAdminProfile ::= TEXTUAL-CONVENTION
+    DISPLAY-HINT "255a"
+    STATUS       current
+    DESCRIPTION  "Administrator profile name"
+    SYNTAX       OCTET STRING (SIZE (0..35))
+
+--
+-- Fortinet Core MIB
+--
+
+fnCoreMib OBJECT-IDENTITY
+    STATUS      current
+    DESCRIPTION "Fortinet core MIB branch"
+    ::= { fortinet 100 }
+
+fnCommon OBJECT IDENTIFIER ::= { fnCoreMib 1 }
+
+fnSystem OBJECT IDENTIFIER ::= { fnCommon 1 }
+
+fnSysSerial OBJECT-TYPE
+    SYNTAX      DisplayString (SIZE (0..32))
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION
+        "Device serial number. This is the same as the serial number of the unit
+         which can be found on the unit's label."
+    ::= { fnSystem 1 }
+
+fnMgmt OBJECT IDENTIFIER ::= { fnCommon 2 }
+
+fnAdmin OBJECT IDENTIFIER ::= { fnMgmt 100 }
+
+fnAdminNumber OBJECT-TYPE
+    SYNTAX      Integer32
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "The number of admin accounts in fnAdminTable"
+    ::= { fnAdmin 1 }
+
+fnAdminTable OBJECT-TYPE
+    SYNTAX      SEQUENCE OF FnAdminEntry
+    MAX-ACCESS  not-accessible
+    STATUS      current
+    DESCRIPTION "A table of administrator accounts on the device."
+    ::= { fnAdmin 2 }
+
+fnAdminEntry OBJECT-TYPE
+    SYNTAX      FnAdminEntry
+    MAX-ACCESS  not-accessible
+    STATUS      current
+    DESCRIPTION "An entry containing information applicable to a particular admin account"
+    INDEX       { fnAdminIndex }
+    ::= { fnAdminTable 1 }
+
+FnAdminEntry ::= SEQUENCE {
+    fnAdminIndex    FnIndex,
+    fnAdminName     DisplayString,
+    fnAdminAddrType InetAddressType,
+    fnAdminAddr     InetAddress,
+    fnAdminMask     InetAddressPrefixLength,
+    fnAdminProfile  FnAdminProfile
+}
+
+fnAdminIndex OBJECT-TYPE
+    SYNTAX      FnIndex
+    MAX-ACCESS  not-accessible
+    STATUS      current
+    DESCRIPTION "An index uniquely defining an administrator account within the fnAdminTable"
+    ::= { fnAdminEntry 1 }
+
+fnAdminName OBJECT-TYPE
+    SYNTAX      DisplayString (SIZE (0..35))
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "The user-name of the specified administrator account"
+    ::= { fnAdminEntry 2 }
+
+fnAdminAddrType OBJECT-TYPE
+    SYNTAX      InetAddressType
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "The type of address stored in fnAdminAddr, in compliance with INET-ADDRESS-MIB"
+    ::= { fnAdminEntry 3 }
+
+fnAdminAddr OBJECT-TYPE
+    SYNTAX      InetAddress
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "The address prefix identifying where the administrator account can be used from"
+    ::= { fnAdminEntry 4 }
+
+fnAdminMask OBJECT-TYPE
+    SYNTAX      InetAddressPrefixLength
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "The address prefix length (or network mask)"
+    ::= { fnAdminEntry 5 }
+
+fnAdminProfile OBJECT-TYPE
+    SYNTAX      FnAdminProfile
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "The access profile of the administrator"
+    ::= { fnAdminEntry 6 }
+
+--
+-- Fortinet Core Traps
+--
+
+fnTraps OBJECT IDENTIFIER ::= { fnCommon 3 }
+
+fnTrapsPrefix OBJECT IDENTIFIER ::= { fnTraps 0 }
+
+fnTrapObjects OBJECT IDENTIFIER ::= { fnTraps 1 }
+
+fnGenTrapMsg OBJECT-TYPE
+    SYNTAX      DisplayString (SIZE (0..128))
+    MAX-ACCESS  accessible-for-notify
+    STATUS      current
+    DESCRIPTION "Generic message associated with an event. The contents will depend on the
+                 nature of the event."
+    ::= { fnTrapObjects 1 }
+
+fnTrapCpuThreshold NOTIFICATION-TYPE
+    OBJECTS     { fnSysSerial, sysName }
+    STATUS      current
+    DESCRIPTION
+        "Indicates that the CPU usage has exceeded the configured threshold."
+    ::= { fnTrapsPrefix 101 }
+
+fnTrapMemThreshold NOTIFICATION-TYPE
+    OBJECTS     { fnSysSerial, sysName }
+    STATUS      current
+    DESCRIPTION
+        "Indicates memory usage has exceeded the threshold."
+    ::= { fnTrapsPrefix 102 }
+
+fnTrapLogDiskThreshold NOTIFICATION-TYPE
+    OBJECTS     { fnSysSerial, sysName }
+    STATUS      current
+    DESCRIPTION "Log disk usage has exceeded the configured threshold."
+    ::= { fnTrapsPrefix 103 }
+
+fnTrapTempHigh NOTIFICATION-TYPE
+    OBJECTS     { fnSysSerial, sysName }
+    STATUS      current
+    DESCRIPTION "A temperature sensor on the device has exceeded its threshold."
+    ::= { fnTrapsPrefix 104 }
+
+fnTrapIpChange NOTIFICATION-TYPE
+    OBJECTS     { fnSysSerial, sysName, ifName, fnGenTrapMsg }
+    STATUS      current
+    DESCRIPTION
+        "Indicates that the IP address of the specified interface has been changed."
+    ::= { fnTrapsPrefix 3 }
+
+--
+-- Fortinet Core MIB Conformance Information
+--
+
+fnCoreConformance OBJECT IDENTIFIER ::= { fnCoreMib 10 }
+
+fnSystemComplianceGroup OBJECT-GROUP
+    OBJECTS     { fnSysSerial }
+    STATUS      current
+    DESCRIPTION "Objects relating to the physical device."
+    ::= { fnCoreConformance 1 }
+
+fnAdminComplianceGroup OBJECT-GROUP
+    OBJECTS     { fnAdminNumber, fnAdminName, fnAdminAddrType, fnAdminAddr, fnAdminMask, fnAdminProfile }
+    STATUS      current
+    DESCRIPTION "Administration access control objects."
+    ::= { fnCoreConformance 2 }
+
+fnNotifObjectsComplianceGroup OBJECT-GROUP
+    OBJECTS     { fnGenTrapMsg }
+    STATUS      current
+    DESCRIPTION "Object identifiers used in notifications"
+    ::= { fnCoreConformance 5 }
+
+fnNotificationsComplianceGroup NOTIFICATION-GROUP
+    NOTIFICATIONS { fnTrapCpuThreshold, fnTrapMemThreshold, fnTrapLogDiskThreshold,
+                    fnTrapTempHigh, fnTrapIpChange }
+    STATUS      current
+    DESCRIPTION "Notifications that can be generated from any Fortinet device."
+    ::= { fnCoreConformance 6 }
+
+fnCoreCompliance MODULE-COMPLIANCE
+    STATUS      current
+    DESCRIPTION "The compliance statement for the application MIB."
+
+    MODULE      -- this module
+
+        GROUP   fnSystemComplianceGroup
+        DESCRIPTION
+              "This group is mandatory for all Fortinet network appliances
+               supporting this MIB."
+
+        GROUP   fnAdminComplianceGroup
+        DESCRIPTION
+              "This group is optional for devices that do not support common
+               admin account management."
+
+        GROUP   fnNotifObjectsComplianceGroup
+        DESCRIPTION "Mandatory for devices sending notifications."
+
+        GROUP   fnNotificationsComplianceGroup
+        DESCRIPTION "Mandatory for devices sending notifications."
+
+    ::= { fnCoreConformance 100 }
+
+END -- end of module FORTINET-CORE-MIB.

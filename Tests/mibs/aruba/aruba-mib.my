@@ -1,0 +1,77 @@
+-- ARUBA-MIB and ARUBA-TC in one file, as Aruba controller bundles ship them (the shapes of
+-- the vendor modules; written for SheepLog's tests).
+
+ARUBA-MIB DEFINITIONS ::= BEGIN
+
+IMPORTS
+    MODULE-IDENTITY, OBJECT-IDENTITY, enterprises
+        FROM SNMPv2-SMI;
+
+aruba MODULE-IDENTITY
+    LAST-UPDATED "0804160206Z"
+    ORGANIZATION "Aruba Wireless Networks"
+    CONTACT-INFO "support@arubanetworks.com"
+    DESCRIPTION  "The Aruba enterprise."
+    ::= { enterprises 14823 }
+
+arubaEnterpriseMibModules OBJECT-IDENTITY
+    STATUS      current
+    DESCRIPTION "The enterprise MIB modules."
+    ::= { aruba 2 }
+
+arubaMIBModules OBJECT-IDENTITY
+    STATUS      current
+    DESCRIPTION "Module registrations."
+    ::= { arubaEnterpriseMibModules 1 }
+
+wlsxEnterpriseMibModules OBJECT-IDENTITY
+    STATUS      current
+    DESCRIPTION "WLSX (Mobility Controller) modules."
+    ::= { arubaEnterpriseMibModules 2 }
+
+arubaProducts OBJECT-IDENTITY
+    STATUS      current
+    DESCRIPTION "Controller and AP product OIDs."
+    ::= { aruba 1 }
+
+END
+
+ARUBA-TC DEFINITIONS ::= BEGIN
+
+IMPORTS
+    MODULE-IDENTITY, Integer32
+        FROM SNMPv2-SMI
+    TEXTUAL-CONVENTION
+        FROM SNMPv2-TC
+    arubaMIBModules
+        FROM ARUBA-MIB;
+
+arubaTextualConventions MODULE-IDENTITY
+    LAST-UPDATED "0804160206Z"
+    ORGANIZATION "Aruba Wireless Networks"
+    CONTACT-INFO "support@arubanetworks.com"
+    DESCRIPTION  "Textual conventions used by the Aruba MIBs."
+    ::= { arubaMIBModules 2 }
+
+ArubaEnableValue ::= TEXTUAL-CONVENTION
+    STATUS      current
+    DESCRIPTION "Enable/disable."
+    SYNTAX      INTEGER { enable(1), disable(2) }
+
+ArubaSwitchRole ::= TEXTUAL-CONVENTION
+    STATUS      current
+    DESCRIPTION "Role of the controller."
+    SYNTAX      INTEGER { master(1), local(2), standbymaster(3), branch(4), md(5) }
+
+ArubaAPStatus ::= TEXTUAL-CONVENTION
+    STATUS      current
+    DESCRIPTION "Status of an AP."
+    SYNTAX      INTEGER { up(1), down(2) }
+
+ArubaMonTxRate ::= TEXTUAL-CONVENTION
+    DISPLAY-HINT "d-1"
+    STATUS      current
+    DESCRIPTION "A rate in tenths of a Mbps."
+    SYNTAX      Integer32
+
+END
