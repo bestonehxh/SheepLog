@@ -218,7 +218,7 @@ nonisolated struct ClientReport: Sendable {
         for f in ordered.prefix(20) {
             let problems = f.reasons.isEmpty ? "healthy" : f.reasons.prefix(2).joined(separator: "; ")
             r.flows.append(FlowLine(id: f.id, text: "\(FText.clock(f.firstTime))  \(f.clientEndpoint) → \(f.serverEndpoint) (\(f.application)) — \(problems)",
-                                    health: f.health, ref: FlowRef(key: f.key, packetID: f.firstPacketID)))
+                                    health: f.health, ref: FlowRef(key: f.key, packetID: f.firstPacketID, lastPacketID: f.lastPacketID)))
         }
 
         // Findings about it (its address as a whole address: 10.1.30.1 is not in a finding about 10.1.30.14).
@@ -430,8 +430,9 @@ nonisolated enum ReportText {
     static func cell(_ s: String) -> String { escape(s) }
 
     /// Every finding (as filtered on screen) and the timeline, for a ticket or a hand-over.
+    /// `total`: how many findings the analysis had (the report says how many of them it shows).
     static func findings(_ findings: [Finding], summary: AnalysisSummary, timeline: Timeline, heading: String,
-                         scope: String?, generated: Date) -> String {
+                         scope: String?, generated: Date, total: Int? = nil) -> String {
         var md = "# SheepLog troubleshooting report\n\n"
         md += "_\(stamp(generated))"
         if let a = summary.start, let b = summary.end { md += " · data \(stamp(a)) – \(stamp(b))" }
@@ -439,7 +440,12 @@ nonisolated enum ReportText {
         md += "**\(escape(heading))**\n\n"
         md += "Analysed: \(Format.count(summary.lines)) syslog lines, \(Format.count(summary.traps)) traps from \(Format.count(summary.devices)) device\(summary.devices == 1 ? "" : "s"); "
             + "\(Format.count(summary.packets)) packets; \(Format.count(summary.flows)) TCP flows; SNMP results from \(summary.snmpWalks) device\(summary.snmpWalks == 1 ? "" : "s").\n\n"
-        if let scope { md += "Shown: \(escape(scope)).\n\n" }
+        if let total {
+            md += "Shown: \(total == findings.count ? "all \(Format.count(total))" : "\(Format.count(findings.count)) of \(Format.count(total))") finding\(total == 1 ? "" : "s")"
+                + (scope.map { " — \(escape($0))" } ?? "") + ".\n\n"
+        } else if let scope {
+            md += "Shown: \(escape(scope)).\n\n"
+        }
         for sev in [FindingSeverity.bad, .warn, .info] {
             let list = findings.filter { $0.severity == sev }
             guard !list.isEmpty else { continue }
@@ -465,7 +471,10 @@ nonisolated enum ReportText {
                 }
             }
         }
-        if findings.isEmpty { md += "Nothing wrong that SheepLog can see.\n\n" }
+        if findings.isEmpty {
+            // A filter that hides every finding is not "nothing wrong".
+            md += (total ?? 0) > 0 ? "No finding matches what was shown.\n\n" : "Nothing wrong that SheepLog can see.\n\n"
+        }
         if !timeline.isEmpty {
             md += "## Timeline\n\n"
             md += "\(stamp(timeline.start)) – \(stamp(timeline.end))\n\n"

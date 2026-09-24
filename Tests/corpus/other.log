@@ -19,3 +19,20 @@
 <85>Sep 23 10:16:09 web01 portal-auth[812]: user=alice; action=login; result=failure; src=10.1.0.5
 <38>Sep 23 10:16:10 2001:db8::10 sshd[2200]: Accepted publickey for deploy from 2001:db8::5 port 50222 ssh2
 <13>Sep 23 10:16:11 - logger: relayed without a hostname
+<28>Sep 23 10:16:12 MX204-EDGE rpd[1811]: RPD_OSPF_NBRDOWN: OSPF neighbor 10.0.12.2 (realm ospf-v2 xe-0/0/1.0 area 0.0.0.0) state changed from Full to Down due to InactivityTimer (event reason: BFD session timed out and neighbor was declared dead)
+<29>Sep 23 10:16:52 MX204-EDGE rpd[1811]: RPD_OSPF_NBRUP: OSPF neighbor 10.0.12.2 (realm ospf-v2 xe-0/0/1.0 area 0.0.0.0) state changed from Loading to Full due to LoadDone (event reason: OSPF loading completed)
+<189>Sep 23 10:17:00 MX204-EDGE mgd[4410]: UI_COMMIT: User 'netops' requested 'commit' operation (comment: none)
+<188>Sep 23 10:17:30 MX204-EDGE chassisd[1509]: CHASSISD_FRU_OFFLINE_NOTICE: Taking PEM 1 offline: Removal
+<30>Sep 23 10:16:13 RB4011-HQ interface,info ether5 link down
+<30>Sep 23 10:16:41 RB4011-HQ interface,info ether5 link up (speed 1G, full duplex)
+<30>Sep 23 10:16:14 USW-24-PoE,f4e2c6ddeeff,v6.6.61.15220: switch: TRAPMGR: Link Down: 0/9
+<30>Sep 23 10:16:44 USW-24-PoE,f4e2c6ddeeff,v6.6.61.15220: switch: TRAPMGR: Link Up: 0/9
+<3>Sep 23 10:16:15 ER-4 kernel: [ 9812.100211] eth1: link down
+<6>Sep 23 10:16:45 ER-4 kernel: [ 9842.100211] eth1: link up, 1000Mbps, full-duplex, lpa 0xC1E1
+<189>2026 Sep 23 10:17:00 N9K-LEAF-02 %ETHPORT-5-IF_DOWN_LINK_FAILURE: Interface Ethernet1/7 is down (Link failure)
+<189>2026 Sep 23 10:17:30 N9K-LEAF-02 %ETHPORT-5-IF_UP: Interface Ethernet1/7 is up in mode trunk
+<189>2026 Sep 23 10:18:00 N9K-LEAF-02 %OSPF-5-ADJCHANGE: ospf-100 [7243] Nbr 10.0.13.2 on Ethernet1/49 went DOWN
+<189>2026 Sep 23 10:18:40 N9K-LEAF-02 %OSPF-5-ADJCHANGE: ospf-100 [7243] Nbr 10.0.13.2 on Ethernet1/49 went FULL
+<164>Sep 23 2026 10:19:00 ASA-FW02 : %ASA-4-411002: Line protocol on Interface outside, changed state to down
+<164>Sep 23 2026 10:19:30 ASA-FW02 : %ASA-4-411001: Line protocol on Interface outside, changed state to up
+<165>Sep 23 2026 10:19:50 ASA-FW02 : %ASA-5-111008: User 'admin' executed the 'write memory' command.

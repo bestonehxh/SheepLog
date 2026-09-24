@@ -61,6 +61,8 @@ nonisolated enum FindingSource: String, Sendable {
 nonisolated struct FlowRef: Sendable, Hashable {
     let key: FlowKey
     let packetID: Int
+    /// The conversation's last frame: whether any of it is still in the capture ring.
+    var lastPacketID: Int? = nil
 }
 
 /// A group of things a finding was built from, and how to show them.
@@ -144,6 +146,9 @@ nonisolated struct TroubleshootInput: Sendable {
     /// Lines the paused Log pane holds back (newer than `entries`); `takeHeld()` joins them to
     /// `entries` off the main actor.
     var held: [LogEntry] = []
+    /// The packet store's `epoch` when the packets were read (frame numbers start over after a
+    /// Clear: a finding's frames are then other packets).
+    var packetEpoch = 0
 
     mutating func takeHeld() {
         guard !held.isEmpty else { return }
@@ -171,6 +176,8 @@ nonisolated struct TroubleshootResult: Sendable {
     var flows: [TCPFlow] = []
     var timeline = Timeline.empty
     var summary = AnalysisSummary()
+    /// `TroubleshootInput.packetEpoch` of the packets these findings were read from.
+    var packetEpoch = 0
 }
 
 // MARK: - The rules
@@ -210,6 +217,16 @@ nonisolated enum FindingRules {
     /// NXDOMAIN counts as a DNS failure from this many different names (one mistyped name, with
     /// its search-domain variants, is the user's typo, not the resolver's fault).
     static let nxNames = 3
+    /// Discards worth a finding: this many per 10,000 packets (0.1 %) through the port.
+    static let discardRate = 10.0
+    /// Without packet counters, discards that grew this much between two walks.
+    static let discardGrowth: UInt64 = 100
+    /// Retransmission shares are read from conversations with at least this many data segments
+    /// (one lost segment of a 5-packet exchange is 20 % and means nothing).
+    static let retransMinSegments = 20
+    /// Log lines of the same configuration change (Junos UI_COMMIT and its UI_COMMIT_COMPLETED,
+    /// an ASA's 111010 lines and its write memory) within this many seconds are one change.
+    static let configSameChange: Double = 60
 
     static func analyze(_ input: TroubleshootInput, isCancelled: () -> Bool = { false }) -> TroubleshootResult {
         var ctx = RuleContext(input: input)
@@ -244,6 +261,7 @@ nonisolated enum FindingRules {
         var result = TroubleshootResult()
         result.findings = findings
         result.flows = input.flows
+        result.packetEpoch = input.packetEpoch
         result.summary = ctx.summary(input: input, packets: pk)
         result.timeline = TimelineBuilder.build(warn: ctx.warnFacts, times: ctx, flows: input.flows,
                                                 findings: findings, start: result.summary.start, end: result.summary.end)
@@ -353,7 +371,7 @@ nonisolated struct RuleContext: Sendable {
 
 // MARK: - Log pass
 
-nonisolated enum HardwareKind: String, Sendable {
+nonisolated enum HardwareKind: String, Sendable, CaseIterable {
     case psu, fan, temperature, poe
 
     var label: String {
@@ -365,7 +383,7 @@ nonisolated enum HardwareKind: String, Sendable {
         }
     }
 }
-nonisolated enum STPKind: String, Sendable { case topologyChange, rootChange, bpduGuard, loop, storm }
+nonisolated enum STPKind: String, Sendable, CaseIterable { case topologyChange, rootChange, bpduGuard, loop, storm }
 
 nonisolated enum FactKind: Sendable {
     case link(iface: String, up: Bool)
@@ -487,13 +505,14 @@ nonisolated final class Needles: @unchecked Sendable {
 
     private init() {
         let words: [[String]] = [
-            ["link", "-line", "line protocol", "turned into down state", "turned into up state"],
-            ["power", "psu", "fan", "temperat", "thermal", "poe", "overheat"],
+            ["link", "-line", "line protocol", "turned into down state", "turned into up state", "if_up", "if_down",
+             "interface-stat-change", "interface status changed"],
+            ["power", "psu", "fan", "temperat", "thermal", "poe", "overheat", "pem"],
             ["stp", "topology", "bpdu", "loop", "storm", "spanning", "root bridge"],
             ["neighbo", "adjchg", "adjchange", "nbr"],
             ["reboot", "restart", "reload", "cold start", "coldstart", "booted", "boot up", "bootup", "booting"],
             ["login", "logon", "log in", "logging in", "logged in", "password", "authenticat", "invalid user"],
-            ["config", "commit"],
+            ["config", "commit", "write mem", "-111010", "-111008"],
         ]
         groups = words.enumerated().map { i, w in (i, w.map { strdup($0)! }) }
     }
@@ -651,7 +670,19 @@ nonisolated enum LineClassifier {
 
     static func link(_ e: LogEntry, _ c: UnsafePointer<CChar>) -> FactKind? {
         if CText.has(c, "lldp") || CText.has(c, "neighbor") { return nil }
-        if CText.has(c, "administratively down") { return nil }
+        // An admin's shutdown (Cisco / NX-OS "administratively down", Junos's link trap with
+        // ifAdminStatus down) is not a link failure.
+        if CText.hasAny(c, ["administratively down", "ifadminstatus down"]) { return nil }
+        // FortiOS: `logdesc="Interface status changed" action="interface-stat-change"
+        // status="DOWN"` — the state is a field and the message never says "link".
+        if e.vendor == .fortigate,
+           e.field("action") == "interface-stat-change" || (e.field("logdesc")?.lowercased().contains("interface status") ?? false),
+           let status = e.field("status")?.lowercased(), status.hasPrefix("up") || status.hasPrefix("down") {
+            let iface = ["interface", "intf", "ifname", "port"].lazy.compactMap { e.field($0) }.first { !$0.isEmpty }
+                ?? e.field("msg").flatMap { m in FText.token(after: "interface ", in: m) }
+            guard let iface else { return nil }
+            return .link(iface: iface, up: status.hasPrefix("up"))
+        }
         var up: Bool?
         if let s = e.field("OperStatus") { up = s.uppercased().hasPrefix("UP") }
         else if CText.hasAny(c, ["link down", "linkdown", "link_down", "link is down", "link status for interface", "off-line",
@@ -675,8 +706,13 @@ nonisolated enum LineClassifier {
             if let v = e.field(k), !v.isEmpty { return v }
         }
         let m = e.message
-        for marker in ["interface ", "Interface ", "port ", "Port ", "ifName="] {
+        for marker in ["interface ", "Interface ", "port ", "Port ", "ifName=", "ifName "] {
             if let t = FText.token(after: marker, in: m), !t.isEmpty, t.lowercased() != "status" { return t }
+        }
+        // UniFi switches: "TRAPMGR: Link Down: 0/9" — the port follows (the word before " Link"
+        // was every port's "TRAPMGR:", so all their events were one port flapping).
+        for marker in ["link down: ", "link up: "] {
+            if let t = FText.token(after: marker, in: m), !t.isEmpty { return t }
         }
         // "ether1 link down", "eth0 NIC Link is Down"
         if let r = m.range(of: " link", options: .caseInsensitive) {
@@ -695,12 +731,13 @@ nonisolated enum LineClassifier {
     static let failWords = ["fail", "fault", "error", "removed", "absent", "not present", "lost", "stopped", " down",
                             "denied", "exceed", "over threshold", "overheat", "too high", " high", "critical", "alarm",
                             "insufficient", "shutdown", "shut down", "abnormal", "unavailable", "overload", "not ok",
-                            "budget", "rising", "warning"]
-    static let okWords = ["recovered", "restored", "normal", "back to", "cleared", "inserted", "resumed", " ok", "returned"]
+                            "budget", "rising", "warning", "offline", "removal"]
+    static let okWords = ["recovered", "restored", "normal", "back to", "cleared", "inserted", "resumed", " ok", "returned", "online"]
 
     static func hardware(_ e: LogEntry, _ c: UnsafePointer<CChar>) -> FactKind? {
         let kind: HardwareKind
-        if CText.hasAny(c, ["power supply", "power_supply", "powersupply", "power-supply"]) || CText.hasWord(c, "psu") { kind = .psu }
+        // Junos calls a power supply a PEM (power entry module).
+        if CText.hasAny(c, ["power supply", "power_supply", "powersupply", "power-supply"]) || CText.hasWord(c, "psu") || CText.hasWord(c, "pem") { kind = .psu }
         else if CText.hasWord(c, "fan") || CText.has(c, "fan tray") || CText.has(c, "fantray") { kind = .fan }
         else if CText.hasAny(c, ["temperat", "thermal", "overheat"]) { kind = .temperature }
         else if CText.hasWord(c, "poe") || CText.hasAny(c, ["power denied", "power budget", "insufficient power", "power limit"]) { kind = .poe }
@@ -750,7 +787,8 @@ nonisolated enum LineClassifier {
         if let s = e.field("NeighborCurrentState") { up = !s.lowercased().hasPrefix("down") && !s.lowercased().hasPrefix("init") }
         else if CText.hasAny(c, ["to down", "neighbor down", "neighbour down", "changed to down", "state down", " down", "idle", "dead timer", "hold time expired"]) {
             up = CText.hasAny(c, ["to full", "to up"]) && !CText.has(c, "to down") ? true : false
-        } else if CText.hasAny(c, ["to full", " up", "established", "to up"]) {
+        } else if CText.hasAny(c, ["to full", " up", "established", "to up", "went full"]) {
+            // NX-OS: "Nbr 10.0.13.2 on Ethernet1/49 went FULL".
             up = true
         }
         guard let up else { return nil }
@@ -800,14 +838,27 @@ nonisolated enum LineClassifier {
     static func config(_ e: LogEntry, _ c: UnsafePointer<CChar>) -> FactKind? {
         let paloConfig = e.vendor == .paloAlto && CText.prefix(e.program, "CONFIG")
         let fortiConfig = e.vendor == .fortigate && (e.field("cfgpath") != nil || e.field("cfgattr") != nil)
-        let change = paloConfig || fortiConfig
+        // Junos: `mgd: UI_COMMIT: User 'netops' requested 'commit' operation` (the structured
+        // form carries UI_COMMIT as its MSGID); progress lines are not changes.
+        let msgid = e.field("msgid") ?? ""
+        let junosCommit = ((CText.has(c, "ui_commit") || msgid.hasPrefix("UI_COMMIT"))
+                           && !CText.has(c, "ui_commit_progress") && !msgid.hasPrefix("UI_COMMIT_PROGRESS"))
+            || (CText.has(c, "requested 'commit'") && !CText.has(c, "commit check"))
+        // Cisco ASA: 111010 "User 'admin' … executed 'no shutdown'" (a configuration command),
+        // 111008 for `write memory`, 111005 "end configuration: OK".
+        let asaConfig = CText.contains(e.program, "%ASA-")
+            && (CText.contains(e.program, "-111010") || CText.contains(e.program, "-111005")
+                || (CText.contains(e.program, "-111008") && CText.hasAny(c, ["'write mem", "'copy running-config", "'copy run"])))
+        let change = paloConfig || fortiConfig || junosCommit || asaConfig
             || (CText.has(c, "config") && CText.hasAny(c, ["change", "changed", "configured", "commit", "saved", "modif", "config_i",
                                                     "write mem", "cfg_change", "edited", "updated"]))
             || (CText.has(c, "commit") && CText.hasAny(c, ["success", "complete", "succeeded", " by "]))
         guard change else { return nil }
         if CText.hasAny(c, ["fail", "error", "invalid"]) && !paloConfig { return nil }
-        let user = ["user", "UserName", "admin", "administrator", "srcuser"].lazy.compactMap { e.field($0) }.first
+        let user = ["user", "UserName", "username", "admin", "administrator", "srcuser"].lazy.compactMap { e.field($0) }.first
+            ?? e.fields.first { $0.key.hasSuffix(".username") }?.value
             ?? FText.token(after: " by ", in: e.message)
+            ?? ((junosCommit || asaConfig) ? FText.token(after: "user ", in: e.message) : nil)
         return .config(user: user)
     }
 
@@ -1017,7 +1068,8 @@ nonisolated extension FindingRules {
                 detail = "A root bridge change re-converges the whole tree. Repeated changes usually mean a switch with a lower bridge priority keeps joining and leaving, or the root's uplinks are flapping."
                 steps = ["Pin the root: set the core switch's spanning-tree priority explicitly (e.g. 4096).", "Check which bridge ID became root in these lines."]
             case .bpduGuard:
-                title = "BPDU guard shut\(portText.isEmpty ? " a port" : portText) on \(key.device) (\(items.count)×)."
+                // "BPDU guard shut port 1/1/9 on SW1" (it read "shut on port 1/1/9 on SW1").
+                title = "BPDU guard shut \(ports.isEmpty ? "a port" : "\(ports.count == 1 ? "port" : "ports") \(FText.list(ports, max: 4))") on \(key.device) (\(items.count)×)."
                 detail = "A switch or a bridging device was plugged into an edge port and BPDU guard disabled the port. It stays down until someone re-enables it or the recovery timer runs."
                 steps = ["Find what is connected\(ports.first.map { " to \($0)" } ?? ""), remove the switch, then re-enable the port."]
             case .loop:
@@ -1086,7 +1138,10 @@ nonisolated extension FindingRules {
         // Configuration changes: one note per device, and remembered for the cross-reference.
         var configs: [String: [(t: Date, user: String?, f: LineFact)]] = [:]
         var reboots: [String: [(t: Date, cold: Bool, planned: Bool, f: LineFact)]] = [:]
-        var fails: [String: [(t: Date, device: String, user: String?, f: LineFact)]] = [:]
+        // Failed logins per device and source address: one device's console typos and another's
+        // are not one attack, nor are two addresses' failures one burst.
+        struct LoginKey: Hashable { let device: String; let ip: String? }
+        var fails: [LoginKey: [(t: Date, device: String, user: String?, f: LineFact)]] = [:]
         var oks: [String: [(t: Date, device: String, user: String?)]] = [:]
         for f in ctx.facts {
             switch f.kind {
@@ -1097,7 +1152,8 @@ nonisolated extension FindingRules {
             case .reboot(let cold, let planned):
                 reboots[ctx.device(f), default: []].append((ctx.time(f), cold, planned, f))
             case .loginFail(let ip, let user):
-                fails[ip ?? "unknown address", default: []].append((ctx.time(f), ctx.device(f), user, f))
+                let d = ctx.device(f)
+                fails[LoginKey(device: d, ip: ip), default: []].append((ctx.time(f), d, user, f))
             case .loginOK(let ip, let user):
                 if let ip { oks[ip, default: []].append((ctx.time(f), ctx.device(f), user)) }
             default: break
@@ -1107,13 +1163,21 @@ nonisolated extension FindingRules {
             let items = raw.sorted { $0.t < $1.t }
             let users = Array(Set(items.compactMap(\.user))).sorted()
             let address = items[0].f.address
+            // Changes, not lines: a Junos commit and its "commit complete", an ASA's commands and
+            // its write memory, a minute apart at most, are one change.
+            var changes = 0
+            var last: Date?
+            for it in items {
+                if last.map({ it.t.timeIntervalSince($0) > configSameChange }) ?? true { changes += 1 }
+                last = it.t
+            }
             out.append(Finding(id: "config|\(device)", rule: "config.change", severity: .info, category: .config, source: .logs,
                                title: "Configuration changed on \(device)\(users.isEmpty ? "" : " by \(FText.list(users, max: 3))")"
-                                   + (items.count > 1 ? " (\(items.count) changes, \(FText.clock(items[0].t))–\(FText.clock(items.last!.t)))." : " at \(FText.clock(items[0].t))."),
+                                   + (changes > 1 ? " (\(changes) changes, \(FText.clock(items[0].t))–\(FText.clock(items.last!.t)))." : " at \(FText.clock(items[0].t))."),
                                detail: "“\(FText.excerpt(items.last!.f.message))”. Changes are the usual cause of trouble that starts right after them — the findings that follow on this device say so when one came within 5 minutes before.",
                                evidence: logEvidence(ids: items.map(\.f.id), trapIDs: [],
-                                                     query: ctx.hostTerm(address: address, name: device) + " config", trapQuery: ""),
-                               firstSeen: items[0].t, lastSeen: items.last!.t, count: items.count,
+                                                     query: ctx.hostTerm(address: address, name: device) + " " + FText.configQuery, trapQuery: ""),
+                               firstSeen: items[0].t, lastSeen: items.last!.t, count: changes,
                                device: device, deviceAddress: address,
                                nextSteps: ["Compare the running configuration of \(device) with the last saved one (show archive / checkpoint diff)."]))
         }
@@ -1157,37 +1221,75 @@ nonisolated extension FindingRules {
                                            "Quick test SNMP on \(device): sysUpTime says when it came back."],
                                snmpTarget: address))
         }
-        for (ip, raw) in fails {
-            let items = raw.sorted { $0.t < $1.t }
-            var best = (count: 0, from: 0, to: 0)
+        // A known address failing on several devices (a script with an old password, someone
+        // trying every switch): its failures across them, for the burst check.
+        var bySource: [String: [(t: Date, device: String)]] = [:]
+        for (key, raw) in fails { if let ip = key.ip { bySource[ip, default: []] += raw.map { ($0.t, $0.device) } } }
+        func burst(_ times: [Date]) -> (count: Int, from: Date, to: Date) {
+            let t = times.sorted()
+            var best = (count: 0, from: Date.distantPast, to: Date.distantPast)
             var lo = 0
-            for hi in items.indices {
-                while items[hi].t.timeIntervalSince(items[lo].t) > loginWindow { lo += 1 }
-                if hi - lo + 1 > best.count { best = (hi - lo + 1, lo, hi) }
+            for hi in t.indices {
+                while t[hi].timeIntervalSince(t[lo]) > loginWindow { lo += 1 }
+                if hi - lo + 1 > best.count { best = (hi - lo + 1, t[lo], t[hi]) }
             }
-            let devices = Array(Set(items.map(\.device))).sorted()
+            return best
+        }
+        for (key, raw) in fails {
+            let items = raw.sorted { $0.t < $1.t }
+            let device = key.device
+            let own = burst(items.map(\.t))
+            let sourceDevices = key.ip.map { ip in Array(Set(bySource[ip]!.map(\.device))).sorted() } ?? [device]
+            let spread = key.ip.flatMap { ip in sourceDevices.count > 1 ? burst(bySource[ip]!.map(\.t)) : nil }
+            let isBurst = own.count >= loginBurst || (spread?.count ?? 0) >= loginBurst
+            // One typo on one device is not a finding; one failure that is part of a source's
+            // run across devices is.
+            guard isBurst || items.count >= 2 else { continue }
             let users = Array(Set(items.compactMap(\.user))).sorted()
-            let burst = best.count >= loginBurst
-            guard burst || items.count >= 2 else { continue }
-            let success = oks[ip]?.first { $0.t >= items[0].t }
-            var detail = "\(items.count) failed logins\(users.isEmpty ? "" : " as \(FText.list(users, max: 4))") on \(FText.list(devices, max: 4)) between \(FText.clock(items[0].t)) and \(FText.clock(items.last!.t))."
-            if burst { detail += " \(best.count) came within \(FText.duration(max(1, items[best.to].t.timeIntervalSince(items[best.from].t)))) — password guessing, or a script with an old password." }
-            if let success { detail += " Then a login from \(ip) succeeded at \(FText.clock(success.t)) on \(success.device)\(success.user.map { " as \($0)" } ?? "") — check that it was the owner." }
-            let knownIP = ip != "unknown address"
-            let q = (knownIP ? FText.quote(ip) + " " : "") + "(fail OR failed OR invalid OR denied)"
-            out.append(Finding(id: "login.fail|\(ip)", rule: "login.failures", severity: burst ? .bad : .info, category: .security, source: .logs,
-                               title: burst
-                                   ? "\(best.count) failed admin logins from \(ip) in \(FText.duration(max(60, items[best.to].t.timeIntervalSince(items[best.from].t)))) (\(FText.list(devices, max: 2)))."
-                                   : "\(items.count) failed admin logins from \(ip) on \(FText.list(devices, max: 2)).",
-                               detail: detail,
+            let from = key.ip.map { " from \($0)" } ?? ""
+            var detail = "\(items.count) failed login\(items.count == 1 ? "" : "s")\(users.isEmpty ? "" : " as \(FText.list(users, max: 4))")\(from) on \(device) between \(FText.clock(items[0].t)) and \(FText.clock(items.last!.t))."
+            if key.ip == nil {
+                detail += " The lines do not say where the attempts came from, so they are counted per device — they may be more than one source."
+            }
+            if own.count >= loginBurst {
+                detail += " \(own.count) came within \(FText.duration(max(1, own.to.timeIntervalSince(own.from)))) — password guessing, or a script with an old password."
+            }
+            if let ip = key.ip, let spread, sourceDevices.count > 1 {
+                let others = sourceDevices.filter { $0 != device }
+                detail += " \(ip) also failed on \(FText.list(others, max: 4))"
+                    + (spread.count >= loginBurst ? ": \(spread.count) failures across \(sourceDevices.count) devices within \(FText.duration(max(1, spread.to.timeIntervalSince(spread.from)))) — someone trying device after device, or a script with an old password." : ".")
+            }
+            if let ip = key.ip, let list = oks[ip] {
+                let success = list.first { $0.t >= items[0].t && $0.device == device } ?? list.first { $0.t >= items[0].t }
+                if let success {
+                    detail += " Then a login from \(ip) succeeded at \(FText.clock(success.t)) on \(success.device)\(success.user.map { " as \($0)" } ?? "") — check that it was the owner."
+                }
+            }
+            let title: String
+            if let ip = key.ip {
+                title = own.count >= loginBurst
+                    ? "\(own.count) failed admin logins from \(ip) on \(device) in \(FText.duration(max(60, own.to.timeIntervalSince(own.from))))."
+                    : "\(items.count) failed admin login\(items.count == 1 ? "" : "s") from \(ip) on \(device)"
+                        + (sourceDevices.count > 1 ? " (and on \(sourceDevices.count - 1) other device\(sourceDevices.count == 2 ? "" : "s"))." : ".")
+            } else {
+                title = own.count >= loginBurst
+                    ? "\(own.count) failed admin logins on \(device) in \(FText.duration(max(60, own.to.timeIntervalSince(own.from)))) (source not in the lines)."
+                    : "\(items.count) failed admin logins on \(device) (source not in the lines)."
+            }
+            let address = items[0].f.address
+            let q = ctx.hostTerm(address: address, name: device) + " " + (key.ip.map { FText.quote($0) + " " } ?? "") + FText.loginFailQuery
+            out.append(Finding(id: "login.fail|\(device)|\(key.ip ?? "-")", rule: "login.failures", severity: isBurst ? .bad : .info,
+                               category: .security, source: .logs,
+                               title: title, detail: detail,
                                evidence: logEvidence(ids: items.map(\.f.id), trapIDs: [], query: q, trapQuery: ""),
                                firstSeen: items[0].t, lastSeen: items.last!.t, count: items.count,
-                               device: devices.count == 1 ? devices[0] : nil, deviceAddress: devices.count == 1 ? items[0].f.address : nil,
-                               client: knownIP ? ip : nil,
-                               nextSteps: knownIP
-                                   ? ["Find who uses \(ip) (Troubleshoot client \(ip)) and whether it should manage these devices.",
-                                      "Restrict management access (SSH / HTTPS / SNMP) to the admin subnet with an ACL."]
-                                   : ["Restrict management access to the admin subnet with an ACL."]))
+                               device: device, deviceAddress: address,
+                               client: key.ip,
+                               nextSteps: key.ip.map { ip in
+                                   ["Find who uses \(ip) (Troubleshoot client \(ip)) and whether it should manage \(device).",
+                                    "Restrict management access (SSH / HTTPS / SNMP) to the admin subnet with an ACL."] }
+                                   ?? ["Check the console / local logins on \(device) (show logging, show users) to see where they came from.",
+                                       "Restrict management access to the admin subnet with an ACL."]))
         }
         return out
     }
@@ -1343,7 +1445,7 @@ nonisolated extension FindingRules {
             let same = change.device == f.device
             findings[i].detail += " A configuration change on \(same ? "this device" : change.device)\(change.user.map { " by \($0)" } ?? "") at \(FText.clock(change.time)) came \(FText.duration(max(1, lead))) before this started — check what was changed."
             findings[i].evidence.append(Evidence(kind: .logLines, label: "config change", ids: [change.id],
-                                                 query: ctx.hostTerm(address: change.address, name: change.device) + " config"))
+                                                 query: ctx.hostTerm(address: change.address, name: change.device) + " " + FText.configQuery))
             findings[i].nextSteps.insert("Review the change made on \(change.device) at \(FText.clock(change.time)) and roll it back if it caused this.", at: 0)
         }
     }
@@ -1808,7 +1910,7 @@ nonisolated extension FindingRules {
             func ev(_ fs: [TCPFlow]) -> Evidence {
                 let sorted = fs.sorted { $0.firstTime < $1.firstTime }
                 return Evidence(kind: .flows, label: sorted.count == 1 ? "flow ⇄" : "\(sorted.count) flows ⇄", ids: sorted.map(\.id), query: "",
-                                flows: sorted.prefix(50).map { FlowRef(key: $0.key, packetID: $0.firstPacketID) })
+                                flows: sorted.prefix(50).map { FlowRef(key: $0.key, packetID: $0.firstPacketID, lastPacketID: $0.lastPacketID) })
             }
             func span(_ fs: [TCPFlow]) -> (Date, Date) {
                 (fs.map(\.firstTime).min()!, fs.map { $0.firstTime.addingTimeInterval($0.duration) }.max()!)
@@ -1828,16 +1930,21 @@ nonisolated extension FindingRules {
                                                "Check that \(key.server) is up (ping) and that a firewall on the path permits TCP \(key.port).",
                                                "Check the service listens on \(key.port) on \(key.server) (ss -ltn / netstat -an)."]))
             }
-            // Refused (RST to the SYN).
+            // Refused (RST to the SYN). One refused attempt is a client trying a port once (a
+            // scan, a moved service, a probe): a note. Three attempts, or two clients, is a
+            // service people cannot reach.
             let refused = list.filter(\.refused)
             if !refused.isEmpty {
                 let t = span(refused)
                 let rc = Set(refused.map(\.client))
-                let many = refused.count >= refusedAttempts || rc.count >= 3
-                out.append(Finding(id: "tcp.refused|\(endpoint)", rule: "tcp.refused", severity: many ? .bad : .warn, category: .tcp, source: .flows,
-                                   title: "\(label) refused \(refused.count) connection\(refused.count == 1 ? "" : "s") with RST (port closed).",
-                                   detail: "The host answered the SYN with a reset: it is up, but nothing listens on TCP \(key.port) (or a firewall rejects it). \(rc.count == 1 ? "Client \(rc.first!)" : "\(rc.count) clients") tried.",
-                                   evidence: [ev(refused)], firstSeen: t.0, lastSeen: t.1, count: refused.count, client: oneClient(refused),
+                let tries = refused.reduce(0) { $0 + $1.synRetransmissions + 1 }
+                let sev: FindingSeverity = rc.count >= 3 ? .bad : (tries >= refusedAttempts || rc.count >= 2 ? .warn : .info)
+                out.append(Finding(id: "tcp.refused|\(endpoint)", rule: "tcp.refused", severity: sev, category: .tcp, source: .flows,
+                                   title: "\(label) refused \(tries) connection attempt\(tries == 1 ? "" : "s") with RST (port closed)"
+                                       + " from \(rc.count == 1 ? rc.first! : "\(rc.count) clients").",
+                                   detail: "The host answered the SYN with a reset: it is up, but nothing listens on TCP \(key.port) (or a firewall rejects it). \(rc.count == 1 ? "Client \(rc.first!)" : "\(rc.count) clients") tried."
+                                       + (sev == .info ? " Once is often a scan, a probe or a client trying an old port; it matters when it repeats." : ""),
+                                   evidence: [ev(refused)], firstSeen: t.0, lastSeen: t.1, count: tries, client: oneClient(refused),
                                    nextSteps: ["Check the service on \(key.server) is running and listening on \(key.port).",
                                                "Check the client uses the right port (a moved service, http vs https)."]))
             }
@@ -1852,12 +1959,14 @@ nonisolated extension FindingRules {
                                    nextSteps: ["Show the flow to \(endpoint) and look at what came right before the RST.",
                                                "Check the application log on \(key.server) and idle timeouts on firewalls in between."]))
             }
-            // Retransmissions.
-            let lost = list.reduce(0) { $0 + max(0, $1.retransmissions - $1.spuriousRetransmissions) }
-            let pkts = list.reduce(0) { $0 + $1.packetCount }
+            // Retransmissions — of conversations long enough for a share to mean something: one
+            // lost segment of a 5-segment exchange is 20 % of it.
+            let long = list.filter { $0.dataSegments >= retransMinSegments }
+            let lost = long.reduce(0) { $0 + max(0, $1.retransmissions - $1.spuriousRetransmissions) }
+            let pkts = long.reduce(0) { $0 + $1.packetCount }
             let share = Double(lost) / Double(max(1, pkts))
             if lost >= 3, share >= retransShare {
-                let affected = list.filter { $0.retransmissions > 0 }
+                let affected = long.filter { $0.retransmissions > $0.spuriousRetransmissions }
                 let t = span(affected)
                 out.append(Finding(id: "tcp.retrans|\(endpoint)", rule: "tcp.retransmissions", severity: share >= 0.05 ? .bad : .warn, category: .tcp, source: .flows,
                                    title: String(format: "%.1f %% of packets to and from %@ were retransmitted (%@ of %@ packets).", share * 100, label, Format.count(lost), Format.count(pkts)),
@@ -1893,13 +2002,15 @@ nonisolated extension FindingRules {
                                    nextSteps: ["Check CPU, memory and disk on \(fromServer ? key.server : (oneClient(zero) ?? "the client")).",
                                                "Show the flow to \(endpoint) to see how long the window stayed closed."]))
             }
-            // Slow answers.
+            // Slow answers: per server and port, naming the request that waited longest (the
+            // slowest conversation's first request was named — often a quick one before it).
             let slowAnswer = list.filter { ($0.longestResponseWait ?? 0) > 3 }
             if !slowAnswer.isEmpty {
                 let t = span(slowAnswer)
                 let worst = slowAnswer.max { ($0.longestResponseWait ?? 0) < ($1.longestResponseWait ?? 0) }!
+                let what = worst.longestWaitFor.map { " \($0)" } ?? ""
                 out.append(Finding(id: "tcp.slow|\(endpoint)", rule: "tcp.slowResponse", severity: .warn, category: .tcp, source: .flows,
-                                   title: "\(label) took up to \(TCPFlowAnalyzer.msText(worst.longestResponseWait ?? 0)) to answer\(worst.requests.first.map { " \($0.request)" } ?? "") (\(slowAnswer.count) connection\(slowAnswer.count == 1 ? "" : "s")).",
+                                   title: "\(label) took up to \(TCPFlowAnalyzer.msText(worst.longestResponseWait ?? 0)) to answer\(what) (\(slowAnswer.count) connection\(slowAnswer.count == 1 ? "" : "s")).",
                                    detail: "The request reached the server quickly and it acknowledged it, then waited seconds before the first byte of the answer — the delay is in the application or its back end (database, API), not the network.",
                                    evidence: [ev(slowAnswer)], firstSeen: t.0, lastSeen: t.1, count: slowAnswer.count, client: oneClient(slowAnswer),
                                    nextSteps: ["Show the flow to \(endpoint).", "Check the application / database behind \(key.server) at \(FText.clock(t.0))."]))
@@ -1915,102 +2026,189 @@ nonisolated extension FindingRules {
     static let dot3Duplex = OID([1, 3, 6, 1, 2, 1, 10, 7, 2, 1, 19])
     static let ifInDiscards = OID([1, 3, 6, 1, 2, 1, 2, 2, 1, 13])
     static let ifOutDiscards = OID([1, 3, 6, 1, 2, 1, 2, 2, 1, 19])
+    // Packet counters, for the discard rate: ifTable's 32-bit ones and ifXTable's 64-bit ones.
+    static let ifInPackets32 = [OID([1, 3, 6, 1, 2, 1, 2, 2, 1, 11]), OID([1, 3, 6, 1, 2, 1, 2, 2, 1, 12])]
+    static let ifOutPackets32 = [OID([1, 3, 6, 1, 2, 1, 2, 2, 1, 17]), OID([1, 3, 6, 1, 2, 1, 2, 2, 1, 18])]
+    static let ifInPacketsHC = [7, 8, 9].map { OID([1, 3, 6, 1, 2, 1, 31, 1, 1, 1, $0]) }
+    static let ifOutPacketsHC = [11, 12, 13].map { OID([1, 3, 6, 1, 2, 1, 31, 1, 1, 1, $0]) }
+
+    /// One direction of one port in one walk: discards and the packets that went through.
+    struct PortFlow: Sendable {
+        var discards: UInt64?
+        var packets32: UInt64?
+        var packetsHC: UInt64?
+        var packets: UInt64? { packetsHC ?? packets32 }
+    }
+
+    /// Discards and packet counts per ifIndex and direction (0 in, 1 out) from a walk's var-binds.
+    static func portFlows(_ values: [OID: String]) -> [UInt32: [PortFlow]] {
+        var out: [UInt32: [PortFlow]] = [:]
+        func add(_ oid: OID, _ value: String, _ dir: Int, _ path: WritableKeyPath<PortFlow, UInt64?>) {
+            guard let idx = oid.parts.last, let n = UInt64(value.prefix { $0.isNumber }) else { return }
+            var list = out[idx] ?? [PortFlow(), PortFlow()]
+            list[dir][keyPath: path] = (list[dir][keyPath: path] ?? 0) &+ n
+            out[idx] = list
+        }
+        for (oid, value) in values where oid.parts.count >= 11 {
+            let column = OID(Array(oid.parts.dropLast()))
+            if column == ifInDiscards { add(oid, value, 0, \.discards) }
+            else if column == ifOutDiscards { add(oid, value, 1, \.discards) }
+            else if ifInPackets32.contains(column) { add(oid, value, 0, \.packets32) }
+            else if ifOutPackets32.contains(column) { add(oid, value, 1, \.packets32) }
+            else if ifInPacketsHC.contains(column) { add(oid, value, 0, \.packetsHC) }
+            else if ifOutPacketsHC.contains(column) { add(oid, value, 1, \.packetsHC) }
+        }
+        return out
+    }
+
+    /// "12.5" / "340": discards per 10,000 packets.
+    static func rateText(_ r: Double) -> String { r < 100 ? String(format: "%.1f", r) : String(format: "%.0f", r) }
 
     static func snmpRules(_ snaps: [SNMPSnapshot], now: Date) -> [Finding] {
         guard !snaps.isEmpty else { return [] }
-        var latest: [String: SNMPSnapshot] = [:]
-        var previous: [String: SNMPSnapshot] = [:]
-        for s in snaps {
-            if let cur = latest[s.host], !cur.interfaces.isEmpty { previous[s.host] = cur }
-            latest[s.host] = s
-        }
+        var byHost: [String: [SNMPSnapshot]] = [:]
+        for s in snaps { byHost[s.host, default: []].append(s) }
         var out: [Finding] = []
-        for (host, s) in latest {
-            let name = s.name
-            let names = Dictionary(s.interfaces.map { ($0.index, $0.name.isEmpty ? "ifIndex \($0.index)" : $0.name) }, uniquingKeysWith: { a, _ in a })
-            func base(_ id: String, _ rule: String, _ sev: FindingSeverity, _ title: String, _ detail: String, _ steps: [String], count: Int) -> Finding {
+        for (host, list) in byHost {
+            // What each rule reads is the newest result that has it: a Quick test or a GET run
+            // after the Interfaces walk has no ports — it hid every port finding of the walk
+            // (and one with the walk's rows still on screen compared the walk with itself).
+            let walks = list.filter { !$0.interfaces.isEmpty }
+            let cur = walks.last
+            let prev = walks.count >= 2 ? walks[walks.count - 2] : nil
+            let name = list.last { !($0.sysName?.isEmpty ?? true) }?.name ?? host
+            let names = Dictionary((cur?.interfaces ?? []).map { ($0.index, $0.name.isEmpty ? "ifIndex \($0.index)" : $0.name) },
+                                   uniquingKeysWith: { a, _ in a })
+            func base(_ id: String, _ rule: String, _ sev: FindingSeverity, _ title: String, _ detail: String, _ steps: [String],
+                      count: Int, taken: Date) -> Finding {
                 Finding(id: "snmp.\(id)|\(host)", rule: rule, severity: sev, category: .snmp, source: .snmp, title: title, detail: detail,
-                        firstSeen: s.taken, lastSeen: s.taken, count: count, device: name, deviceAddress: host,
+                        firstSeen: taken, lastSeen: taken, count: count, device: name, deviceAddress: host,
                         nextSteps: steps, snmpTarget: host)
             }
-            if let up = s.sysUpTime, up < recentBoot {
+            if let s = list.last(where: { $0.sysUpTime != nil }), let up = s.sysUpTime, up < recentBoot {
                 out.append(base("uptime", "snmp.recentBoot", .info, "\(name) restarted \(FText.duration(Double(up) / 100)) before the SNMP walk (sysUpTime \(Format.uptime(ticks: UInt64(up)))).",
                                 "A device that has just booted lost its counters, its MAC and ARP tables and its sessions. If nobody restarted it, look for a power or crash reason.",
-                                ["Check the reload reason on \(name) (show version)."], count: 1))
+                                ["Check the reload reason on \(name) (show version)."], count: 1, taken: s.taken))
             }
-            // Enabled but down.
-            let downs = s.interfaces.filter { $0.admin.lowercased().hasPrefix("up") && $0.oper.lowercased().hasPrefix("down") }
-            if !downs.isEmpty {
-                let recent = downs.filter { ($0.sinceChange ?? .max) < 360_000 }.sorted { ($0.sinceChange ?? 0) < ($1.sinceChange ?? 0) }
-                let list = (recent + downs.filter { r in !recent.contains { $0.index == r.index } }).map { names[$0.index] ?? "\($0.index)" }
-                var detail = "\(downs.count == 1 ? "This port is" : "These ports are") enabled (admin up) but have no link (oper down): nothing is plugged in, the far end is off, or the cable / optic is bad."
-                if let r = recent.first, let age = r.sinceChange {
-                    detail += " \(names[r.index] ?? "") went down \(FText.duration(Double(age) / 100)) before the walk — that one is new."
+            if let s = cur {
+                // Enabled but down.
+                let downs = s.interfaces.filter { $0.admin.lowercased().hasPrefix("up") && $0.oper.lowercased().hasPrefix("down") }
+                if !downs.isEmpty {
+                    let recent = downs.filter { ($0.sinceChange ?? .max) < 360_000 }.sorted { ($0.sinceChange ?? 0) < ($1.sinceChange ?? 0) }
+                    let list = (recent + downs.filter { r in !recent.contains { $0.index == r.index } }).map { names[$0.index] ?? "\($0.index)" }
+                    var detail = "\(downs.count == 1 ? "This port is" : "These ports are") enabled (admin up) but have no link (oper down): nothing is plugged in, the far end is off, or the cable / optic is bad."
+                    if let r = recent.first, let age = r.sinceChange {
+                        detail += " \(names[r.index] ?? "") went down \(FText.duration(Double(age) / 100)) before the walk — that one is new."
+                    }
+                    // Enabled ports with nothing plugged in are every access switch's normal state: a
+                    // warning only when one of them lost its link in the last hour.
+                    out.append(base("operdown", "snmp.operDown", recent.isEmpty ? .info : .warn,
+                                    "\(downs.count) port\(downs.count == 1 ? "" : "s") on \(name) \(downs.count == 1 ? "is" : "are") enabled but down: \(FText.list(list, max: 6)).",
+                                    detail, ["Shut unused ports (and put them in an unused VLAN) so real faults stand out.",
+                                             recent.isEmpty ? "Check the ports that should be up." : "Check what was connected to \(names[recent[0].index] ?? "") and whether it has power."],
+                                    count: downs.count, taken: s.taken))
                 }
-                // Enabled ports with nothing plugged in are every access switch's normal state: a
-                // warning only when one of them lost its link in the last hour.
-                out.append(base("operdown", "snmp.operDown", recent.isEmpty ? .info : .warn,
-                                "\(downs.count) port\(downs.count == 1 ? "" : "s") on \(name) \(downs.count == 1 ? "is" : "are") enabled but down: \(FText.list(list, max: 6)).",
-                                detail, ["Shut unused ports (and put them in an unused VLAN) so real faults stand out.",
-                                         recent.isEmpty ? "Check the ports that should be up." : "Check what was connected to \(names[recent[0].index] ?? "") and whether it has power."],
-                                count: downs.count))
-            }
-            // Errors: growth since the previous walk, or a total.
-            let prev = previous[host].map { Dictionary($0.interfaces.map { ($0.index, $0) }, uniquingKeysWith: { a, _ in a }) }
-            var grown: [(String, UInt64)] = []
-            var totals: [(String, UInt64)] = []
-            for r in s.interfaces where r.totalErrors > 0 {
-                let n = names[r.index] ?? "\(r.index)"
-                if let p = prev?[r.index] {
-                    let d = r.totalErrors >= p.totalErrors ? r.totalErrors - p.totalErrors : 0
-                    if d > 0 { grown.append((n, d)) }
-                } else {
-                    totals.append((n, r.totalErrors))
+                // Errors: growth since the previous walk, or a total.
+                let before = prev.map { Dictionary($0.interfaces.map { ($0.index, $0) }, uniquingKeysWith: { a, _ in a }) }
+                var grown: [(String, UInt64)] = []
+                var totals: [(String, UInt64)] = []
+                for r in s.interfaces where r.totalErrors > 0 {
+                    let n = names[r.index] ?? "\(r.index)"
+                    if let p = before?[r.index] {
+                        let d = r.totalErrors >= p.totalErrors ? r.totalErrors - p.totalErrors : 0
+                        if d > 0 { grown.append((n, d)) }
+                    } else {
+                        totals.append((n, r.totalErrors))
+                    }
                 }
-            }
-            if !grown.isEmpty, let p = previous[host] {
-                let top = grown.sorted { $0.1 > $1.1 }
-                out.append(base("errors", "snmp.errorsGrowing", .warn,
-                                "Interface errors are growing on \(name): \(top.prefix(4).map { "\($0.0) +\(Format.count(Int($0.1)))" }.joined(separator: ", ")) in \(FText.duration(s.taken.timeIntervalSince(p.taken))).",
-                                "ifInErrors / ifOutErrors went up between two walks: frames are arriving damaged (CRC) or cannot be sent — a bad cable or optic, a duplex mismatch, or interference. Errors turn into retransmissions and slow applications.",
-                                ["Check the cable / optic on \(top[0].0) (show interface \(top[0].0): CRC, runts, input errors).", "Check both ends agree on speed and duplex."],
-                                count: top.count))
-            } else if !totals.isEmpty {
-                let top = totals.sorted { $0.1 > $1.1 }
-                out.append(base("errors", "snmp.errors", .info,
-                                "\(top.count) interface\(top.count == 1 ? "" : "s") on \(name) \(top.count == 1 ? "has" : "have") error counts: \(top.prefix(4).map { "\($0.0) \(Format.count(Int($0.1)))" }.joined(separator: ", ")).",
-                                "These are totals since the counters were last cleared, so they may be old. Walk the Interfaces table again in a few minutes: SheepLog compares the two walks and says whether they grow.",
-                                ["Run Interfaces again on the SNMP Test pane in a few minutes."], count: top.count))
-            }
-            // Half duplex and discards (from the var-binds of the walk).
-            var half: [String] = []
-            var discards: [(String, UInt64)] = []
-            for (oid, value) in s.values {
-                guard let idx = oid.parts.last else { continue }
-                if dot3Duplex.isPrefix(of: oid), value.hasPrefix("half") || value == "2" || value.hasSuffix("(2)") {
-                    half.append(names[idx] ?? "ifIndex \(idx)")
-                } else if ifInDiscards.isPrefix(of: oid) || ifOutDiscards.isPrefix(of: oid),
-                          let n = UInt64(value.prefix { $0.isNumber }), n > 0 {
-                    discards.append((names[idx] ?? "ifIndex \(idx)", n))
+                if !grown.isEmpty, let p = prev {
+                    let top = grown.sorted { $0.1 > $1.1 }
+                    out.append(base("errors", "snmp.errorsGrowing", .warn,
+                                    "Interface errors are growing on \(name): \(top.prefix(4).map { "\($0.0) +\(Format.count(Int($0.1)))" }.joined(separator: ", ")) in \(FText.duration(s.taken.timeIntervalSince(p.taken))).",
+                                    "ifInErrors / ifOutErrors went up between two walks: frames are arriving damaged (CRC) or cannot be sent — a bad cable or optic, a duplex mismatch, or interference. Errors turn into retransmissions and slow applications.",
+                                    ["Check the cable / optic on \(top[0].0) (show interface \(top[0].0): CRC, runts, input errors).", "Check both ends agree on speed and duplex."],
+                                    count: top.count, taken: s.taken))
+                } else if !totals.isEmpty {
+                    let top = totals.sorted { $0.1 > $1.1 }
+                    out.append(base("errors", "snmp.errors", .info,
+                                    "\(top.count) interface\(top.count == 1 ? "" : "s") on \(name) \(top.count == 1 ? "has" : "have") error counts: \(top.prefix(4).map { "\($0.0) \(Format.count(Int($0.1)))" }.joined(separator: ", ")).",
+                                    "These are totals since the counters were last cleared, so they may be old. Walk the Interfaces table again in a few minutes: SheepLog compares the two walks and says whether they grow.",
+                                    ["Run Interfaces again on the SNMP Test pane in a few minutes."], count: top.count, taken: s.taken))
                 }
             }
-            if !half.isEmpty {
-                out.append(base("duplex", "snmp.halfDuplex", .warn,
-                                "\(half.count) port\(half.count == 1 ? "" : "s") on \(name) run\(half.count == 1 ? "s" : "") at half duplex: \(FText.list(half.sorted(), max: 6)).",
-                                "Half duplex on a modern link almost always means auto-negotiation failed on one side (one end forced to full, the other auto). The result is late collisions, errors and very slow transfers.",
-                                ["Set both ends to auto (or both to the same fixed speed and duplex)."], count: half.count))
+            // Half duplex: the newest result with dot3StatsDuplexStatus (a walk of dot3StatsTable,
+            // not the Interfaces walk).
+            if let s = list.last(where: { $0.values.keys.contains { dot3Duplex.isPrefix(of: $0) } }) {
+                var half: [String] = []
+                for (oid, value) in s.values where dot3Duplex.isPrefix(of: oid) {
+                    guard let idx = oid.parts.last else { continue }
+                    if value.hasPrefix("half") || value == "2" || value.hasSuffix("(2)") { half.append(names[idx] ?? "ifIndex \(idx)") }
+                }
+                if !half.isEmpty {
+                    out.append(base("duplex", "snmp.halfDuplex", .warn,
+                                    "\(half.count) port\(half.count == 1 ? "" : "s") on \(name) run\(half.count == 1 ? "s" : "") at half duplex: \(FText.list(half.sorted(), max: 6)).",
+                                    "Half duplex on a modern link almost always means auto-negotiation failed on one side (one end forced to full, the other auto). The result is late collisions, errors and very slow transfers.",
+                                    ["Set both ends to auto (or both to the same fixed speed and duplex)."], count: half.count, taken: s.taken))
+                }
             }
-            if !discards.isEmpty {
-                var merged: [String: UInt64] = [:]
-                for (n, v) in discards { merged[n, default: 0] += v }
-                let top = merged.sorted { $0.value > $1.value }
-                out.append(base("discards", "snmp.discards", .warn,
-                                "\(top.count) interface\(top.count == 1 ? "" : "s") on \(name) discarded packets: \(top.prefix(4).map { "\($0.key) \(Format.count(Int($0.value)))" }.joined(separator: ", ")).",
-                                "Discards are good frames the switch dropped — usually full output buffers (congestion, a fast port feeding a slow one) or frames for a VLAN the port does not carry.",
-                                ["Check the utilisation of \(top[0].key) and its QoS / buffer drops.", "Check allowed VLANs on trunks at both ends."], count: top.count))
-            }
+            out += discardRules(list, name: name, names: names, base: base)
         }
         return out
+    }
+
+    /// Discards as a rate — per 10,000 packets through the port, or their growth between two
+    /// walks — never a raw count: a core port that forwarded ten billion packets and dropped a
+    /// thousand since last year is healthy.
+    static func discardRules(_ list: [SNMPSnapshot], name: String, names: [UInt32: String],
+                             base: (String, String, FindingSeverity, String, String, [String], Int, Date) -> Finding) -> [Finding] {
+        let counted = list.filter { s in s.values.keys.contains { ifInDiscards.isPrefix(of: $0) || ifOutDiscards.isPrefix(of: $0) } }
+        guard let cur = counted.last else { return [] }
+        let prev = counted.count >= 2 ? counted[counted.count - 2] : nil
+        let now = portFlows(cur.values)
+        let before = prev.map { portFlows($0.values) }
+        let dirWord = ["in", "out"]
+        var growing: [(text: String, weight: Double)] = []
+        var totals: [(text: String, weight: Double)] = []
+        for (idx, flows) in now {
+            let n = names[idx] ?? "ifIndex \(idx)"
+            for dir in 0..<2 {
+                guard let disc = flows[dir].discards, disc > 0 else { continue }
+                let pkts = flows[dir].packets
+                // Per 10,000 packets through the port (a received packet that was discarded is not
+                // in ifInUcastPkts; one that was to be sent is in ifOutUcastPkts).
+                func rate(_ d: UInt64, _ p: UInt64) -> Double { Double(d) / Double(max(1, p &+ (dir == 0 ? d : 0))) * 10_000 }
+                if let b = before?[idx]?[dir], let d0 = b.discards, disc >= d0 {
+                    let d = disc - d0
+                    guard d > 0 else { continue }
+                    if let p1 = pkts, let p0 = b.packets, p1 >= p0 {
+                        let r = rate(d, p1 - p0)
+                        if r >= discardRate { growing.append(("\(n) \(dirWord[dir]) \(rateText(r)) per 10,000 packets (+\(Format.count(Int(d))))", r)) }
+                    } else if d >= discardGrowth {
+                        growing.append(("\(n) \(dirWord[dir]) +\(Format.count(Int(d)))", Double(d)))
+                    }
+                } else if let p = pkts {
+                    // One walk (or the counters were reset since): totals since they were cleared.
+                    let r = rate(disc, p)
+                    if r >= discardRate { totals.append(("\(n) \(dirWord[dir]) \(rateText(r)) per 10,000 packets", r)) }
+                }
+            }
+        }
+        if !growing.isEmpty, let p = prev {
+            let top = growing.sorted { $0.weight > $1.weight }
+            return [base("discards", "snmp.discardsGrowing", .warn,
+                         "Discards are growing on \(name): \(top.prefix(4).map(\.text).joined(separator: ", ")) in \(FText.duration(cur.taken.timeIntervalSince(p.taken))).",
+                         "Between two walks the port dropped good frames at over \(Int(discardRate)) in 10,000 (\(String(format: "%.1f", discardRate / 100)) %) — usually full output buffers (congestion, a fast port feeding a slow one, microbursts) or frames for a VLAN the port does not carry.",
+                         ["Check the utilisation of \(top[0].text.split(separator: " ").first.map(String.init) ?? "the port") and its QoS / buffer drops.", "Check allowed VLANs on trunks at both ends."],
+                         top.count, cur.taken)]
+        }
+        if !totals.isEmpty {
+            let top = totals.sorted { $0.weight > $1.weight }
+            return [base("discards", "snmp.discards", .info,
+                         "\(top.count) interface\(top.count == 1 ? "" : "s") on \(name) dropped over \(String(format: "%.1f", discardRate / 100)) % of \(top.count == 1 ? "its" : "their") packets since the counters were cleared: \(top.prefix(4).map(\.text).joined(separator: ", ")).",
+                         "Discards are good frames the switch dropped — full buffers or unwanted VLANs. These are totals since the counters were last cleared, so they may be old: walk the Interfaces table again in a few minutes and SheepLog says whether they still grow.",
+                         ["Run Interfaces again on the SNMP Test pane in a few minutes."], top.count, cur.taken)]
+        }
+        return []
     }
 }
 
@@ -2100,7 +2298,7 @@ nonisolated enum FText {
     /// The word after `marker` (case-insensitive), without trailing punctuation.
     static func token(after marker: String, in s: String) -> String? {
         guard let r = s.range(of: marker, options: .caseInsensitive) else { return nil }
-        let rest = s[r.upperBound...].drop { $0 == " " || $0 == "=" || $0 == ":" || $0 == "\"" }
+        let rest = s[r.upperBound...].drop { $0 == " " || $0 == "=" || $0 == ":" || $0 == "\"" || $0 == "'" }
         var tok = String(rest.prefix { !(" ,;()\"'[]\t".contains($0)) })
         while let l = tok.last, ".:".contains(l) { tok.removeLast() }
         return tok.isEmpty ? nil : tok
@@ -2135,9 +2333,16 @@ nonisolated enum FText {
         return nil
     }
 
+    /// Every word a failed-login line is picked by (`LineClassifier.login`): a bare `fail` is a
+    /// substring, so it also finds "failed" and "failure".
+    static let loginFailQuery = "(fail OR invalid OR denied OR incorrect OR wrong OR reject OR unsuccessful OR \"bad password\" OR \"not allowed\" OR \"authentication error\")"
+
+    /// Every word a configuration line is picked by (`LineClassifier.config`).
+    static let configQuery = "(config OR commit OR \"write mem\" OR app:111010 OR app:111005 OR app:111008)"
+
     static func hardwareQuery(_ k: HardwareKind) -> String {
         switch k {
-        case .psu: "(power OR psu OR supply)"
+        case .psu: "(power OR psu OR supply OR pem)"
         case .fan: "fan"
         case .temperature: "(temperature OR thermal OR overheat)"
         case .poe: "(poe OR power)"

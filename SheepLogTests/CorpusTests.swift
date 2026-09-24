@@ -295,7 +295,7 @@ final class CorpusTests: XCTestCase {
         // Other
         await expect(s, "host:CORE- NOT lldp", ["other:1", "other:2"])
         await expect(s, #"vendor:other sshd "Failed password""#, ["other:8"])
-        await expect(s, "app:%ASA-4 OR app:%LINK", ["other:0", "other:6"])
+        await expect(s, "app:%ASA-4 OR app:%LINK", ["other:0", "other:6", "other:35", "other:36"])
         // Traps
         await expect(s, "trap linkDown", ["trap:0"])
         await expect(s, "vendor:trap f:ifIndex=3", ["trap:0"])

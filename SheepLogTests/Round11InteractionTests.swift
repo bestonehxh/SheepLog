@@ -274,6 +274,12 @@ final class Round11InteractionTests: XCTestCase {
         packets.ingest(two + bulk + auth)
         let flows = TCPFlowAnalyzer.analyze(packets.packets)
         let sessions = AuthSessions.build(packets.packets)
+        // Round 13: the "2 analyses" flake was a pane of an earlier test (its window closed, its
+        // view not yet torn down) analysing this ingest. Panes that left start nothing now; and
+        // nothing else's analysis is in flight when counting starts.
+        await waitUntil(10) {
+            ["Flows.analysis", "Flows.scheduled", "Auth.analysis", "Auth.scheduled"].allSatisfy { LeakProbe.count($0) == 0 }
+        }
 
         for (pane, probe, running, scheduled) in [(MainPane.flows, { PaneProbe.flowAnalyses }, "Flows.analysis", "Flows.scheduled"),
                                                   (.auth, { PaneProbe.authAnalyses }, "Auth.analysis", "Auth.scheduled")] {

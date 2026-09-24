@@ -326,8 +326,11 @@ final class Round12Tests: XCTestCase {
             "paloalto": ["config.change|PA-3220"],
             // Four interfaces down with no up line (CORE-RTR1's own clock is UTC: seven hours of
             // log, so they are long down) — one a Cisco `%LINK-3-UPDOWN` with no hostname, named
-            // by its address; a "Configured from console".
-            "other": ["link.down|CORE-RTR1", "link.down|N9K-LEAF-01", "link.down|web01", "link.down|HOSTLESS", "config.change|CORE-RTR1"],
+            // by its address; a "Configured from console". Round 13's vendor lines: a Junos commit
+            // and a PEM (power supply) taken offline, an ASA write memory; their ports and
+            // neighbours that went down came back (MikroTik, UniFi, EdgeOS, NX-OS, ASA, Junos).
+            "other": ["link.down|CORE-RTR1", "link.down|N9K-LEAF-01", "link.down|web01", "link.down|HOSTLESS", "config.change|CORE-RTR1",
+                      "config.change|MX204-EDGE", "hw.psu|MX204-EDGE", "config.change|ASA-FW02"],
         ]
         var all: [String] = []
         for (k, name) in expected.keys.sorted().enumerated() {

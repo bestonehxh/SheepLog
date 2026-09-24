@@ -107,6 +107,26 @@ final class PacketStore: ObservableObject {
 
     init() {}
 
+    /// What the ring holds, as far as an analysis is concerned: which capture (`epoch`), its
+    /// first and last frame and how many. A pane that analysed at one stamp has nothing new to
+    /// analyse while the stamp is the same — a publish that changed nothing, one that arrived
+    /// after the analysis had already read the packets, or a Packets filter rescan (it bumps
+    /// `generation` but replaces only the rows shown).
+    nonisolated struct DataStamp: Equatable, Sendable {
+        let epoch: Int
+        let first: Int
+        let last: Int
+        let count: Int
+    }
+
+    var dataStamp: DataStamp {
+        DataStamp(epoch: epoch, first: packets.first?.id ?? 0, last: packets.last?.id ?? 0, count: packets.count)
+    }
+
+    /// Bumped by every Clear (and so every file load and live start): frame numbers start over
+    /// at 1, so a frame number kept from before names another packet.
+    private(set) var epoch = 0
+
     // MARK: Ingest
 
     func ingest(_ batch: [Packet]) {
@@ -220,6 +240,7 @@ final class PacketStore: ObservableObject {
     }
 
     func clear() {
+        epoch += 1
         rescanToken += 1
         loadToken += 1
         loadCancel?.cancel()

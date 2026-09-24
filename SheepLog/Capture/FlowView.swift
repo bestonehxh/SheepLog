@@ -129,6 +129,12 @@ struct FlowView: View {
     @State private var scheduledTask: Task<Void, Never>?
     @State private var analysisTask: Task<Void, Never>?
     @State private var rerun = false
+    /// On screen (between appeared and disappeared): store publishes that reach a pane after it
+    /// left — a window closed without tearing its view down, a publish already in flight — start
+    /// nothing.
+    @State private var visible = false
+    /// The store's stamp the last analysis read: a debounced re-analysis with nothing new skips.
+    @State private var analysedStamp: PacketStore.DataStamp?
     @State private var problemsOnly = false
     @State private var filterText = ""
     @State private var selection: Int?
@@ -182,6 +188,9 @@ struct FlowView: View {
         .onReceive(store.$totalReceived.removeDuplicates().dropFirst()) { _ in scheduleAnalysis() }
         .onChange(of: selection) { selectionChanged() }
         .onReceive(NotificationCenter.default.publisher(for: .sheepLogSelectFlow)) { note in
+            // A pane that has left (its window closed, the view not yet torn down) must not take
+            // the request from the one that is appearing.
+            guard visible else { return }
             AppModel.shared.pendingFlowKey = nil        // handled here, not on the next appearance
             if let r = note.object as? FlowSelectRequest { select(key: r.key, packetID: r.packetID) }
             else if let key = note.object as? FlowKey { select(key: key, packetID: nil) }
@@ -196,11 +205,13 @@ struct FlowView: View {
         }
         // "Follow TCP stream" from Packets: posted before this pane existed.
         if let r = AppModel.shared.takePendingFlowRequest() { pendingRequest = r }
+        visible = true
         startAnalysis()
     }
 
     /// Leaving the pane mid-run: stop the work, not just ignore its result.
     private func disappeared() {
+        visible = false
         scheduledTask?.cancel(); scheduledTask = nil
         analysisTask?.cancel(); analysisTask = nil
         rerun = false
@@ -488,13 +499,16 @@ struct FlowView: View {
     // MARK: Analysis
 
     private func scheduleAnalysis() {
-        guard !DemoFlags.flows, scheduledTask == nil else { return }
+        guard visible, !DemoFlags.flows, scheduledTask == nil else { return }
         scheduledTask = Task {
             LeakProbe.add("Flows.scheduled")
             defer { LeakProbe.remove("Flows.scheduled") }
             try? await Task.sleep(for: .seconds(1))
             guard !Task.isCancelled else { return }
             scheduledTask = nil
+            // Nothing new since the last analysis read the packets (the publish came from the
+            // very change it analysed): no second analysis of the same packets.
+            if store.dataStamp == analysedStamp, pendingRequest == nil { return }
             startAnalysis()
         }
     }
@@ -502,12 +516,13 @@ struct FlowView: View {
     /// One analysis at a time. At 50k pkt/s a 200k-packet analysis can take longer than the
     /// 1-second cadence; requests meanwhile collapse into a single re-run after it.
     private func startAnalysis() {
+        guard visible else { return }
         if analysisTask != nil { rerun = true; return }
         analysisTask = Task {
             await analyse()
             guard !Task.isCancelled else { return }
             analysisTask = nil
-            if rerun { rerun = false; scheduleAnalysis() }
+            if rerun { rerun = false; if store.dataStamp != analysedStamp || pendingRequest != nil { scheduleAnalysis() } }
         }
     }
 
@@ -519,6 +534,7 @@ struct FlowView: View {
         let token = analysisToken
         analysing = true
         let packets = store.packets
+        analysedStamp = store.dataStamp
         let work = Task.detached(priority: .userInitiated) {
             TCPFlowAnalyzer.analyze(packets) { Task.isCancelled }
         }

@@ -97,6 +97,12 @@ struct AuthView: View {
     @State private var scheduledTask: Task<Void, Never>?
     @State private var analysisTask: Task<Void, Never>?
     @State private var rerun = false
+    /// On screen (between appeared and disappeared): store publishes that reach a pane after it
+    /// left — a window closed without tearing its view down, a publish already in flight — start
+    /// nothing.
+    @State private var visible = false
+    /// The store's stamp the last analysis read: a debounced re-analysis with nothing new skips.
+    @State private var analysedStamp: PacketStore.DataStamp?
     @State private var problemsOnly = false
     @State private var filterText = ""
     @State private var methodFilter: AuthMethodFilter = .all
@@ -153,10 +159,12 @@ struct AuthView: View {
         if store.fileURL == nil, store.packets.isEmpty, DemoFlags.openPcap() {
             AppModel.shared.mainPane = .auth
         }
+        visible = true
         startAnalysis()
     }
 
     private func disappeared() {
+        visible = false
         scheduledTask?.cancel(); scheduledTask = nil
         analysisTask?.cancel(); analysisTask = nil
         rerun = false
@@ -475,24 +483,27 @@ struct AuthView: View {
     // MARK: Analysis
 
     private func scheduleAnalysis() {
-        guard scheduledTask == nil else { return }
+        guard visible, scheduledTask == nil else { return }
         scheduledTask = Task {
             LeakProbe.add("Auth.scheduled")
             defer { LeakProbe.remove("Auth.scheduled") }
             try? await Task.sleep(for: .seconds(1))
             guard !Task.isCancelled else { return }
             scheduledTask = nil
+            // Nothing new since the last analysis read the packets: no second analysis of them.
+            if store.dataStamp == analysedStamp { return }
             startAnalysis()
         }
     }
 
     private func startAnalysis() {
+        guard visible else { return }
         if analysisTask != nil { rerun = true; return }
         analysisTask = Task {
             await analyse()
             guard !Task.isCancelled else { return }
             analysisTask = nil
-            if rerun { rerun = false; scheduleAnalysis() }
+            if rerun { rerun = false; if store.dataStamp != analysedStamp { scheduleAnalysis() } }
         }
     }
 
@@ -504,6 +515,7 @@ struct AuthView: View {
         let token = analysisToken
         analysing = true
         let packets = store.packets
+        analysedStamp = store.dataStamp
         let work = Task.detached(priority: .userInitiated) {
             AuthSessions.build(packets) { Task.isCancelled }
         }

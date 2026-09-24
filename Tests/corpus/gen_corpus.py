@@ -243,6 +243,11 @@ corpus["fortigate"] = [
      "notice", "FGT-60F-Branch", "traffic/local", 25, "2026-09-23T10:16:40.123+07:00"),
     ('<189>Sep 23 10:16:50 FGT-60F-Branch date=2026-09-23 time=10:16:50 devname="FGT-60F-Branch" devid="FGT60FTK20000000" logid="0000000013" type="traffic" subtype="forward" level="notice" vd="root" srcip=10.1.0.9 srcport=50000 srcintf="internal" dstip=10.2.0.10 dstport=22 dstintf="HQ-to-Branch" action="accept" policyid=3 service="SSH" proto=6',
      "notice", "FGT-60F-Branch", "traffic/forward", 18, "2026-09-23T10:16:50"),
+    # Round 13: an interface down and up — the state is status=, the message never says "link".
+    ('<188>date=2026-09-23 time=10:30:00 devname="FGT-100F-HQ" devid="FGT1HFTK21000000" eventtime=1790134200123456789 tz="+0700" logid="0100020022" type="event" subtype="system" level="warning" vd="root" logdesc="Interface status changed" action="interface-stat-change" status="DOWN" msg="Interface port3 changed status to DOWN."',
+     "warning", "FGT-100F-HQ", "event/system", 15, "2026-09-23T10:30:00.123+07:00"),
+    ('<189>date=2026-09-23 time=10:30:40 devname="FGT-100F-HQ" devid="FGT1HFTK21000000" eventtime=1790134240123456789 tz="+0700" logid="0100020022" type="event" subtype="system" level="notice" vd="root" logdesc="Interface status changed" action="interface-stat-change" status="UP" msg="Interface port3 changed status to UP."',
+     "notice", "FGT-100F-HQ", "event/system", 15, "2026-09-23T10:30:40.123+07:00"),
 ]
 
 # ---------------------------------------------------------------- Other (must stay .unknown)
@@ -291,6 +296,47 @@ corpus["other"] = [
      "info", "2001:db8::10", "sshd", 0, "2026-09-23T10:16:10"),
     ('<13>Sep 23 10:16:11 - logger: relayed without a hostname',
      "notice", "-", "logger", 0, "2026-09-23T10:16:11"),
+    # Round 13: other vendors' classic forms, where the mnemonic sits in the message (Junos),
+    # the program (NX-OS, ASA) or a topic list (MikroTik) — each read by the Troubleshoot rules.
+    # Juniper Junos: an OSPF neighbour lost and back, a commit, a power supply (PEM) removed.
+    ('<28>Sep 23 10:16:12 MX204-EDGE rpd[1811]: RPD_OSPF_NBRDOWN: OSPF neighbor 10.0.12.2 (realm ospf-v2 xe-0/0/1.0 area 0.0.0.0) state changed from Full to Down due to InactivityTimer (event reason: BFD session timed out and neighbor was declared dead)',
+     "warning", "MX204-EDGE", "rpd", 0, "2026-09-23T10:16:12"),
+    ('<29>Sep 23 10:16:52 MX204-EDGE rpd[1811]: RPD_OSPF_NBRUP: OSPF neighbor 10.0.12.2 (realm ospf-v2 xe-0/0/1.0 area 0.0.0.0) state changed from Loading to Full due to LoadDone (event reason: OSPF loading completed)',
+     "notice", "MX204-EDGE", "rpd", 0, "2026-09-23T10:16:52"),
+    ("<189>Sep 23 10:17:00 MX204-EDGE mgd[4410]: UI_COMMIT: User 'netops' requested 'commit' operation (comment: none)",
+     "notice", "MX204-EDGE", "mgd", 0, "2026-09-23T10:17:00"),
+    ('<188>Sep 23 10:17:30 MX204-EDGE chassisd[1509]: CHASSISD_FRU_OFFLINE_NOTICE: Taking PEM 1 offline: Removal',
+     "warning", "MX204-EDGE", "chassisd", 0, "2026-09-23T10:17:30"),
+    # MikroTik RouterOS: a port down and back.
+    ('<30>Sep 23 10:16:13 RB4011-HQ interface,info ether5 link down',
+     "info", "RB4011-HQ", "interface,info", 0, "2026-09-23T10:16:13"),
+    ('<30>Sep 23 10:16:41 RB4011-HQ interface,info ether5 link up (speed 1G, full duplex)',
+     "info", "RB4011-HQ", "interface,info", 0, "2026-09-23T10:16:41"),
+    # Ubiquiti UniFi switch (TRAPMGR, the port after "Link Down:") and EdgeOS (kernel): down and back.
+    ('<30>Sep 23 10:16:14 USW-24-PoE,f4e2c6ddeeff,v6.6.61.15220: switch: TRAPMGR: Link Down: 0/9',
+     "info", "USW-24-PoE", "switch", 0, "2026-09-23T10:16:14"),
+    ('<30>Sep 23 10:16:44 USW-24-PoE,f4e2c6ddeeff,v6.6.61.15220: switch: TRAPMGR: Link Up: 0/9',
+     "info", "USW-24-PoE", "switch", 0, "2026-09-23T10:16:44"),
+    ('<3>Sep 23 10:16:15 ER-4 kernel: [ 9812.100211] eth1: link down',
+     "error", "ER-4", "kernel", 0, "2026-09-23T10:16:15"),
+    ('<6>Sep 23 10:16:45 ER-4 kernel: [ 9842.100211] eth1: link up, 1000Mbps, full-duplex, lpa 0xC1E1',
+     "info", "ER-4", "kernel", 0, "2026-09-23T10:16:45"),
+    # Cisco NX-OS: a port down and up again (IF_UP says no "link"), OSPF down and FULL again.
+    ('<189>2026 Sep 23 10:17:00 N9K-LEAF-02 %ETHPORT-5-IF_DOWN_LINK_FAILURE: Interface Ethernet1/7 is down (Link failure)',
+     "notice", "N9K-LEAF-02", "%ETHPORT-5-IF_DOWN_LINK_FAILURE", 0, "2026-09-23T10:17:00"),
+    ('<189>2026 Sep 23 10:17:30 N9K-LEAF-02 %ETHPORT-5-IF_UP: Interface Ethernet1/7 is up in mode trunk',
+     "notice", "N9K-LEAF-02", "%ETHPORT-5-IF_UP", 0, "2026-09-23T10:17:30"),
+    ('<189>2026 Sep 23 10:18:00 N9K-LEAF-02 %OSPF-5-ADJCHANGE: ospf-100 [7243] Nbr 10.0.13.2 on Ethernet1/49 went DOWN',
+     "notice", "N9K-LEAF-02", "%OSPF-5-ADJCHANGE", 0, "2026-09-23T10:18:00"),
+    ('<189>2026 Sep 23 10:18:40 N9K-LEAF-02 %OSPF-5-ADJCHANGE: ospf-100 [7243] Nbr 10.0.13.2 on Ethernet1/49 went FULL',
+     "notice", "N9K-LEAF-02", "%OSPF-5-ADJCHANGE", 0, "2026-09-23T10:18:40"),
+    # Cisco ASA: an interface's line protocol down and up, and a write memory.
+    ('<164>Sep 23 2026 10:19:00 ASA-FW02 : %ASA-4-411002: Line protocol on Interface outside, changed state to down',
+     "warning", "ASA-FW02", "%ASA-4-411002", 0, "2026-09-23T10:19:00"),
+    ('<164>Sep 23 2026 10:19:30 ASA-FW02 : %ASA-4-411001: Line protocol on Interface outside, changed state to up',
+     "warning", "ASA-FW02", "%ASA-4-411001", 0, "2026-09-23T10:19:30"),
+    ("<165>Sep 23 2026 10:19:50 ASA-FW02 : %ASA-5-111008: User 'admin' executed the 'write memory' command.",
+     "notice", "ASA-FW02", "%ASA-5-111008", 0, "2026-09-23T10:19:50"),
 ]
 
 total = 0

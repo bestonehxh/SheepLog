@@ -310,7 +310,9 @@ enum AuthScenario: String, CaseIterable {
 }
 
 extension AuthLab {
-    /// EAPOL-Start → Identity → PEAP start → `rounds` TLS rounds → Accept + EAP-Success → 4-way → DHCP → DNS.
+    /// EAPOL-Start → Identity → PEAP start → `rounds` TLS rounds → Accept + EAP-Success → 4-way → DHCP → DNS,
+    /// or (`succeed: false`) Access-Reject + EAP-Failure and nothing after (round 13: `succeed` was
+    /// ignored — every "failed" PEAP attempt of the tests was accepted).
     mutating func peap(user: String, succeed: Bool, rounds: Int, ip: String) {
         eapol(fromClient: true, type: 1, [], toGroup: true)
         eapToClient(code: 1, type: 1, dt: 0.003)
@@ -332,6 +334,11 @@ extension AuthLab {
         eapFromClient(type: 25, AuthLab.tlsData(bytes: 40), dt: 0.01)
         toServer(base + [AuthLab.eapMessage(AuthLab.eap(code: 2, id: eapID, type: 25, AuthLab.tlsData(bytes: 40)))])
         eapID &+= 1
+        guard succeed else {
+            toNAS(code: 3, [AuthLab.eapMessage(AuthLab.eap(code: 4, id: eapID)), AuthLab.text(18, "Authentication failed")], dt: 0.02)
+            eapToClient(code: 4, newID: false)
+            return
+        }
         toNAS(code: 2, [AuthLab.eapMessage(AuthLab.eap(code: 3, id: eapID)),
                         AuthLab.int(64, 13), AuthLab.int(65, 6), AuthLab.attr(81, [0x01] + Array("20".utf8)),
                         AuthLab.vsa(AuthDecoder.vendorAruba, 1, Array("employee".utf8)),
