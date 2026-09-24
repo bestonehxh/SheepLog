@@ -249,9 +249,10 @@ final class AppModelTests: XCTestCase {
         model.clearError()
         model.clearError()                            // OK + the sheet binding: one dismissal
         XCTAssertNil(model.lastError)
-        XCTAssertEqual(model.pendingErrors.count, 0)
+        XCTAssertEqual(model.pendingErrors.count, 1, "still first in line until its sheet comes up")
         try await Task.sleep(for: .seconds(AppModel.nextErrorDelay + 0.3))
         XCTAssertEqual(model.lastError, "second")
+        XCTAssertEqual(model.pendingErrors.count, 0)
         model.clearError()
     }
 

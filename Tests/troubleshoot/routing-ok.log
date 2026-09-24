@@ -1,0 +1,3 @@
+# A neighbour that went down once and came back: no finding.
+<189>1 2026-09-23T03:07:00.000Z CORE-RTR1 - - - - %OSPF-5-ADJCHG: Process 1, Nbr 10.0.0.6 on GigabitEthernet0/2 from FULL to DOWN, Neighbor Down: Interface down or detached
+<189>1 2026-09-23T03:07:40.000Z CORE-RTR1 - - - - %OSPF-5-ADJCHG: Process 1, Nbr 10.0.0.6 on GigabitEthernet0/2 from LOADING to FULL, Loading Done

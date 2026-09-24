@@ -1,0 +1,43 @@
+# Link flaps, one device per vendor shape: each goes down at least 3 times inside 10 minutes.
+# Aruba AOS-CX
+<190>1 2026-09-23T10:00:00+07:00 CX6300-CORE-01 intfd 1633 - - Event|403|LOG_INFO|AMM|1/1|Link status for interface 1/1/24 is down
+<190>1 2026-09-23T10:00:20+07:00 CX6300-CORE-01 intfd 1633 - - Event|403|LOG_INFO|AMM|1/1|Link status for interface 1/1/24 is up
+<190>1 2026-09-23T10:02:00+07:00 CX6300-CORE-01 intfd 1633 - - Event|403|LOG_INFO|AMM|1/1|Link status for interface 1/1/24 is down
+<190>1 2026-09-23T10:02:30+07:00 CX6300-CORE-01 intfd 1633 - - Event|403|LOG_INFO|AMM|1/1|Link status for interface 1/1/24 is up
+<190>1 2026-09-23T10:05:00+07:00 CX6300-CORE-01 intfd 1633 - - Event|403|LOG_INFO|AMM|1/1|Link status for interface 1/1/24 is down
+<190>1 2026-09-23T10:05:40+07:00 CX6300-CORE-01 intfd 1633 - - Event|403|LOG_INFO|AMM|1/1|Link status for interface 1/1/24 is up
+# Huawei VRP (linkDown_active / linkDown_clear alarms, and the line-protocol state)
+<185>Sep 23 2026 10:00:00+07:00 HW-CE6881 %%01IFNET/1/linkDown_active(l):CID=0x80fa0002-alarmID=0x08520003;The interface status changes. (ifName=10GE1/0/1, AdminStatus=UP, OperStatus=DOWN, Reason=The link protocol is down)
+<187>Sep 23 2026 10:00:01+07:00 HW-CE6881 %%01IFNET/4/LINK_STATE(l)[12]:The line protocol IP on the interface 10GE1/0/1 has entered the DOWN state.
+<189>Sep 23 2026 10:01:00+07:00 HW-CE6881 %%01IFNET/1/linkDown_clear(l):CID=0x80fa0002-alarmID=0x08520003;The interface status changes. (ifName=10GE1/0/1, AdminStatus=UP, OperStatus=UP, Reason=The link protocol is up)
+<185>Sep 23 2026 10:03:00+07:00 HW-CE6881 %%01IFNET/1/linkDown_active(l):CID=0x80fa0002-alarmID=0x08520003;The interface status changes. (ifName=10GE1/0/1, AdminStatus=UP, OperStatus=DOWN, Reason=The link protocol is down)
+<189>Sep 23 2026 10:03:30+07:00 HW-CE6881 %%01IFNET/1/linkDown_clear(l):CID=0x80fa0002-alarmID=0x08520003;The interface status changes. (ifName=10GE1/0/1, AdminStatus=UP, OperStatus=UP, Reason=The link protocol is up)
+<185>Sep 23 2026 10:06:00+07:00 HW-CE6881 %%01IFNET/1/linkDown_active(l):CID=0x80fa0002-alarmID=0x08520003;The interface status changes. (ifName=10GE1/0/1, AdminStatus=UP, OperStatus=DOWN, Reason=The link protocol is down)
+# Cisco IOS
+<187>1 2026-09-23T03:00:00.000Z CORE-RTR1 - - - - %LINK-3-UPDOWN: Interface GigabitEthernet0/1, changed state to down
+<189>1 2026-09-23T03:00:02.000Z CORE-RTR1 - - - - %LINEPROTO-5-UPDOWN: Line protocol on Interface GigabitEthernet0/1, changed state to down
+<187>1 2026-09-23T03:00:10.000Z CORE-RTR1 - - - - %LINK-3-UPDOWN: Interface GigabitEthernet0/1, changed state to up
+<187>1 2026-09-23T03:01:00.000Z CORE-RTR1 - - - - %LINK-3-UPDOWN: Interface GigabitEthernet0/1, changed state to down
+<187>1 2026-09-23T03:01:10.000Z CORE-RTR1 - - - - %LINK-3-UPDOWN: Interface GigabitEthernet0/1, changed state to up
+<187>1 2026-09-23T03:02:00.000Z CORE-RTR1 - - - - %LINK-3-UPDOWN: Interface GigabitEthernet0/1, changed state to down
+<187>1 2026-09-23T03:02:10.000Z CORE-RTR1 - - - - %LINK-3-UPDOWN: Interface GigabitEthernet0/1, changed state to up
+# Fortinet FortiOS
+<188>date=2026-09-23 time=10:00:00 devname="FGT-60F-Branch" devid="FGT60FTK20000000" eventtime=1790132400000000000 tz="+0700" logid="0100020010" type="event" subtype="system" level="warning" vd="root" logdesc="Interface status changed" interface="port3" status="down" msg="Interface port3 link is down"
+<189>date=2026-09-23 time=10:00:30 devname="FGT-60F-Branch" devid="FGT60FTK20000000" eventtime=1790132430000000000 tz="+0700" logid="0100020010" type="event" subtype="system" level="notice" vd="root" logdesc="Interface status changed" interface="port3" status="up" msg="Interface port3 link is up"
+<188>date=2026-09-23 time=10:01:00 devname="FGT-60F-Branch" devid="FGT60FTK20000000" eventtime=1790132460000000000 tz="+0700" logid="0100020010" type="event" subtype="system" level="warning" vd="root" logdesc="Interface status changed" interface="port3" status="down" msg="Interface port3 link is down"
+<189>date=2026-09-23 time=10:01:30 devname="FGT-60F-Branch" devid="FGT60FTK20000000" eventtime=1790132490000000000 tz="+0700" logid="0100020010" type="event" subtype="system" level="notice" vd="root" logdesc="Interface status changed" interface="port3" status="up" msg="Interface port3 link is up"
+<188>date=2026-09-23 time=10:02:00 devname="FGT-60F-Branch" devid="FGT60FTK20000000" eventtime=1790132520000000000 tz="+0700" logid="0100020010" type="event" subtype="system" level="warning" vd="root" logdesc="Interface status changed" interface="port3" status="down" msg="Interface port3 link is down"
+# Aruba AOS-S / ProCurve
+<14>1 2026-09-23T10:00:00+07:00 SW-2930F-01 - - - - 00076 ports: port 24 is now off-line
+<14>1 2026-09-23T10:00:05+07:00 SW-2930F-01 - - - - 00076 ports: port 24 is now on-line
+<14>1 2026-09-23T10:01:00+07:00 SW-2930F-01 - - - - 00076 ports: port 24 is now off-line
+<14>1 2026-09-23T10:01:05+07:00 SW-2930F-01 - - - - 00076 ports: port 24 is now on-line
+<14>1 2026-09-23T10:02:00+07:00 SW-2930F-01 - - - - 00076 ports: port 24 is now off-line
+<14>1 2026-09-23T10:02:05+07:00 SW-2930F-01 - - - - 00076 ports: port 24 is now on-line
+# MikroTik RouterOS
+<30>1 2026-09-23T10:00:00+07:00 MT-EDGE - - - - interface,info ether1 link down
+<30>1 2026-09-23T10:00:04+07:00 MT-EDGE - - - - interface,info ether1 link up (speed 1G, full duplex)
+<30>1 2026-09-23T10:00:30+07:00 MT-EDGE - - - - interface,info ether1 link down
+<30>1 2026-09-23T10:00:34+07:00 MT-EDGE - - - - interface,info ether1 link up (speed 1G, full duplex)
+<30>1 2026-09-23T10:01:00+07:00 MT-EDGE - - - - interface,info ether1 link down
+<30>1 2026-09-23T10:01:04+07:00 MT-EDGE - - - - interface,info ether1 link up (speed 100M, half duplex)

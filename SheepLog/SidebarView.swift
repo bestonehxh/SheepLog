@@ -25,7 +25,10 @@ struct SidebarView: View {
                             isOn: Binding(get: { capture.isRunning }, set: { $0 ? model.startCapture() : model.stopCapture() }))
 
                     sectionHeader("Overview")
-                    group { row(.status, "Status") }
+                    group {
+                        row(.status, "Status")
+                        row(.troubleshoot, "Troubleshoot")
+                    }
 
                     sectionHeader("Syslog")
                     group {
@@ -43,6 +46,7 @@ struct SidebarView: View {
                     group {
                         row(.packets, "Packets", count: packets.packets.count)
                         row(.flows, "TCP flows")
+                        row(.auth, "Authentication")
                     }
 
                     sectionHeader("App")

@@ -353,9 +353,15 @@ final class Round7Tests: XCTestCase {
         let host = "192.0.2.\(Int.random(in: 10...250))", port: UInt16 = 16_161
         var saved = SNMPCredentials(version: .v3, username: "late-user")
         saved.authPassword = "x-long-password"
-        KeychainStore.saveCredentials(saved, host: host, port: port)
-        defer { KeychainStore.delete(account: SNMPTestModel.keychainAccount(host: host, port: port)) }
-        guard KeychainStore.loadCredentials(host: host, port: port) != nil else { throw XCTSkip("no Keychain in this host") }
+        let account = SNMPTestModel.keychainAccount(host: host, port: port)
+        defer { KeychainProbe.later { KeychainStore.delete(account: account) } }
+        // Off the main thread with a 5 s limit: an access prompt skips instead of hanging.
+        let stored = KeychainProbe.run { [saved] in
+            KeychainStore.saveCredentials(saved, host: host, port: port)
+            return KeychainStore.loadCredentials(host: host, port: port) != nil
+        }
+        guard let stored else { throw XCTSkip("the Keychain did not answer within 5 s (an access prompt?)") }
+        guard stored else { throw XCTSkip("no Keychain in this host") }
         let m = SNMPTestModel.shared
         let before = m.credentials
         defer { m.cancel(); m.applyCredentials(before) }

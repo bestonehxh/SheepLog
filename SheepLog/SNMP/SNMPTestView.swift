@@ -336,10 +336,12 @@ final class SNMPTestModel: ObservableObject {
         contextName = c.contextName
     }
 
-    /// "10.1.0.1", "10.1.0.1:1161", "[fe80::1]:161".
+    /// "10.1.0.1", "10.1.0.1:1161", "[fe80::1]:161". An address without a port is asked on 161:
+    /// the port left in the form belonged to the previous target (a lab on 1161 made every
+    /// device opened from the Log time out as if its community were wrong).
     func setTarget(_ address: String) {
         let split = Self.splitAddress(address)
-        if let p = split.port { port = p }
+        port = split.port ?? 161
         host = split.host
         loadSavedCredentials()
     }
@@ -480,12 +482,15 @@ final class SNMPTestModel: ObservableObject {
 
     func getNext() {
         guard let oid = resolveOID(forGet: false) else { return }
+        let asked = oidText
         start("Get next") { client, model in
             let reply = try await client.getNext([oid])
             try Task.checkCancellation()
             model.replaceRows(reply.varBinds)
             model.resultView = .varBinds
-            if let vb = reply.varBinds.first { model.oidText = vb.oid.dotted }
+            // Steps the field on to the answer — unless another object was put there meanwhile
+            // (typed, or MIBs' "Use in SNMP test"): that choice is not overwritten.
+            if let vb = reply.varBinds.first, model.oidText == asked { model.oidText = vb.oid.dotted }
             model.succeeded(reply: reply, engine: reply.engine, operation: "GETNEXT")
         }
     }

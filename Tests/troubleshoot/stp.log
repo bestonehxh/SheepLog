@@ -1,0 +1,10 @@
+# Spanning tree, loops and storms.
+<188>1 2026-09-23T10:02:07+07:00 CORE-CX-6300 mstpd 1710 - - Event|2006|LOG_WARN|AMM|-|MSTP: Topology change received on port 1/1/24 for CIST
+<188>1 2026-09-23T10:03:12+07:00 CORE-CX-6300 mstpd 1710 - - Event|2006|LOG_WARN|AMM|-|MSTP: Topology change received on port 1/1/24 for CIST
+<188>1 2026-09-23T10:04:33+07:00 CORE-CX-6300 mstpd 1710 - - Event|2006|LOG_WARN|AMM|-|MSTP: Topology change received on port 1/1/24 for CIST
+<186>1 2026-09-23T10:12:40+07:00 SW-2930F-3F - - - - 00435 ports: port 12 is Blocked by LOOP-PROTECT
+<186>1 2026-09-23T03:05:00.000Z ACC-3850 - - - - %SPANTREE-2-BLOCK_BPDUGUARD: Received BPDU on port Gi1/0/5 with BPDU Guard enabled. Disabling port.
+<188>Sep 23 2026 10:20:00+07:00 S5720-DIST-B %%01ETH/4/STORM_CONTROL(l)[9]:Broadcast storm detected on interface GigabitEthernet0/0/3, packets blocked. (Rate=15000 pps)
+<188>Sep 23 2026 10:30:00+07:00 S5720-DIST-B %%01MSTP/4/ROOT_CHANGED(l)[10]:The root bridge of MSTP process 0 changed. (NewRootID=4096.00e0-fc12-3456)
+<188>Sep 23 2026 10:31:00+07:00 S5720-DIST-B %%01MSTP/4/ROOT_CHANGED(l)[11]:The root bridge of MSTP process 0 changed. (NewRootID=32768.00e0-fc12-9999)
+<188>Sep 23 2026 10:32:00+07:00 S5720-DIST-B %%01MSTP/4/ROOT_CHANGED(l)[12]:The root bridge of MSTP process 0 changed. (NewRootID=4096.00e0-fc12-3456)

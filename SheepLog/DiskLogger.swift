@@ -63,13 +63,16 @@ nonisolated final class DiskLogger: @unchecked Sendable {
     }
 
     /// Closes for good: this logger was replaced or disk logging was turned off. An append
-    /// still on its way from a listener thread must not reopen the file afterwards.
-    func retire() {
-        queue.sync {
+    /// still on its way from a listener thread must not reopen the file afterwards. Lines
+    /// queued before this call are still written. `wait: false` returns at once (the app: a
+    /// logger with a burst still to write would hold the main thread until it is done).
+    func retire(wait: Bool = true) {
+        let work: @Sendable () -> Void = { [self] in
             retired = true
             closeFile()
             day = ""
         }
+        if wait { queue.sync(execute: work) } else { queue.async(execute: work) }
     }
 
     /// Waits until every queued write is done (tests).

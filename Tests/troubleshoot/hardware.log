@@ -1,0 +1,7 @@
+# Power supplies, fans, temperature and PoE, per vendor shape.
+<185>1 2026-09-23T03:17:10.000Z CX6300-ACC-12 ops-switchd 1432 - - Event|1105|LOG_CRIT|AMM|1/1|Power supply 2 in slot 1/1 failed
+<177>1 2026-09-23T03:17:11Z CX6300-ACC-12 fand 1433 - - Event|1403|LOG_ALERT|AMM|1/1|Fan tray 1 fault detected, system temperature rising
+<185>Sep 23 2026 10:10:30+07:00 S5720-DIST-B %%01DEVM/1/hwFanFail_active(l)[3]:The fan partially failed. (EntityPhysicalIndex=16842753, EntPhysicalName=FAN 1, EntityTrapFaultID=137216, Reason=Fan speed is too low)
+<186>1 2026-09-23T03:20:00.000Z CORE-RTR1 - - - - %ENVMON-2-TEMP_HIGH: System temperature is above critical threshold (72 C), shutting down line card 2
+<188>1 2026-09-23T10:09:30+07:00 ACC-CX-6100-2F poed 1904 - - Event|8801|LOG_WARN|AMM|1/1|PoE power denied on port 1/1/9: insufficient power budget (370 W in use)
+<12>1 2026-09-23T10:20:00+07:00 SW-2930F-01 - - - - 00562 chassis: Power supply 1 has failed, no redundant power available

@@ -1,0 +1,14 @@
+# Not flapping: two downs in 10 minutes, three downs 15 minutes apart, an admin shutdown,
+# LLDP neighbour lines about a port — none of these is a finding (and every port is up at the end).
+<190>1 2026-09-23T10:00:00+07:00 CX6300-CORE-01 intfd 1633 - - Event|403|LOG_INFO|AMM|1/1|Link status for interface 1/1/24 is down
+<190>1 2026-09-23T10:00:20+07:00 CX6300-CORE-01 intfd 1633 - - Event|403|LOG_INFO|AMM|1/1|Link status for interface 1/1/24 is up
+<190>1 2026-09-23T10:05:00+07:00 CX6300-CORE-01 intfd 1633 - - Event|403|LOG_INFO|AMM|1/1|Link status for interface 1/1/24 is down
+<190>1 2026-09-23T10:05:20+07:00 CX6300-CORE-01 intfd 1633 - - Event|403|LOG_INFO|AMM|1/1|Link status for interface 1/1/24 is up
+<187>1 2026-09-23T03:00:00.000Z CORE-RTR1 - - - - %LINK-3-UPDOWN: Interface GigabitEthernet0/3, changed state to down
+<187>1 2026-09-23T03:00:10.000Z CORE-RTR1 - - - - %LINK-3-UPDOWN: Interface GigabitEthernet0/3, changed state to up
+<187>1 2026-09-23T03:15:00.000Z CORE-RTR1 - - - - %LINK-3-UPDOWN: Interface GigabitEthernet0/3, changed state to down
+<187>1 2026-09-23T03:15:10.000Z CORE-RTR1 - - - - %LINK-3-UPDOWN: Interface GigabitEthernet0/3, changed state to up
+<187>1 2026-09-23T03:30:00.000Z CORE-RTR1 - - - - %LINK-3-UPDOWN: Interface GigabitEthernet0/3, changed state to down
+<187>1 2026-09-23T03:30:10.000Z CORE-RTR1 - - - - %LINK-3-UPDOWN: Interface GigabitEthernet0/3, changed state to up
+<189>1 2026-09-23T03:40:00.000Z CORE-RTR1 - - - - %LINK-5-CHANGED: Interface GigabitEthernet0/4, changed state to administratively down
+<187>1 2026-09-23T10:15:32.123+07:00 CX6300-CORE-01 lldpd 2512 - - Event|1302|LOG_WARN|AMM|1/1|LLDP neighbor 10.1.0.9 removed on port 1/1/24

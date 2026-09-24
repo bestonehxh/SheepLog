@@ -1011,31 +1011,53 @@ extension SNMPClientTests {
     }
 
     /// Keychain entries per target, IPv6 bracketed; an unbracketed entry from an earlier build
-    /// is found and renamed. Test items use their own host names and are removed.
+    /// is found and renamed. Test items use their own host names and are removed. Every
+    /// Keychain call runs through `KeychainProbe` (an access prompt skips instead of hanging).
     func testKeychainAccountsPerTarget() throws {
         let tag = "sheeplog-test-\(UUID().uuidString.prefix(8))"
         let v6 = "fd00:\(tag.count)::\(Int.random(in: 1...0xfff))"
         let accounts = ["\(tag):1161", "[\(v6)]:1161", "\(v6):1161"]
-        defer { for a in accounts { KeychainStore.delete(account: a) } }
-        var c = SNMPCredentials(version: .v3, username: "u1", authPassword: "pw-one-long", privPassword: "pw-two-long")
-        KeychainStore.saveCredentials(c, host: tag, port: 1161)
-        guard KeychainStore.load(account: "\(tag):1161") != nil else {
-            throw XCTSkip("the login keychain is not writable from this test host")
+        defer { KeychainProbe.later { for a in accounts { KeychainStore.delete(account: a) } } }
+        struct Seen: Sendable {
+            var writable = false
+            var first: SNMPCredentials?
+            var otherPort: SNMPCredentials?
+            var v6Bracketed = false
+            var v6User: String?
+            var legacyUser: String?
+            var legacyMoved = false
+            var legacyGone = false
         }
-        XCTAssertEqual(KeychainStore.loadCredentials(host: tag, port: 1161), c)
-        XCTAssertNil(KeychainStore.loadCredentials(host: tag, port: 161), "per port")
-
-        c.username = "u6"
-        KeychainStore.saveCredentials(c, host: v6, port: 1161)
-        XCTAssertNotNil(KeychainStore.load(account: "[\(v6)]:1161"))
-        XCTAssertEqual(KeychainStore.loadCredentials(host: v6, port: 1161)?.username, "u6")
-        // Legacy name only.
-        KeychainStore.delete(account: "[\(v6)]:1161")
-        c.username = "legacy"
-        KeychainStore.saveCredentials(c, account: "\(v6):1161")
-        XCTAssertEqual(KeychainStore.loadCredentials(host: v6, port: 1161)?.username, "legacy")
-        XCTAssertNotNil(KeychainStore.load(account: "[\(v6)]:1161"), "moved to the bracketed name")
-        XCTAssertNil(KeychainStore.load(account: "\(v6):1161"))
+        let seen = KeychainProbe.run {
+            var s = Seen()
+            var c = SNMPCredentials(version: .v3, username: "u1", authPassword: "pw-one-long", privPassword: "pw-two-long")
+            KeychainStore.saveCredentials(c, host: tag, port: 1161)
+            guard KeychainStore.load(account: "\(tag):1161") != nil else { return s }
+            s.writable = true
+            s.first = KeychainStore.loadCredentials(host: tag, port: 1161)
+            s.otherPort = KeychainStore.loadCredentials(host: tag, port: 161)
+            c.username = "u6"
+            KeychainStore.saveCredentials(c, host: v6, port: 1161)
+            s.v6Bracketed = KeychainStore.load(account: "[\(v6)]:1161") != nil
+            s.v6User = KeychainStore.loadCredentials(host: v6, port: 1161)?.username
+            // Legacy name only.
+            KeychainStore.delete(account: "[\(v6)]:1161")
+            c.username = "legacy"
+            KeychainStore.saveCredentials(c, account: "\(v6):1161")
+            s.legacyUser = KeychainStore.loadCredentials(host: v6, port: 1161)?.username
+            s.legacyMoved = KeychainStore.load(account: "[\(v6)]:1161") != nil
+            s.legacyGone = KeychainStore.load(account: "\(v6):1161") == nil
+            return s
+        }
+        guard let seen else { throw XCTSkip("the Keychain did not answer within 5 s (an access prompt?)") }
+        guard seen.writable else { throw XCTSkip("the login keychain is not writable from this test host") }
+        XCTAssertEqual(seen.first, SNMPCredentials(version: .v3, username: "u1", authPassword: "pw-one-long", privPassword: "pw-two-long"))
+        XCTAssertNil(seen.otherPort, "per port")
+        XCTAssertTrue(seen.v6Bracketed)
+        XCTAssertEqual(seen.v6User, "u6")
+        XCTAssertEqual(seen.legacyUser, "legacy")
+        XCTAssertTrue(seen.legacyMoved, "moved to the bracketed name")
+        XCTAssertTrue(seen.legacyGone)
     }
 
     /// The Test pane against an agent that never answers (1 s × 6 tries): the main thread keeps
@@ -1068,8 +1090,10 @@ extension SNMPClientTests {
         while m.isRunning, Date().timeIntervalSince(c0) < 2 { try await Task.sleep(for: .milliseconds(1)) }
         let latency = Date().timeIntervalSince(c0)
         print("pane: worst main-thread gap \(Int(worstGap * 1000)) ms, cancel → idle \(Int(latency * 1000)) ms")
-        XCTAssertLessThan(worstGap, 0.1)
-        XCTAssertLessThan(latency, 0.1)
+        // Time budgets (skipped under the sanitizers, which slow every step several times).
+        XCTAssertWithinBudget(worstGap, 0.1, "worst main-thread gap")
+        XCTAssertWithinBudget(latency, 0.1, "cancel → idle")
+        XCTAssertLessThan(latency, 2, "Cancel stops the run at all")
         XCTAssertEqual(m.heading, "Stopped.")
     }
 

@@ -1,0 +1,10 @@
+# One failed login each from two addresses, a service restart, a command record and 802.1X client failures: no finding.
+<86>1 2026-09-23T03:20:00Z web01 sshd 4411 - - Failed password for alice from 10.1.0.77 port 51234 ssh2
+<86>1 2026-09-23T04:20:00Z web01 sshd 4411 - - Failed password for bob from 10.1.0.78 port 51236 ssh2
+<85>1 2026-09-23T03:16:02Z web01 sudo - - - alice : TTY=pts/0 ; PWD=/home/alice ; USER=root ; COMMAND=/usr/bin/systemctl restart nginx
+<189>Sep 23 2026 10:15:40+07:00 S5720-CORE %%01SHELL/5/CMDRECORD(s)[13]:Recorded command information. (Task=VT0, Ip=10.1.0.5, VpnName=, User=admin, AuthenticationMethod="Local-user", Command="display current-configuration")
+<131>Sep 23 10:12:03 2026 MD-7210-1 authmgr[4211]: <522275> <4211> <ERRS> <MD-7210-1 10.1.1.11>  User Authentication failed. username=bob MAC=02:00:5e:10:00:02 IP=0.0.0.0 auth method=802.1x auth server=CPPM
+<131>Sep 23 10:12:05 2026 MD-7210-1 authmgr[4211]: <522275> <4211> <ERRS> <MD-7210-1 10.1.1.11>  User Authentication failed. username=bob MAC=02:00:5e:10:00:02 IP=0.0.0.0 auth method=802.1x auth server=CPPM
+<131>Sep 23 10:12:07 2026 MD-7210-1 authmgr[4211]: <522275> <4211> <ERRS> <MD-7210-1 10.1.1.11>  User Authentication failed. username=bob MAC=02:00:5e:10:00:02 IP=0.0.0.0 auth method=802.1x auth server=CPPM
+<131>Sep 23 10:12:09 2026 MD-7210-1 authmgr[4211]: <522275> <4211> <ERRS> <MD-7210-1 10.1.1.11>  User Authentication failed. username=bob MAC=02:00:5e:10:00:02 IP=0.0.0.0 auth method=802.1x auth server=CPPM
+<131>Sep 23 10:12:11 2026 MD-7210-1 authmgr[4211]: <522275> <4211> <ERRS> <MD-7210-1 10.1.1.11>  User Authentication failed. username=bob MAC=02:00:5e:10:00:02 IP=0.0.0.0 auth method=802.1x auth server=CPPM

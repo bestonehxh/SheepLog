@@ -767,14 +767,29 @@ nonisolated enum Format {
             appendCSV(&out, "'" + s)
             return
         }
-        // A byte test: a Character walk per field per row would dominate a 100k-line export.
-        guard s.utf8.contains(where: { $0 == 0x2C || $0 == 0x22 || $0 == 0x0A || $0 == 0x0D }) else {
-            out += s
-            return
+        // Byte scans with memchr: a Character walk (or `contains(where:)` and Foundation's
+        // `replacingOccurrences` in a Debug build) per field per row dominated a 100k-line export.
+        var text = s
+        text.withUTF8 { buf in
+            guard let base = buf.baseAddress, buf.count > 0 else { out += s; return }
+            func has(_ byte: UInt8) -> Bool { memchr(base, Int32(byte), buf.count) != nil }
+            let quote = has(0x22)
+            guard quote || has(0x2C) || has(0x0A) || has(0x0D) else { out += s; return }
+            out += "\""
+            guard quote else { out += s; out += "\""; return }
+            var start = 0
+            while start < buf.count {
+                guard let hit = memchr(base + start, 0x22, buf.count - start) else {
+                    out += String(decoding: UnsafeBufferPointer(start: base + start, count: buf.count - start), as: UTF8.self)
+                    break
+                }
+                let i = base.distance(to: hit.assumingMemoryBound(to: UInt8.self))
+                out += String(decoding: UnsafeBufferPointer(start: base + start, count: i - start + 1), as: UTF8.self)
+                out += "\""
+                start = i + 1
+            }
+            out += "\""
         }
-        out += "\""
-        out += s.utf8.contains(0x22) ? s.replacingOccurrences(of: "\"", with: "\"\"") : s
-        out += "\""
     }
 }
 

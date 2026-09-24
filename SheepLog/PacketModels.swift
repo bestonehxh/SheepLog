@@ -40,6 +40,35 @@ nonisolated struct TCPFlags: OptionSet, Sendable, Hashable {
     static let ece = TCPFlags(rawValue: 0x40)
     static let cwr = TCPFlags(rawValue: 0x80)
 
+    // Concrete set operations: OptionSet's defaults go through SetAlgebra's generic witnesses
+    // (several calls per `contains`), which in a Debug build were a third of the flow
+    // analysis. Same results; these are what direct calls pick.
+    init(rawValue: UInt8) { self.rawValue = rawValue }
+    init(arrayLiteral elements: TCPFlags...) {
+        var r: UInt8 = 0
+        for e in elements { r |= e.rawValue }
+        self.init(rawValue: r)
+    }
+    var isEmpty: Bool { rawValue == 0 }
+    func contains(_ member: TCPFlags) -> Bool { rawValue & member.rawValue == member.rawValue }
+    func isDisjoint(with other: TCPFlags) -> Bool { rawValue & other.rawValue == 0 }
+    func union(_ other: TCPFlags) -> TCPFlags { TCPFlags(rawValue: rawValue | other.rawValue) }
+    func intersection(_ other: TCPFlags) -> TCPFlags { TCPFlags(rawValue: rawValue & other.rawValue) }
+    func subtracting(_ other: TCPFlags) -> TCPFlags { TCPFlags(rawValue: rawValue & ~other.rawValue) }
+    @discardableResult
+    mutating func insert(_ member: TCPFlags) -> (inserted: Bool, memberAfterInsert: TCPFlags) {
+        let had = contains(member)
+        let after = had ? intersection(member) : member
+        self = union(member)
+        return (!had, after)
+    }
+    @discardableResult
+    mutating func remove(_ member: TCPFlags) -> TCPFlags? {
+        let gone = intersection(member)
+        self = subtracting(member)
+        return gone.isEmpty ? nil : gone
+    }
+
     /// "SYN", "SYN, ACK", "PSH, ACK", "FIN, ACK", "RST" — Wireshark order.
     var label: String {
         var out: [String] = []

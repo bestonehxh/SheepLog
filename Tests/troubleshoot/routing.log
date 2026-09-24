@@ -1,0 +1,7 @@
+# An OSPF neighbour that stays down, a BGP peer that flaps.
+<189>1 2026-09-23T03:07:00.000Z CORE-RTR1 - - - - %OSPF-5-ADJCHG: Process 1, Nbr 10.0.0.6 on GigabitEthernet0/2 from FULL to DOWN, Neighbor Down: Dead timer expired
+<188>Sep 23 2026 10:16:00+07:00 S5720-CORE %%01OSPF/3/NBR_CHG_DOWN(l)[14]:Neighbor event:neighbor state changed to Down. (ProcessId=1, NeighborAddress=10.0.0.2, NeighborEvent=KillNbr, NeighborPreviousState=Full, NeighborCurrentState=Down)
+<189>1 2026-09-23T03:10:00.000Z EDGE-RTR2 - - - - %BGP-5-ADJCHANGE: neighbor 203.0.113.1 Down BGP Notification sent
+<189>1 2026-09-23T03:10:40.000Z EDGE-RTR2 - - - - %BGP-5-ADJCHANGE: neighbor 203.0.113.1 Up
+<189>1 2026-09-23T03:12:00.000Z EDGE-RTR2 - - - - %BGP-5-ADJCHANGE: neighbor 203.0.113.1 Down Peer closed the session
+<189>1 2026-09-23T03:12:40.000Z EDGE-RTR2 - - - - %BGP-5-ADJCHANGE: neighbor 203.0.113.1 Up

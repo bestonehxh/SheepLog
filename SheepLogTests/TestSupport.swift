@@ -90,6 +90,29 @@ nonisolated final class LockedBox<T>: @unchecked Sendable {
     func mutate(_ f: (inout T) -> Void) { lock.lock(); f(&v); lock.unlock() }
 }
 
+/// Keychain calls from tests, prompt-proof: a Debug build signed differently from the one that
+/// created an item makes macOS ask for access, and the call blocks until someone answers — a
+/// whole unattended suite stalled for 25 minutes on it. `body` runs on its own thread; nil when
+/// it has not finished within `timeout` (the caller skips). The thread may stay blocked.
+nonisolated enum KeychainProbe {
+    static func run<T: Sendable>(timeout: Double = 5, _ body: @escaping @Sendable () -> T) -> T? {
+        let box = LockedBox<T?>(nil)
+        let done = DispatchSemaphore(value: 0)
+        Thread {
+            let v = body()
+            box.mutate { $0 = v }
+            done.signal()
+        }.start()
+        guard done.wait(timeout: .now() + timeout) == .success else { return nil }
+        return box.value
+    }
+
+    /// Fire and forget (clean-up in a `defer`): never waits.
+    static func later(_ body: @escaping @Sendable () -> Void) {
+        Thread { body() }.start()
+    }
+}
+
 // Trap, SNMP and capture tests.
 nonisolated extension TestSockets {
     /// `datagram` to 127.0.0.1:`port`, `times` times, from `fd` (or a socket of its own).

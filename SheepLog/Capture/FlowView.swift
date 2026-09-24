@@ -25,6 +25,80 @@ nonisolated struct FlowSelectRequest: Sendable {
     }
 }
 
+/// What the Flows pane has selected — the conversation, the ladder event, a "Follow TCP stream"
+/// request waiting for an analysis — and how that survives a re-analysis (ids are renumbered
+/// every time, and a live capture's ring evicts the oldest frames: the ladder's events shift).
+nonisolated struct FlowSelectionState: Sendable {
+    var selection: Int?
+    var key: FlowKey?
+    var start: Date?
+    var event: Int?
+    var pendingRequest: FlowSelectRequest?
+    /// The frame whose event to select once `selection` has moved to its flow.
+    var pendingEventPacket: Int?
+
+    /// `onChange(of: selection)`.
+    mutating func selectionChanged(in flows: [TCPFlow]) {
+        let f = flows.first { $0.id == selection }
+        event = pendingEventPacket.flatMap { id in f?.events.first { $0.packetIDs.contains(id) }?.id }
+        pendingEventPacket = nil
+        key = f?.key
+        start = f?.firstTime
+    }
+
+    /// The event of `flow` that carries any of `frames` (nil when they all left the ring).
+    static func event(in flow: TCPFlow, carrying frames: [Int]) -> Int? {
+        guard !frames.isEmpty else { return nil }
+        let set = Set(frames)
+        return flow.events.first { e in e.packetIDs.contains { set.contains($0) } }?.id
+    }
+
+    /// A new analysis (`previous` = the flows it replaces). The selected conversation is found
+    /// again by key and start (a reused 4-tuple is several conversations), else by key; the
+    /// selected ladder event by its frames — its index moves when the ring evicts the flow's
+    /// first frames, and the old index then named another event (the footer's frames and
+    /// "Show packets" were another event's). Returns the flow a "Follow TCP stream" request
+    /// resolved to (the pane clears filters that would hide it).
+    @discardableResult
+    mutating func apply(_ result: [TCPFlow], previous: [TCPFlow]) -> TCPFlow? {
+        let shownFrames: [Int] = {
+            guard let s = selection, let e = event, let f = previous.first(where: { $0.id == s }),
+                  let ev = f.events.first(where: { $0.id == e }) else { return [] }
+            return ev.packetIDs
+        }()
+        let byStart = start.flatMap { st in result.first { $0.key == key && $0.firstTime == st } }
+        if let request = pendingRequest, let target = request.resolve(in: result) {
+            pendingRequest = nil
+            // A new selection picks the event up in selectionChanged; the same one now.
+            if selection == target.flow.id { event = target.eventID } else { pendingEventPacket = request.packetID }
+            selection = target.flow.id
+            return target.flow
+        }
+        if let request = pendingRequest, let frame = request.packetID,
+           frame <= (result.map(\.lastPacketID).max() ?? 0) {
+            // Analysed past its frame and no conversation has its key: the frame (and its whole
+            // conversation) left the ring. Waiting on would jump to whatever reuses that 4-tuple
+            // minutes later.
+            pendingRequest = nil
+        }
+        let match = pendingRequest == nil ? byStart : nil
+        if let target = match ?? key.flatMap({ FlowSelectRequest.match(result, key: $0, packetID: nil) }) {
+            let ev = Self.event(in: target, carrying: shownFrames)
+            if selection == target.id {
+                event = ev
+            } else {
+                pendingEventPacket = ev.flatMap { id in target.events.first { $0.id == id }?.packetIDs.first }
+            }
+            selection = target.id
+        } else if let s = selection, !result.contains(where: { $0.id == s }) {
+            selection = nil
+        } else if selection != nil {
+            event = nil
+        }
+        return nil
+    }
+}
+
 /// TCP flows: the conversation table on the left, the ladder (sequence) diagram of the selected
 /// one on the right. Analysis runs off the main actor on every store change (at most once a second).
 struct FlowView: View {
@@ -121,11 +195,25 @@ struct FlowView: View {
     }
 
     private func selectionChanged() {
-        let f = flows.first { $0.id == selection }
-        selectedEvent = pendingEventPacket.flatMap { id in f?.events.first { $0.packetIDs.contains(id) }?.id }
-        pendingEventPacket = nil
-        selectedKey = f?.key
-        selectedStart = f?.firstTime
+        var state = selectionState
+        state.selectionChanged(in: flows)
+        selectionState = state
+    }
+
+    /// The selection @State as one value (the rules live in `FlowSelectionState`, tested).
+    private var selectionState: FlowSelectionState {
+        get {
+            FlowSelectionState(selection: selection, key: selectedKey, start: selectedStart, event: selectedEvent,
+                               pendingRequest: pendingRequest, pendingEventPacket: pendingEventPacket)
+        }
+        nonmutating set {
+            if selectedKey != newValue.key { selectedKey = newValue.key }
+            if selectedStart != newValue.start { selectedStart = newValue.start }
+            if selectedEvent != newValue.event { selectedEvent = newValue.event }
+            pendingRequest = newValue.pendingRequest
+            if pendingEventPacket != newValue.pendingEventPacket { pendingEventPacket = newValue.pendingEventPacket }
+            if selection != newValue.selection { selection = newValue.selection }
+        }
     }
 
     // MARK: Header and strip
@@ -413,30 +501,19 @@ struct FlowView: View {
     }
 
     private func apply(_ result: [TCPFlow]) {
+        let previous = flows
         flows = result
         analysing = false
         analysedAt = Date()
-        // Ids are renumbered by every analysis; find the selected conversation again by its key
-        // and start (a reused 4-tuple is several conversations with one key).
-        let byStart = selectedStart.flatMap { start in result.first { $0.key == selectedKey && $0.firstTime == start } }
-        if let request = pendingRequest, let target = request.resolve(in: result) {
-            pendingRequest = nil
-            revealSelection(target.flow)
-            // A new selection picks the event up in onChange(of: selection); the same one now.
-            if selection == target.flow.id { selectedEvent = target.eventID } else { pendingEventPacket = request.packetID }
-            selection = target.flow.id
-        } else if pendingRequest == nil, let match = byStart {
-            selection = match.id
-        } else if let key = selectedKey, let match = FlowSelectRequest.match(result, key: key, packetID: nil) {
-            selection = match.id
-        } else if let s = selection, !result.contains(where: { $0.id == s }) {
-            selection = nil
-        }
+        var state = selectionState
+        let revealed = state.apply(result, previous: previous)
+        if let revealed { revealSelection(revealed) }
         // `-demoFlowSelect largest` (screenshots of a real capture).
-        if selection == nil, DemoFlags.flowSelect == "largest",
+        if state.selection == nil, DemoFlags.flowSelect == "largest",
            let big = result.max(by: { $0.bytesToClient + $0.bytesToServer < $1.bytesToClient + $1.bytesToServer }) {
-            selection = big.id
+            state.selection = big.id
         }
+        selectionState = state
     }
 
     private func select(key: FlowKey, packetID: Int?) {

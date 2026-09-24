@@ -1,0 +1,6 @@
+# Routine hardware lines: none is a finding.
+<190>1 2026-09-23T03:17:10.000Z CX6300-ACC-12 ops-switchd 1432 - - Event|1105|LOG_INFO|AMM|1/1|Power supply 2 in slot 1/1 inserted, status OK
+<190>1 2026-09-23T03:18:00Z CX6300-ACC-12 fand 1433 - - Event|1401|LOG_INFO|AMM|1/1|Fan tray 1 speed normal
+<190>1 2026-09-23T10:09:30+07:00 ACC-CX-6100-2F poed 1904 - - Event|8802|LOG_INFO|AMM|1/1|PoE power delivered on port 1/1/9, class 4, 12.4 W
+<190>1 2026-09-23T10:09:40+07:00 ACC-CX-6100-2F poed 1904 - - Event|8803|LOG_INFO|AMM|1/1|Power over Ethernet enabled on port 1/1/10
+<190>1 2026-09-23T10:10:00+07:00 ACC-CX-6100-2F intfd 1633 - - Event|410|LOG_INFO|AMM|1/1|Interface 1/1/10 power-save profile applied

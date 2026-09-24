@@ -1229,9 +1229,13 @@ extension PacketTableController: NSMenuDelegate {
         add("Copy info", #selector(copyInfo(_:)))
         add("Copy row", #selector(copyRow(_:)))
         menu.addItem(.separator())
-        add("Filter this source (\(p.decoded.source))", #selector(filterSource(_:)))
-        add("Filter this destination (\(p.decoded.destination))", #selector(filterDestination(_:)))
-        add("Filter this conversation", #selector(filterConversation(_:)))
+        // A frame with no address (a truncated one, a loopback frame of another family) has
+        // nothing to filter on: `src:` alone is the text "src:", which hid every packet.
+        let src = p.decoded.source, dst = p.decoded.destination
+        add(src.isEmpty ? "Filter this source" : "Filter this source (\(src))", #selector(filterSource(_:)), enabled: !src.isEmpty)
+        add(dst.isEmpty ? "Filter this destination" : "Filter this destination (\(dst))", #selector(filterDestination(_:)),
+            enabled: !dst.isEmpty)
+        add("Filter this conversation", #selector(filterConversation(_:)), enabled: !src.isEmpty && !dst.isEmpty)
         menu.addItem(.separator())
         add("Show in TCP flows", #selector(followStream(_:)), enabled: p.decoded.tcp != nil)
         menu.addItem(.separator())
@@ -1301,7 +1305,8 @@ extension PacketTableController: NSMenuDelegate {
 
     /// Double-click a row: show only its conversation (Wireshark's "Conversation Filter").
     @objc func doubleClicked(_ sender: Any?) {
-        guard let tv = tableView, let p = packet(at: tv.clickedRow) else { return }
+        guard let tv = tableView, let p = packet(at: tv.clickedRow),
+              !p.decoded.source.isEmpty, !p.decoded.destination.isEmpty else { return }
         setFilter(Self.conversationFilter(p.decoded))
     }
 }

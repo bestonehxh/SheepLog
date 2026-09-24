@@ -1,0 +1,12 @@
+# Configuration changes, a burst of failed admin logins from one address followed by a success, restarts.
+<189>1 2026-09-23T03:15:33.456Z CORE-RTR1 - - - - %SYS-5-CONFIG_I: Configured from console by netops on vty0 (10.1.0.5)
+<14>Sep 23 10:17:10 PA-3220 1,2026/09/23 10:17:10,012801012345,CONFIG,0,2561,2026/09/23 10:17:10,10.1.0.5,vsys1,set,admin,Web,Succeeded, vsys  vsys1 rulebase security rules  allow-dns,,,1235,0x0,0,0,0,0,,PA-3220,,,,2026-09-23T10:17:10.000+07:00
+<86>1 2026-09-23T03:20:00Z web01 sshd 4411 - - Failed password for root from 198.51.100.7 port 51234 ssh2
+<86>1 2026-09-23T03:20:20Z web01 sshd 4411 - - Failed password for root from 198.51.100.7 port 51236 ssh2
+<86>1 2026-09-23T03:20:41Z web01 sshd 4411 - - Failed password for invalid user admin from 198.51.100.7 port 51240 ssh2
+<188>1 2026-09-23T03:21:00.000Z CORE-RTR1 - - - - %SEC_LOGIN-4-LOGIN_FAILED: Login failed [user: admin] [Source: 198.51.100.7] [localport: 22] [Reason: Login Authentication Failed] at 03:21:00 UTC
+<188>Sep 23 2026 10:21:30+07:00 S5720-CORE %%01SSH/4/SSH_FAIL(s)[20]:Failed to login through SSH. (IP=198.51.100.7, VpnInstanceName=_public_, UserName=admin, Times=1, FailedReason=Password error)
+<86>1 2026-09-23T03:22:00Z web01 sshd 4411 - - Failed password for root from 198.51.100.7 port 51260 ssh2
+<86>1 2026-09-23T03:23:30Z web01 sshd 4411 - - Accepted password for root from 198.51.100.7 port 51299 ssh2
+<189>1 2026-09-23T03:30:00.000Z CORE-RTR1 - - - - %SYS-5-RESTART: System restarted --
+<189>Sep 23 2026 10:40:00+07:00 S5720-CORE %%01SYSTEM/5/REBOOT(l)[30]:The system is rebooting because the reboot command was issued by the user admin.

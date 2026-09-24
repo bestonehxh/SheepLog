@@ -1,0 +1,5 @@
+# Two topology changes in 5 minutes, a port blocked by STP (its role), and a loopback interface: no finding.
+<188>1 2026-09-23T10:02:07+07:00 CORE-CX-6300 mstpd 1710 - - Event|2006|LOG_WARN|AMM|-|MSTP: Topology change received on port 1/1/24 for CIST
+<188>1 2026-09-23T10:09:12+07:00 CORE-CX-6300 mstpd 1710 - - Event|2006|LOG_WARN|AMM|-|MSTP: Topology change received on port 1/1/24 for CIST
+<13>1 2026-09-23T10:16:20+07:00 SW-5406R-CORE - - - - 00435 ports: port B2 is Blocked by STP
+<189>1 2026-09-23T10:17:00+07:00 CORE-CX-6300 hpe-config 2211 - - Event|6802|LOG_INFO|UKWN|-|Interface loopback0 address 10.255.0.1/32 added
