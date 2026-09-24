@@ -96,6 +96,13 @@ nonisolated enum TimelineBuilder {
     static let slots = 360
     static let captureLane = "Capture"
 
+    /// The slot of a time `offset` seconds into a strip of `span` seconds. Multiplied before the
+    /// division: `offset / span * slots` put 20 of the 360 exact slot boundaries into the slot
+    /// before (26:00 of a 30-day log, 2 h slots, fell into 24–26 and hid that slot's event).
+    static func slot(_ offset: Double, span: Double) -> Int {
+        min(slots - 1, max(0, Int(offset * Double(slots) / span + 1e-9)))
+    }
+
     static func build(warn: [WarnFact], times ctx: RuleContext, flows: [TCPFlow], findings: [Finding],
                       start: Date?, end: Date?) -> Timeline {
         var lo = start, hi = end
@@ -106,7 +113,7 @@ nonisolated enum TimelineBuilder {
         guard let lo, var hi else { return .empty }
         if hi.timeIntervalSince(lo) < 60 { hi = lo.addingTimeInterval(60) }
         let span = hi.timeIntervalSince(lo)
-        func slot(_ d: Date) -> Int { min(slots - 1, max(0, Int(d.timeIntervalSince(lo) / span * Double(slots)))) }
+        func slot(_ d: Date) -> Int { Self.slot(d.timeIntervalSince(lo), span: span) }
 
         struct Acc {
             var best: [Int: TimelineEvent] = [:]
@@ -156,7 +163,7 @@ nonisolated enum TimelineBuilder {
                 let lane = frozen.device(w.address, hostname: w.hostname, isTrap: w.isTrap)
                 let sev: FindingSeverity = w.isTrap ? (w.severity <= .warning ? .warn : .info)
                     : (w.severity <= .error ? .bad : .warn)
-                let s = min(slots - 1, max(0, Int(t.timeIntervalSince(start) / span * Double(slots))))
+                let s = Self.slot(t.timeIntervalSince(start), span: span)
                 part.counts[lane, default: LaneCount()].add(sev, t)
                 if let cur = part.picks[lane]?[s], cur.sev >= sev { continue }
                 part.picks[lane, default: [:]][s] = LanePick(sev: sev, index: i, time: t)

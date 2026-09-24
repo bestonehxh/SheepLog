@@ -214,7 +214,7 @@ final class AppModel: ObservableObject {
         guard !started else { return }
         started = true
         // Authentication sessions feed the Troubleshoot pane's findings.
-        FindingRules.authProvider = { store in AuthFindings.findings(from: store.packets) }
+        FindingRules.authProvider = { packets in AuthFindings.findings(from: packets) }
         // The Test pane's model listens for snmpTarget / snmpOID from the other panes, so it
         // must exist before the pane is first shown.
         _ = SNMPTestModel.shared

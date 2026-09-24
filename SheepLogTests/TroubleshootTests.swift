@@ -245,16 +245,23 @@ final class TroubleshootTests: XCTestCase {
     }
 
     func testUnknownVendorChattySource() {
+        // A FortiGate relayed without `logid=` / `type=`: FortiOS marks, detected as "Other".
         func lines(_ n: Int, _ addr: String) -> [LogEntry] {
             (0..<n).map { k in
                 let t = t0.addingTimeInterval(Double(k))
-                return line("<14>1 \(Self.stamp.string(from: t)) nas01 storaged 1 - - volume check \(k) complete", from: addr, received: t, id: k + 1)
+                return line("<14>1 \(Self.stamp.string(from: t)) fgt01 fortilog 1 - - devname=\"FGT-60F\" devid=\"FGT60F\" msg=\"volume check \(k) complete\"", from: addr, received: t, id: k + 1)
             }
         }
         let loud = lines(600, "10.1.0.60")
         XCTAssertEqual(loud[0].vendor, .unknown)
         XCTAssertEqual(only(run(loud), "syslog.vendor").first?.severity, .info)
         XCTAssertTrue(only(run(lines(100, "10.1.0.61")), "syslog.vendor").isEmpty)
+        // Round 12: plain RFC 5424 lines (a NAS, Cisco, Linux) are "Other" by design, not an unknown format.
+        let nas = (0..<600).map { k in
+            let t = t0.addingTimeInterval(Double(k))
+            return line("<14>1 \(Self.stamp.string(from: t)) nas01 storaged 1 - - volume check \(k) complete", from: "10.1.0.62", received: t, id: k + 1)
+        }
+        XCTAssertTrue(only(run(nas), "syslog.vendor").isEmpty)
     }
 
     // MARK: Capacity
@@ -351,17 +358,18 @@ final class TroubleshootTests: XCTestCase {
 
     // MARK: DNS
 
-    private func dnsFrames(server: String, client: String = "10.1.30.60", count: Int, answer: (Int) -> Int?) -> [(Double, [UInt8])] {
+    private func dnsFrames(server: String, client: String = "10.1.30.60", count: Int,
+                           name: (Int) -> String = { "host\($0 % 3).corp.example" }, answer: (Int) -> Int?) -> [(Double, [UInt8])] {
         var out: [(Double, [UInt8])] = []
         for k in 0..<count {
             let sport = 40_000 + k
             out.append((Double(k), TroubleshootFixture.udp4(srcMAC: "02:00:00:00:00:01", dstMAC: "02:00:00:00:00:02", src: client, dst: server,
                                                             sport: sport, dport: 53, vlan: nil,
-                                                            TroubleshootFixture.dns(id: k, name: "host\(k % 3).corp.example", response: false))))
+                                                            TroubleshootFixture.dns(id: k, name: name(k), response: false))))
             if let rcode = answer(k) {
                 out.append((Double(k) + 0.02, TroubleshootFixture.udp4(srcMAC: "02:00:00:00:00:02", dstMAC: "02:00:00:00:00:01", src: server, dst: client,
                                                                        sport: 53, dport: sport, vlan: nil,
-                                                                       TroubleshootFixture.dns(id: k, name: "host\(k % 3).corp.example", response: true,
+                                                                       TroubleshootFixture.dns(id: k, name: name(k), response: true,
                                                                                                rcode: rcode, answer: rcode == 0 ? "10.1.40.1" : nil))))
             }
         }
@@ -384,8 +392,10 @@ final class TroubleshootTests: XCTestCase {
         XCTAssertTrue(f?.title.contains("60 %") ?? false, f?.title ?? "")
         XCTAssertTrue(f?.title.contains("SERVFAIL 7") ?? false)
         XCTAssertTrue(f?.title.contains("no answer 5") ?? false)
-        // A third NXDOMAIN is a warning (NXDOMAIN alone can be normal), all answered is nothing.
-        let nx = run(packets: packets(dnsFrames(server: "10.1.0.53", count: 12) { $0 % 3 == 0 ? 3 : 0 }))
+        // A third NXDOMAIN, for different names (a zone the resolver lost), is a warning; all
+        // answered is nothing. (Round 12: the same third for one name — a typo — is nothing, in
+        // Round12Tests.)
+        let nx = run(packets: packets(dnsFrames(server: "10.1.0.53", count: 12, name: { "host\($0).corp.example" }) { $0 % 3 == 0 ? 3 : 0 }))
         XCTAssertEqual(only(nx, "dns.failures").first?.severity, .warn)
         let fine = run(packets: packets(dnsFrames(server: "10.1.0.53", count: 12) { _ in 0 }))
         XCTAssertTrue(fine.findings.filter { $0.category == .dns }.isEmpty)
@@ -656,7 +666,7 @@ final class TroubleshootTests: XCTestCase {
     func testAuthExtensionPoint() {
         // Wired at startup to the Authentication pane's sessions (AuthFindings); in the test host
         // startup may not have run, so wire it here and check a failed session becomes a finding.
-        FindingRules.authProvider = { store in AuthFindings.findings(from: store.packets) }
+        FindingRules.authProvider = { packets in AuthFindings.findings(from: packets) }
         XCTAssertNotNil(FindingRules.authProvider)
         let auth = Finding(id: "auth.reject|alice", rule: "auth.rejects", severity: .warn, category: .auth, source: .auth,
                            title: "alice was rejected 5 times.", detail: "RADIUS Access-Reject.", firstSeen: t0, lastSeen: t0)

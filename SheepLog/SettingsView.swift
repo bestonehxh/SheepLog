@@ -88,12 +88,9 @@ struct SettingsView: View {
             KeyValueRow("Interface") {
                 Picker("Capture interface", selection: s.captureInterface) {
                     Text("Automatic").tag("")
-                    if !model.settings.captureInterface.isEmpty,
-                       !interfaces.isEmpty,
-                       !interfaces.contains(where: { $0.name == model.settings.captureInterface }) {
-                        // Chosen earlier, gone now: show it rather than a blank picker.
-                        Text("\(model.settings.captureInterface) — not present (Automatic is used)")
-                            .tag(model.settings.captureInterface)
+                    // Chosen earlier, gone now (or the list still loading): show it rather than a blank picker.
+                    if let extra = InterfacePicker.extraRow(selected: model.settings.captureInterface, among: interfaces) {
+                        Text(extra).tag(model.settings.captureInterface)
                     }
                     ForEach(interfaces) { i in
                         Text(i.pickerTitle).tag(i.name)

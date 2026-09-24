@@ -25,6 +25,8 @@ struct AuthLab {
     var eapID: UInt8 = 0
     var authCounter: UInt8 = 0
     var ipID: UInt16 = 0x100
+    /// The AP / switch port its EAPOL frames go to and come from.
+    var authenticator: [UInt8] = AuthLab.ap
 
     init(client: [UInt8], at start: Double = 0, base: Double = 1_758_000_000.0) {
         self.client = client
@@ -91,8 +93,8 @@ struct AuthLab {
     // MARK: EAPOL
 
     mutating func eapol(fromClient: Bool, type: UInt8, _ body: [UInt8], toGroup: Bool = false, dt: Double = 0.004) {
-        let dst = fromClient ? (toGroup ? Self.pae : Self.ap) : client
-        let src = fromClient ? client : Self.ap
+        let dst = fromClient ? (toGroup ? Self.pae : authenticator) : client
+        let src = fromClient ? client : authenticator
         add(Self.ether(dst: dst, src: src, type: 0x888E, [2, type] + Self.be16(body.count) + body), dt: dt)
     }
 

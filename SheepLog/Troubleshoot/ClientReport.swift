@@ -170,7 +170,7 @@ nonisolated struct ClientReport: Sendable {
         // Packets.
         let macSet = Set(r.macs), ipSet = Set(r.ips)
         for d in pk.dhcp where macSet.contains(d.clientMAC) {
-            var s = "\(FText.clock(d.time))  \(d.type)"
+            var s = "\(FText.clock(d.time))  \(d.type)\(d.relayHop ? " (relayed)" : "")"
             if let y = d.yourIP { s += " → \(y)" }
             if let srv = d.server, d.type != "Discover" && d.type != "Request" { s += " from \(srv)" }
             if let l = d.lease { s += ", lease \(FText.duration(Double(l)))" }
@@ -221,11 +221,13 @@ nonisolated struct ClientReport: Sendable {
                                     health: f.health, ref: FlowRef(key: f.key, packetID: f.firstPacketID)))
         }
 
-        // Findings about it.
+        // Findings about it (its address as a whole address: 10.1.30.1 is not in a finding about 10.1.30.14).
         let names = Set(r.macs + r.ips)
         r.findings = findings.filter { f in
             if let c = f.client, names.contains(c) { return true }
-            return names.contains { n in f.title.contains(n) || f.detail.contains(n) }
+            return names.contains { n in
+                f.title.withCString { ClientSearch.contains($0, n) } || f.detail.withCString { ClientSearch.contains($0, n) }
+            }
         }
 
         // What to do.
@@ -329,14 +331,21 @@ nonisolated enum ClientSearch {
     }
 
     /// `needle` in `s` with no address character glued to either side (10.1.1.1 is not in 10.1.1.10).
+    /// For an IPv4 address only digits and dots glue: `inside:10.1.0.80/22` (ASA), `10.1.0.5:51234`
+    /// and `[10.1.0.5]` hold it — a colon was taken as part of a longer IPv6 / MAC address and
+    /// every ASA line missed.
     static func contains(_ s: UnsafePointer<CChar>, _ needle: String) -> Bool {
-        needle.withCString { np -> Bool in
+        let v4 = FText.isIPv4(needle)
+        return needle.withCString { np -> Bool in
             let len = strlen(np)
             var p = s
             while let hit = strcasestr(p, np) {
                 let before: CChar = hit == s ? 0 : hit[-1]
                 let after = hit[len]
-                func glued(_ c: CChar) -> Bool { (c >= 48 && c <= 57) || (c >= 97 && c <= 102) || (c >= 65 && c <= 70) || c == 46 || c == 58 }
+                func glued(_ c: CChar) -> Bool {
+                    if v4 { return (c >= 48 && c <= 57) || c == 46 }
+                    return (c >= 48 && c <= 57) || (c >= 97 && c <= 102) || (c >= 65 && c <= 70) || c == 46 || c == 58
+                }
                 // "10.1.1.1." at the end of a sentence still counts.
                 let afterOK = !glued(after) || (after == 46 && !(hit[len + 1] >= 48 && hit[len + 1] <= 57))
                 if !glued(before) && afterOK { return true }

@@ -528,8 +528,11 @@ final class Round7Tests: XCTestCase {
     func testShowPacketsCoversALargeGroup() throws {
         let f = try demoLossFlow()
         XCTAssertEqual(FlowView.packetFilter([3, 5], flow: f), "frame:3 OR frame:5")
-        let big = FlowView.packetFilter(Array(100...180), flow: f)
-        XCTAssertTrue(big.hasPrefix("frame:>=100 frame:<=180 ip:"), big)
+        let big = FlowView.packetFilter(Array(100...400), flow: f)
+        XCTAssertTrue(big.hasPrefix("frame:>=100 frame:<=400 ip:"), big)
+        // Up to what one filter can list: the frames themselves (round 11 — a range showed the
+        // ACKs between a data group's segments too).
+        XCTAssertEqual(FlowView.packetFilter(Array(100...180), flow: f), (100...180).map { "frame:\($0)" }.joined(separator: " OR "))
         XCTAssertNoThrow(try Query.parse(big))
     }
 

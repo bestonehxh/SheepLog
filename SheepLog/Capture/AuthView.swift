@@ -3,6 +3,81 @@ import Combine
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// What the Authentication pane has selected — the attempt and the step — and how that survives
+/// a re-analysis. Every analysis renumbers attempts (a live capture's ring evicts the oldest, so
+/// the ids shift) and steps (a third TLS round folds the first two into one "×3" row; eviction
+/// drops the first ones): an attempt is found again by client and start, else by its frames, else
+/// the client's nearest; a step by its frames.
+nonisolated struct AuthSelectionState: Sendable, Equatable {
+    var selection: Int?
+    var client: String?
+    var start: Date?
+    var event: Int?
+    /// The frames of the step to select once `selection` has moved to its attempt.
+    var pendingEventFrames: [Int]?
+
+    /// `onChange(of: selection)`: a click on another attempt, or the move `apply` made.
+    mutating func selectionChanged(in sessions: [AuthSession]) {
+        let s = sessions.first { $0.id == selection }
+        event = s.flatMap { s in pendingEventFrames.flatMap { Self.event(in: s, carrying: $0) } }
+        pendingEventFrames = nil
+        client = s?.client
+        start = s?.firstTime
+    }
+
+    /// The step of `session` that carries any of `frames` (nil when they all left the ring).
+    static func event(in session: AuthSession, carrying frames: [Int]) -> Int? {
+        guard !frames.isEmpty else { return nil }
+        let set = Set(frames)
+        return session.events.first { e in e.packetIDs.contains { set.contains($0) } }?.id
+    }
+
+    /// A new analysis (`previous` = the attempts it replaces).
+    mutating func apply(_ result: [AuthSession], previous: [AuthSession]) {
+        let old = previous.first { $0.id == selection }
+        let shownFrames = old.flatMap { s in event.flatMap { id in s.events.first { $0.id == id }?.packetIDs } } ?? []
+        guard let client else {
+            if let s = selection, !result.contains(where: { $0.id == s }) { selection = nil }
+            event = nil
+            return
+        }
+        let same = result.filter { $0.client == client }
+        let oldFrames = Set(old?.packetIDs ?? [])
+        let match = same.first { $0.firstTime == start }
+            ?? same.first { s in s.packetIDs.contains { oldFrames.contains($0) } }
+            ?? same.min { a, b in
+                abs(a.firstTime.timeIntervalSince(start ?? a.firstTime)) < abs(b.firstTime.timeIntervalSince(start ?? b.firstTime))
+            }
+            // Its frames now belong to another client's attempt: a switch port's unanswered
+            // request became the attempt of the device that answered it (the selection vanished).
+            ?? (oldFrames.isEmpty ? nil : result.first { s in s.packetIDs.contains { oldFrames.contains($0) } })
+        guard let match else {
+            selection = nil
+            event = nil
+            pendingEventFrames = nil
+            return
+        }
+        if match.id == selection {
+            event = Self.event(in: match, carrying: shownFrames)
+            start = match.firstTime
+            self.client = match.client
+        } else {
+            pendingEventFrames = shownFrames
+            selection = match.id
+        }
+    }
+
+    /// `-demoAuthSelect <text>`: the first attempt whose row contains the text (or whose id it
+    /// is), with its first step that has a problem.
+    mutating func demoSelect(_ text: String, in result: [AuthSession]) {
+        let want = text.lowercased()
+        guard let pick = Int(want).flatMap({ n in result.first { $0.id == n } }) ?? result.first(where: { $0.searchText.contains(want) })
+        else { return }
+        pendingEventFrames = pick.events.first { $0.problem != nil }?.packetIDs
+        selection = pick.id
+    }
+}
+
 /// Authentication: every 802.1X / MAC auth / PSK / captive-portal attempt in the capture, one row
 /// per client attempt on the left, its steps as a ladder (Client | Switch / AP | RADIUS) on the
 /// right. Analysis runs off the main actor on every store change (at most once a second).
@@ -13,6 +88,9 @@ struct AuthView: View {
     @Environment(\.colorScheme) private var colorScheme
 
     @State private var sessions: [AuthSession] = []
+    /// Bumped with every new `sessions` (the rows cache's key).
+    @State private var sessionsVersion = 0
+    @State private var rowsCache = AuthRowsCache()
     @State private var analysing = false
     @State private var analysedAt: Date?
     @State private var analysisToken = 0
@@ -26,6 +104,8 @@ struct AuthView: View {
     @State private var selectedClient: String?
     @State private var selectedStart: Date?
     @State private var selectedEvent: Int?
+    /// The frames of the step to select once `selection` has moved to its attempt.
+    @State private var pendingEventFrames: [Int]?
     @State private var sortOrder: [KeyPathComparator<AuthRow>] = AuthRow.defaultOrder
     @State private var ladderWidth: CGFloat = 560
     @State private var paneWidth: CGFloat = 0
@@ -84,25 +164,45 @@ struct AuthView: View {
     }
 
     private func selectionChanged() {
-        let s = sessions.first { $0.id == selection }
-        selectedEvent = nil
-        selectedClient = s?.client
-        selectedStart = s?.firstTime
+        var state = selectionState
+        state.selectionChanged(in: sessions)
+        selectionState = state
+    }
+
+    /// The selection @State as one value (the rules live in `AuthSelectionState`, tested).
+    private var selectionState: AuthSelectionState {
+        get {
+            AuthSelectionState(selection: selection, client: selectedClient, start: selectedStart, event: selectedEvent,
+                               pendingEventFrames: pendingEventFrames)
+        }
+        nonmutating set {
+            if selectedClient != newValue.client { selectedClient = newValue.client }
+            if selectedStart != newValue.start { selectedStart = newValue.start }
+            if selectedEvent != newValue.event { selectedEvent = newValue.event }
+            if pendingEventFrames != newValue.pendingEventFrames { pendingEventFrames = newValue.pendingEventFrames }
+            if selection != newValue.selection { selection = newValue.selection }
+        }
     }
 
     // MARK: Header and strip
 
     private var heading: String {
         if sessions.isEmpty { return analysing ? "Reading authentication traffic…" : "No authentication traffic yet." }
+        return rowsCache.headline(version: sessionsVersion) { Self.headline(sessions) }
+    }
+
+    /// "3 clients authenticated, 1 failed." — each client counted once, by its latest attempt
+    /// that ended (a client accepted and later rejected is a failure now, not both; one still in
+    /// progress keeps its earlier outcome).
+    nonisolated static func headline(_ sessions: [AuthSession]) -> String {
         var latest: [String: AuthSession] = [:]
-        var authenticated = Set<String>()
-        for s in sessions {
-            if s.result == .accepted { authenticated.insert(s.client) }
+        // A switch port nobody answered is not a client that failed.
+        for s in sessions where s.result != .inProgress && !s.isPortOnly {
             if let l = latest[s.client], l.firstTime > s.firstTime { continue }
             latest[s.client] = s
         }
         let failed = latest.values.filter { $0.result.isFailure }.count
-        let ok = authenticated.count
+        let ok = latest.values.filter { $0.result == .accepted }.count
         let noun = ok == 1 ? "client" : "clients"
         return "\(Format.count(ok)) \(noun) authenticated, \(failed == 0 ? "none" : Format.count(failed)) failed."
     }
@@ -124,6 +224,8 @@ struct AuthView: View {
     @ViewBuilder private var headerActions: some View {
         ProgressView().controlSize(.small).opacity(analysing ? 1 : 0).accessibilityHidden(!analysing)
         Group {
+            let _ = PaneProbe.button("auth.Re-analyse", enabled: !analysing) { startAnalysis() }
+            let _ = PaneProbe.button("auth.Copy summary", enabled: !rows.isEmpty) { copyOverview() }
             Button { startAnalysis() } label: { Label("Re-analyse", systemImage: "arrow.clockwise") }
                 .disabled(analysing)
                 .help("Read the packets again")
@@ -157,6 +259,7 @@ struct AuthView: View {
             .foregroundStyle(Theme.faintText)
             .lineLimit(1)
         Spacer(minLength: 8)
+        let _ = PaneProbe.button("auth.Auth packets") { showAuthPackets() }
         Button("Auth packets") { showAuthPackets() }
             .controlSize(.small)
             .help("Open the Packets pane filtered to authentication traffic:\n\(AuthDecoder.packetFilterPreset)")
@@ -169,14 +272,33 @@ struct AuthView: View {
 
     // MARK: Table
 
+    /// The table's rows, filtered and sorted once per change of the attempts, the filters or the
+    /// order: the body asks for them several times per update, and the header's once-a-second
+    /// tick re-evaluated them all (10,000 attempts: ~85 ms of main thread every second, Debug).
     private var rows: [AuthRow] {
-        let needle = filterText.trimmingCharacters(in: .whitespaces).lowercased()
+        rowsCache.rows(AuthRowsCache.Key(version: sessionsVersion, problemsOnly: problemsOnly, method: methodFilter,
+                                         text: filterText, order: sortOrder)) {
+            Self.rows(sessions, problemsOnly: problemsOnly, method: methodFilter, text: filterText, order: sortOrder)
+        }
+    }
+
+    /// The table's rows: Problems only, the method chips and the text filter together, sorted.
+    nonisolated static func rows(_ sessions: [AuthSession], problemsOnly: Bool, method: AuthMethodFilter, text: String,
+                                 order: [KeyPathComparator<AuthRow>]) -> [AuthRow] {
+        let needle = text.trimmingCharacters(in: .whitespaces).lowercased()
         return sessions.lazy
             .filter { !problemsOnly || $0.health != .ok }
-            .filter { methodFilter.matches($0) }
+            .filter { method.matches($0) }
             .filter { needle.isEmpty || $0.searchText.contains(needle) }
             .map(AuthRow.init)
-            .sorted(using: sortOrder)
+            .sorted(using: order)
+    }
+
+    /// The attempts of `rows`, in the rows' order (Copy summary). By id through a dictionary: a
+    /// search of every attempt per row froze the pane for seconds on a 10,000-attempt capture.
+    nonisolated static func shown(_ rows: [AuthRow], of sessions: [AuthSession]) -> [AuthSession] {
+        let byID = Dictionary(sessions.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        return rows.compactMap { byID[$0.id] }
     }
 
     private var table: some View {
@@ -247,11 +369,17 @@ struct AuthView: View {
         VStack(spacing: 0) {
             if let session = selectedSession {
                 let layout = AuthLadderLayout.make(session: session, width: ladderWidth)
+                let _ = PaneProbe.drewAuth(session, event: selectedEvent)
                 AuthLadderHeader(session: session)
                 AuthTimeline(session: session, selected: $selectedEvent)
                     .padding(.horizontal, 14)
                     .padding(.bottom, 8)
                 Rectangle().fill(Theme.hairlineSoft).frame(height: 0.5)
+                // The tap below, for tests (a unit-test host cannot click a SwiftUI canvas).
+                let _ = PaneProbe.tapTarget("auth.ladder") { point in
+                    let hit = layout.hit(point)
+                    selectedEvent = hit == selectedEvent ? nil : hit
+                }
                 ScrollView(.vertical) {
                     AuthLadderCanvas(layout: layout, selected: selectedEvent)
                         .frame(height: layout.height)
@@ -266,8 +394,10 @@ struct AuthView: View {
                 Rectangle().fill(Theme.hairlineSoft).frame(height: 0.5)
                 selectionFooter(session)
             } else if sessions.isEmpty {
+                let _ = PaneProbe.drewAuth(nil, event: nil)
                 ScrollView { AuthEmptyGuide().padding(20) }
             } else {
+                let _ = PaneProbe.drewAuth(nil, event: nil)
                 TableEmptyOverlay(text: "Select an attempt on the left to see its steps.")
             }
             Rectangle().fill(Theme.hairlineSoft).frame(height: 0.5)
@@ -290,6 +420,7 @@ struct AuthView: View {
                     .identifierText()
                     .textSelection(.enabled)
                 Spacer(minLength: 8)
+                let _ = PaneProbe.button("auth.Show packets", enabled: !event.packetIDs.isEmpty) { showPackets(event.packetIDs) }
                 Button("Show packets") { showPackets(event.packetIDs) }
                     .controlSize(.small)
                     .disabled(event.packetIDs.isEmpty)
@@ -298,10 +429,12 @@ struct AuthView: View {
                     .font(.system(size: 11.5))
                     .foregroundStyle(Theme.faintText)
                 Spacer(minLength: 8)
+                let _ = PaneProbe.button("auth.Show packets") { showPackets(session.packetIDs) }
                 Button("Show packets") { showPackets(session.packetIDs) }
                     .controlSize(.small)
                     .help("Every packet of this attempt in the Packets pane")
             }
+            let _ = PaneProbe.button("auth.Copy") { copySession() }
             Button("Copy") { copySession() }
                 .controlSize(.small)
                 .help("Copy this attempt as plain text: who, where, result, reasons and every step (⌘⇧C)")
@@ -317,9 +450,12 @@ struct AuthView: View {
         return "\(ids.count == 1 ? "frame" : "frames") \(shown)\(more)"
     }
 
-    /// `frame:1 OR frame:2 …` (up to 50), else the frame range.
+    /// `frame:1 OR frame:2 …` (as many as a filter takes: the matcher folds them into one
+    /// lookup), else the frame range narrowed to authentication traffic. (From 51 frames — a PEAP
+    /// attempt with its RADIUS side — the range showed every other client's DHCP, DNS and EAPOL
+    /// of those seconds under "every packet of this attempt".)
     nonisolated static func packetFilter(_ ids: [Int]) -> String {
-        guard ids.count > 50, let lo = ids.min(), let hi = ids.max() else {
+        guard ids.count > Query.maxTerms, let lo = ids.min(), let hi = ids.max() else {
             return ids.map { "frame:\($0)" }.joined(separator: " OR ")
         }
         return "frame:>=\(lo) frame:<=\(hi) (\(AuthDecoder.packetFilterPreset))"
@@ -363,6 +499,7 @@ struct AuthView: View {
     private func analyse() async {
         LeakProbe.add("Auth.analysis")
         defer { LeakProbe.remove("Auth.analysis") }
+        PaneProbe.authAnalysisStarted()
         analysisToken += 1
         let token = analysisToken
         analysing = true
@@ -376,23 +513,17 @@ struct AuthView: View {
     }
 
     private func apply(_ result: [AuthSession]) {
+        let previous = sessions
         sessions = result
+        sessionsVersion &+= 1
         analysing = false
         analysedAt = Date()
-        // Ids are renumbered by every analysis: find the selected attempt again.
-        if let client = selectedClient {
-            let same = result.filter { $0.client == client }
-            let match = same.first { $0.firstTime == selectedStart }
-                ?? same.min { abs($0.firstTime.timeIntervalSince(selectedStart ?? $0.firstTime)) < abs($1.firstTime.timeIntervalSince(selectedStart ?? $1.firstTime)) }
-            selection = match?.id
-        } else if let s = selection, !result.contains(where: { $0.id == s }) {
-            selection = nil
+        var state = selectionState
+        state.apply(result, previous: previous)
+        if state.selection == nil, let want = Self.demoSelect, !result.isEmpty, DemoFlags.firstRun("auth.select") {
+            state.demoSelect(want, in: result)
         }
-        if selection == nil, let want = Self.demoSelect?.lowercased(), !result.isEmpty, DemoFlags.firstRun("auth.select") {
-            let pick = Int(want).flatMap { n in result.first { $0.id == n } } ?? result.first { $0.searchText.contains(want) }
-            selection = pick?.id
-            if let pick { selectedEvent = pick.events.first { $0.problem != nil }?.id }
-        }
+        selectionState = state
     }
 
     // MARK: Copy and export
@@ -404,7 +535,7 @@ struct AuthView: View {
     }
 
     private func copyOverview() {
-        let shown = rows.compactMap { r in sessions.first { $0.id == r.id } }
+        let shown = Self.shown(rows, of: sessions)
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(AuthSummary.overview(shown, source: store.fileURL?.lastPathComponent ?? "live capture"),
                                        forType: .string)
@@ -434,6 +565,39 @@ struct AuthView: View {
         }
         do { try data.write(to: url, options: .atomic) }
         catch { AppModel.shared.report("Could not save \(url.lastPathComponent).", detail: error.localizedDescription) }
+    }
+}
+
+/// The Authentication table's rows and headline, kept until what they are made of changes (a
+/// reference in @State: filling it while the body runs changes no state).
+@MainActor
+final class AuthRowsCache {
+    struct Key: Equatable {
+        var version: Int
+        var problemsOnly: Bool
+        var method: AuthMethodFilter
+        var text: String
+        var order: [KeyPathComparator<AuthRow>]
+    }
+
+    private var key: Key?
+    private var value: [AuthRow] = []
+    private var headlineVersion: Int?
+    private var headlineText = ""
+
+    func rows(_ key: Key, _ make: () -> [AuthRow]) -> [AuthRow] {
+        if key == self.key { return value }
+        PaneProbe.authRowsSorted()
+        value = make()
+        self.key = key
+        return value
+    }
+
+    func headline(version: Int, _ make: () -> String) -> String {
+        if version == headlineVersion { return headlineText }
+        headlineText = make()
+        headlineVersion = version
+        return headlineText
     }
 }
 
