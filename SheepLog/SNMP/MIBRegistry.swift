@@ -92,7 +92,12 @@ final class MIBRegistry: ObservableObject {
     func importFiles(_ urls: [URL]) {
         let folder = userFolder
         loaded = true
+        // ⌘Q waits for the copy: cut short part-way through a folder, a module that replaces
+        // another file's copied its new file but the old one was not removed yet — two files
+        // of one module, and which one loads at the next launch depends on their names.
+        PendingWrites.begin()
         enqueue { state in
+            defer { PendingWrites.end() }
             let fm = FileManager.default
             try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
             var sources: [URL] = []

@@ -1223,8 +1223,13 @@ extension PacketTableController: NSMenuDelegate {
     }
 
     static func restoreHiddenColumns(_ tv: NSTableView) {
-        guard !AppSettings.isRunningTests,
-              let hidden = UserDefaults.standard.stringArray(forKey: hiddenColumnsKey) else { return }
+        guard !AppSettings.isRunningTests else { return }
+        restoreHiddenColumns(tv, from: .standard)
+    }
+
+    /// Anything but a list of column names under the key is no list (the columns as built).
+    static func restoreHiddenColumns(_ tv: NSTableView, from defaults: UserDefaults) {
+        guard let hidden = defaults.object(forKey: hiddenColumnsKey) as? [String] else { return }
         for c in tv.tableColumns where c.identifier.rawValue != Column.info.rawValue {
             c.isHidden = hidden.contains(c.identifier.rawValue)
         }
