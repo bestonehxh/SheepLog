@@ -235,14 +235,25 @@ struct LogView: View {
 
     /// Lines exist but none pass: say which part of the filter is doing it.
     private var noMatchText: String {
+        Self.noMatchText(entries: store.entries.count, query: !store.query.isEmpty, source: store.selectedSource,
+                         masked: store.severityMask.count < Severity.allCases.count,
+                         held: store.paused ? store.pausedCount : 0)
+    }
+
+    /// `held`: lines held back while paused. Status / Sources "Show" on a device whose lines
+    /// all arrived after Pause said only "None of the 1,000 lines match source 10.9.7.1" while
+    /// the device's own counters said 500.
+    static func noMatchText(entries n: Int, query: Bool, source: String?, masked: Bool, held: Int) -> String {
         var parts: [String] = []
-        if !store.query.isEmpty { parts.append("the filter") }
-        if let s = store.selectedSource { parts.append("source \(s)") }
-        if store.severityMask.count < Severity.allCases.count { parts.append("the severity mask") }
-        let n = store.entries.count
+        if query { parts.append("the filter") }
+        if let s = source { parts.append("source \(s)") }
+        if masked { parts.append("the severity mask") }
         let lines = n == 1 ? "The 1 line does not" : "None of the \(Format.count(n)) lines"
-        guard !parts.isEmpty else { return "No lines match." }
-        return "\(lines) match \(parts.joined(separator: " + "))."
+        var text = parts.isEmpty ? "No lines match." : "\(lines) match \(parts.joined(separator: " + "))."
+        if held > 0 {
+            text += " Paused — \(Format.count(held)) newer \(held == 1 ? "line is" : "lines are") waiting; press Resume to see \(held == 1 ? "it" : "them")."
+        }
+        return text
     }
 
     // MARK: Footer
@@ -266,6 +277,7 @@ struct LogView: View {
         let limit = max(1, store.limit)
         var s = "\(Format.count(store.visible.count)) shown of \(Format.count(n)) · \(LogView.rateText(store.rate)) · buffer \(Format.count(limit)) (\(Int((Double(n) / Double(limit) * 100).rounded())) %)"
         s += Self.dropText(dropped: store.dropped, lost: store.lost)
+        if let note = store.exportNote { s += " · \(note)" }
         if model.settings.diskLogging, let logger = store.diskLogger {
             s += " · Saving to \(Self.abbreviate((logger.currentFile ?? logger.todaysFile).path))"
         }
@@ -299,29 +311,15 @@ struct LogView: View {
         panel.nameFieldStringValue = Self.exportName(source: store.selectedSource, date: Date())
         panel.message = "Save the \(Format.count(store.visibleCount)) lines shown. Name it .csv for a spreadsheet, .log for raw lines."
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        // Snapshot on the main actor, format and write off it (100k lines of CSV take long
-        // enough to beach-ball the window).
-        let rows = store.exportRows
+        // The store waits for a re-parse / re-scan in flight, snapshots on the main actor and
+        // writes off it; the flag lives on the store (a pane switch mid-export made a new
+        // LogView with Export enabled while the first write was still running).
         let csv = url.pathExtension.lowercased() == "csv"
-        // The flag lives on the store: a pane switch mid-export made a new LogView with Export
-        // enabled while the first write was still running.
         let store = self.store, model = self.model
-        store.isExporting = true
         Task {
-            let failure = await Task.detached(priority: .userInitiated) { Self.writeExport(rows, csv: csv, to: url) }.value
-            store.isExporting = false
-            if let failure { model.report("Could not save \(url.lastPathComponent).", detail: failure) }
-        }
-    }
-
-    /// Formats and writes (off the main actor); nil on success, else the error text.
-    nonisolated static func writeExport(_ rows: [LogEntry], csv: Bool, to url: URL) -> String? {
-        let text = csv ? LogStore.exportCSV(rows) : LogStore.exportText(rows)
-        do {
-            try text.write(to: url, atomically: true, encoding: .utf8)
-            return nil
-        } catch {
-            return error.localizedDescription
+            if let failure = await store.export(to: url, csv: csv) {
+                model.report("Could not save \(url.lastPathComponent).", detail: failure)
+            }
         }
     }
 

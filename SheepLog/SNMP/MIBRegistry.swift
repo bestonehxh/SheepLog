@@ -250,6 +250,19 @@ final class MIBRegistry: ObservableObject {
             firstLoadWaiters = []
             for w in waiters { w() }
         }
+        if inFlight == 0, !installWaiters.isEmpty {
+            let waiters = installWaiters
+            installWaiters = []
+            for w in waiters { w() }
+        }
+    }
+
+    private var installWaiters: [@MainActor () -> Void] = []
+
+    /// Runs `body` once the next index is installed with no other load or import still under
+    /// way (the launch load, an import, a removal) — never at once.
+    func whenNextIndexInstalled(_ body: @escaping @MainActor () -> Void) {
+        installWaiters.append(body)
     }
 
     /// Runs `body` once the launch load has installed its index (now, when it has or when no

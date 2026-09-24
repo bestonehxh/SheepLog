@@ -456,7 +456,11 @@ final class LogStore: ObservableObject {
 
     /// Appends a term to the filter text (context-menu "Filter this host" …) and applies it.
     func appendToQuery(_ term: String) {
-        queryText = Self.appending(term, to: queryText)
+        // The rows on screen are the last filter that worked: a text that does not parse (an
+        // open quote, a trailing OR still being typed) is replaced by that filter, narrowed by
+        // the term — appended to the broken text, the click did nothing but change the error.
+        let parses = (try? Query.parse(queryText, regexWords: regexMode)) != nil
+        queryText = Self.appending(term, to: parses ? queryText : query.source)
         applyQueryText()
     }
 
@@ -829,6 +833,40 @@ final class LogStore: ObservableObject {
     /// The visible lines in display order — a snapshot the export can format off the main actor.
     var exportRows: [LogEntry] { newestFirst ? visible.reversed() : visible }
 
+    /// What the last export wrote ("Exported 1,204 lines to x.csv"), for the footer; nil
+    /// after a failure (the error sheet says it) and while one runs.
+    @Published private(set) var exportNote: String?
+
+    /// Export… after the save panel: waits for a vendor re-parse or filter re-scan still under
+    /// way (a vendor picked in Sources a moment before exported the old vendor, severity and
+    /// fields — and, under a vendor: or f: filter, the old rows), then snapshots the lines
+    /// shown and formats and writes them off the main actor. Returns the error text, or nil;
+    /// `exportNote` says what was written. A Clear, a limit change or eviction during the write
+    /// does not touch the snapshot.
+    func export(to url: URL, csv: Bool) async -> String? {
+        isExporting = true
+        exportNote = nil
+        await settle()
+        let rows = exportRows
+        let failure = await Task.detached(priority: .userInitiated) { Self.writeExport(rows, csv: csv, to: url) }.value
+        isExporting = false
+        if failure == nil {
+            exportNote = "Exported \(Format.count(rows.count)) \(rows.count == 1 ? "line" : "lines") to \(url.lastPathComponent)"
+        }
+        return failure
+    }
+
+    /// Formats and writes (off the main actor); nil on success, else the error text.
+    nonisolated static func writeExport(_ rows: [LogEntry], csv: Bool, to url: URL) -> String? {
+        let text = csv ? exportCSV(rows) : exportText(rows)
+        do {
+            try text.write(to: url, atomically: true, encoding: .utf8)
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
     /// The visible lines as text (raw lines, newline-separated) / CSV.
     func exportText() -> String { Self.exportText(exportRows) }
 
@@ -850,9 +888,9 @@ final class LogStore: ObservableObject {
     nonisolated static func exportCSV(_ rows: [LogEntry]) -> String {
         var out = "received,host,vendor,severity,facility,program,message,raw\r\n"
         out.reserveCapacity(rows.reduce(64) { $0 + 2 * $1.raw.utf8.count + 96 })
-        let stamp = Format.stamp
+        var stamp = StampWriter()
         for e in rows {
-            out += stamp.string(from: e.received)
+            stamp.append(e.received, to: &out)
             out += ","; Format.appendCSV(&out, e.displayHost)
             out += ","; out += e.vendor.label
             out += ","; out += e.severity.name
@@ -863,6 +901,38 @@ final class LogStore: ObservableObject {
             out += "\r\n"
         }
         return out
+    }
+
+    /// `Format.stamp` for many dates in a row: the date and time to the second formatted once
+    /// per second, the milliseconds appended — a `DateFormatter` call per row was over half of
+    /// a 100k-line CSV export. Same text: the formatter rounds to the nearest millisecond
+    /// (`floor(ms since 1970 + 0.5)`, checked against it in `Round10InteractionTests`).
+    nonisolated struct StampWriter {
+        private static let seconds = Format.gregorian("yyyy-MM-dd HH:mm:ss")
+        private var second = Double.nan
+        private var prefix = ""
+
+        mutating func append(_ date: Date, to out: inout String) {
+            let u = ((date.timeIntervalSinceReferenceDate + 978_307_200) * 1000 + 0.5).rounded(.down)
+            var ms = u.truncatingRemainder(dividingBy: 1000)
+            if ms < 0 { ms += 1000 }
+            let s = u - ms
+            if s != second {
+                second = s
+                prefix = Self.seconds.string(from: Date(timeIntervalSince1970: s / 1000))
+            }
+            out += prefix
+            let m = Int(ms)
+            out += m < 10 ? ".00" : m < 100 ? ".0" : "."
+            out += String(m)
+        }
+
+        func string(_ date: Date) -> String {
+            var copy = self
+            var out = ""
+            copy.append(date, to: &out)
+            return out
+        }
     }
 
     // MARK: - Helpers
@@ -928,7 +998,9 @@ nonisolated final class DiskSink: Sendable {
         set { current.withLock { $0 = newValue } }
     }
 
-    func append(_ raws: [RawSyslog]) { logger?.append(raws: raws) }
+    /// Enqueued under the lock: once the setter has returned, every batch handed to the old
+    /// logger is on that logger's queue, ahead of its `retire`.
+    func append(_ raws: [RawSyslog]) { current.withLock { $0?.append(raws: raws) } }
 }
 
 nonisolated final class IDCounter: Sendable {

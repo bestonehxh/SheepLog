@@ -28,7 +28,7 @@ struct SheepLogApp: App {
             CommandGroup(before: .toolbar) {
                 ForEach(Array(PaneShortcut.all.enumerated()), id: \.offset) { i, item in
                     Button(item.title) { AppModel.shared.mainPane = item.pane }
-                        .keyboardShortcut(KeyEquivalent(Character(String(i + 1))), modifiers: .command)
+                        .keyboardShortcut(PaneShortcut.key(at: i), modifiers: .command)
                 }
                 Divider()
             }
@@ -39,9 +39,19 @@ struct SheepLogApp: App {
 
 /// The View menu's pane list: sidebar order and sidebar words.
 enum PaneShortcut {
+    /// ⌘1 … ⌘9, then ⌘0 for the tenth pane; an eleventh would get no shortcut — a two-digit
+    /// string is not a `Character`, and that crashed the app when the tenth pane arrived.
+    static func key(at index: Int) -> KeyEquivalent {
+        switch index {
+        case 0..<9: KeyEquivalent(Character(String(index + 1)))
+        case 9: "0"
+        default: KeyEquivalent(Character(UnicodeScalar(0xF700 + UInt32(index))!))   // unassigned function-key range
+        }
+    }
+
     static let all: [(pane: MainPane, title: String)] = [
-        (.status, "Status"), (.log, "Log"), (.sources, "Sources"), (.snmpTest, "SNMP Test"),
-        (.mibs, "MIBs"), (.packets, "Packets"), (.flows, "TCP Flows"), (.settings, "Settings"),
+        (.status, "Status"), (.troubleshoot, "Troubleshoot"), (.log, "Log"), (.sources, "Sources"), (.snmpTest, "SNMP Test"),
+        (.mibs, "MIBs"), (.packets, "Packets"), (.flows, "TCP Flows"), (.auth, "Authentication"), (.settings, "Settings"),
     ]
 }
 

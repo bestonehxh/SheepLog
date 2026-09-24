@@ -21,11 +21,23 @@ final class TrapReceiver: ObservableObject {
     private var listener: TrapListener?
     /// Names traps (tests use their own).
     var registry: MIBRegistry = .shared
-    /// Traps named while the launch MIB load was still running (their names are dotted OIDs):
-    /// named again, in place, once it finishes. At most `maxUnnamed` are kept for that.
+    /// Traps the loaded MIBs could not fully name (the launch load still running, or a vendor
+    /// OID no module defines yet): named again, in place, whenever a new MIB index is installed
+    /// — the launch load finishing, or the vendor's MIB imported (traps that arrived before or
+    /// during the import kept `enterprises.12356…` for good). The most recent `maxUnnamed`
+    /// (and `maxUnnamedVarBinds` var-binds) are kept for that.
     private var unnamed: [(id: Int, trap: SNMPTrap)] = []
-    private var renameScheduled = false
+    /// How much of each `unnamed` trap's line is named (`namedness`), by id: a re-name only
+    /// ever names more. A module removed (or replaced by one that names less) must not turn
+    /// lines it named back into dotted OIDs — the fully named ones were never kept here, so a
+    /// trap with one vendor var-bind no module defines went dotted while its neighbours kept
+    /// their names. Old lines keep their names; new traps are named by the MIBs of the moment.
+    private var unnamedScore: [Int: Int] = [:]
+    private var unnamedVarBinds = 0
+    /// The registry a re-name is waiting on (nil: none).
+    private weak var renameScheduledOn: MIBRegistry?
     static let maxUnnamed = 20_000
+    static let maxUnnamedVarBinds = 400_000
 
     init(store: LogStore) { self.store = store }
 
@@ -95,7 +107,9 @@ final class TrapReceiver: ObservableObject {
             case .trap(let t):
                 let e = Self.entry(for: t, registry: registry)
                 entries.append(e)
-                if early, unnamed.count < Self.maxUnnamed { unnamed.append((e.id, t)) }
+                if early || !Self.fullyNamed(t, registry: registry) {
+                    keepUnnamed(e.id, t, score: early ? 0 : Self.namedness(t, registry: registry))
+                }
                 traps += 1
             case .v3(let source, let port, let received):
                 v3 += 1
@@ -114,20 +128,75 @@ final class TrapReceiver: ObservableObject {
         if v3 > 0 { v3Count += v3 }
         if invalid > 0 { invalidCount += invalid }
         if !entries.isEmpty { store.ingest(entries, writtenToDisk: writtenToDisk) }
-        if !unnamed.isEmpty, !renameScheduled {
-            renameScheduled = true
-            registry.whenFirstLoadFinishes { [weak self] in self?.renameEarlyTraps() }
+        if !unnamed.isEmpty, renameScheduledOn !== registry {
+            renameScheduledOn = registry
+            let r = registry
+            if early { r.whenFirstLoadFinishes { [weak self] in self?.renameUnnamedTraps(r) } }
+            else { r.whenNextIndexInstalled { [weak self] in self?.renameUnnamedTraps(r) } }
         }
     }
 
-    /// The launch MIB load finished: the traps that arrived before it get their names
-    /// (`linkDown`, `ifIndex.3`), in place — the same ids, so their order in the log stays.
-    private func renameEarlyTraps() {
-        renameScheduled = false
-        let early = unnamed
+    private func keepUnnamed(_ id: Int, _ t: SNMPTrap, score: Int) {
+        unnamed.append((id, t))
+        unnamedScore[id] = score
+        unnamedVarBinds += t.varBinds.count
+        // The oldest go first: they are the likeliest to have rolled out of the log already.
+        var drop = 0
+        while unnamed.count - drop > Self.maxUnnamed || (unnamedVarBinds > Self.maxUnnamedVarBinds && unnamed.count - drop > 1) {
+            unnamedVarBinds -= unnamed[drop].trap.varBinds.count
+            unnamedScore[unnamed[drop].id] = nil
+            drop += 1
+        }
+        if drop > 0 { unnamed.removeFirst(drop) }
+    }
+
+    /// The loaded MIBs name the notification and every var-bind's object (not just a prefix
+    /// such as `enterprises` — a later import may name those).
+    static func fullyNamed(_ t: SNMPTrap, registry: MIBRegistry) -> Bool {
+        if t.trapOID.parts.count >= 3, registry.exactNode(t.trapOID) == nil { return false }
+        for vb in t.varBinds.prefix(maxVarBinds) {
+            guard let n = registry.node(for: vb.oid) else { return false }
+            if n.oid != vb.oid, n.kind != "scalar", n.kind != "column" { return false }
+        }
+        return true
+    }
+
+    /// The trap OID named exactly, plus each var-bind named to its object (a scalar, a column
+    /// or an exact node) — what a re-name compares.
+    static func namedness(_ t: SNMPTrap, registry: MIBRegistry) -> Int {
+        var n = t.trapOID.parts.count >= 3 && registry.exactNode(t.trapOID) != nil ? 1 : 0
+        for vb in t.varBinds.prefix(maxVarBinds) {
+            guard let node = registry.node(for: vb.oid) else { continue }
+            if node.oid == vb.oid || node.kind == "scalar" || node.kind == "column" { n += 1 }
+        }
+        return n
+    }
+
+    /// A new MIB index is in (the launch load finished, a vendor MIB was imported): the traps
+    /// it could not name get their names (`linkDown`, `fgTrapHaSwitch`, `ifIndex.3`) in place —
+    /// the same ids, so their order in the log stays. Those still not fully named wait for the
+    /// next index.
+    private func renameUnnamedTraps(_ r: MIBRegistry) {
+        if renameScheduledOn === r { renameScheduledOn = nil }
+        guard r === registry else { unnamed = []; unnamedScore = [:]; unnamedVarBinds = 0; return }
+        let pending = unnamed
+        let scores = unnamedScore
         unnamed = []
-        guard !early.isEmpty else { return }
-        store.replaceEntries(early.map { Self.entry(for: $0.trap, registry: registry, id: $0.id) })
+        unnamedScore = [:]
+        unnamedVarBinds = 0
+        guard !pending.isEmpty else { return }
+        var updated: [LogEntry] = []
+        for (id, t) in pending {
+            let before = scores[id] ?? 0
+            let now = Self.namedness(t, registry: r)
+            if now > before { updated.append(Self.entry(for: t, registry: r, id: id)) }
+            if !Self.fullyNamed(t, registry: r) { keepUnnamed(id, t, score: max(before, now)) }
+        }
+        store.replaceEntries(updated)
+        if !unnamed.isEmpty {
+            renameScheduledOn = r
+            r.whenNextIndexInstalled { [weak self] in self?.renameUnnamedTraps(r) }
+        }
     }
 
     static let warningTraps: Set<OID> = [

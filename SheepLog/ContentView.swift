@@ -53,12 +53,14 @@ struct ContentView: View {
     private var mainColumn: some View {
         switch model.mainPane {
         case .status: StatusView()
+        case .troubleshoot: TroubleshootView()
         case .log: LogView()
         case .sources: SourcesView()
         case .snmpTest: SNMPTestView()
         case .mibs: MIBsView()
         case .packets: PacketsView()
         case .flows: FlowView()
+        case .auth: AuthView()
         case .settings: SettingsView()
         }
     }

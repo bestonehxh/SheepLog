@@ -48,6 +48,33 @@ nonisolated struct TCPSequenceAnalysis: Sendable {
 
         /// Any of the four "old data" verdicts.
         static let resent: Flags = [.retransmission, .fastRetransmission, .outOfOrder, .spuriousRetransmission]
+
+        // Concrete set operations (see `TCPFlags`: the generic defaults dominated Debug runs).
+        init(rawValue: UInt16) { self.rawValue = rawValue }
+        init(arrayLiteral elements: Flags...) {
+            var r: UInt16 = 0
+            for e in elements { r |= e.rawValue }
+            self.init(rawValue: r)
+        }
+        var isEmpty: Bool { rawValue == 0 }
+        func contains(_ member: Flags) -> Bool { rawValue & member.rawValue == member.rawValue }
+        func isDisjoint(with other: Flags) -> Bool { rawValue & other.rawValue == 0 }
+        func union(_ other: Flags) -> Flags { Flags(rawValue: rawValue | other.rawValue) }
+        func intersection(_ other: Flags) -> Flags { Flags(rawValue: rawValue & other.rawValue) }
+        func subtracting(_ other: Flags) -> Flags { Flags(rawValue: rawValue & ~other.rawValue) }
+        @discardableResult
+        mutating func insert(_ member: Flags) -> (inserted: Bool, memberAfterInsert: Flags) {
+            let had = contains(member)
+            let after = had ? intersection(member) : member
+            self = union(member)
+            return (!had, after)
+        }
+        @discardableResult
+        mutating func remove(_ member: Flags) -> Flags? {
+            let gone = intersection(member)
+            self = subtracting(member)
+            return gone.isEmpty ? nil : gone
+        }
     }
 
     /// Wireshark's cap on the segments it remembers per side while they wait for an ACK.
@@ -131,7 +158,7 @@ nonisolated struct TCPSequenceAnalysis: Sendable {
         if rev.baseSeq == nil, f.contains(.ack) { rev.baseSeq = ack &- 1 }
         if !fwd.sack.isEmpty { fwd.sack = [] }
 
-        var ta: Flags = []
+        var ta = Flags(rawValue: 0)
         forward: do {
             if seglen == 1, seq == fwd.nextseq, rev.window == 0 {
                 ta.insert(.zeroWindowProbe)

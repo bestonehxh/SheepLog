@@ -216,7 +216,9 @@ nonisolated enum TCPFlowAnalyzer {
 
         var walk = FlowWalk(clientAddr: clientAddr, clientPort: clientPort,
                             t0: first.timestamp.timeIntervalSinceReferenceDate, clockStepped: clockStepped)
-        for pi in screened.analysed { walk.step(all[pi]) }
+        all.withUnsafeBufferPointer { buf in
+            for pi in screened.analysed { walk.step(buf[pi]) }
+        }
         walk.finish()
         let (health, reasons) = walk.judge()
         var notes = walk.notes(screened)
@@ -233,8 +235,11 @@ nonisolated enum TCPFlowAnalyzer {
             serverDelay = (sa - s) / 2
             if let a = walk.handshakeAckTime, a >= sa { clientDelay = (a - sa) / 2 }
         }
-        var ids = (Int.max, Int.min)
-        for pi in order { ids = (min(ids.0, all[pi].id), max(ids.1, all[pi].id)) }
+        let ids = all.withUnsafeBufferPointer { buf in
+            var ids = (Int.max, Int.min)
+            for pi in order { ids = (min(ids.0, buf[pi].id), max(ids.1, buf[pi].id)) }
+            return ids
+        }
         return TCPFlow(
             id: 0, key: FlowKey(clientAddr, clientPort, serverAddr, serverPort, proto: 6), client: clientAddr,
             clientPort: clientPort, server: serverAddr, serverPort: serverPort, firstTime: first.timestamp,
@@ -259,10 +264,15 @@ nonisolated enum TCPFlowAnalyzer {
     private static func timeOrder(_ all: [Packet], _ group: [Int]) -> (order: [Int], clockStepped: Bool) {
         var sorted = true
         var bigSteps = 0
-        for k in 1..<max(1, group.count) {
-            let back = all[group[k - 1]].timestamp.timeIntervalSince(all[group[k]].timestamp)
-            if back > 0 { sorted = false }
-            if back > clockStep { bigSteps += 1 }
+        all.withUnsafeBufferPointer { buf in
+            var previous = buf[group[0]].timestamp.timeIntervalSinceReferenceDate
+            for k in 1..<max(1, group.count) {
+                let now = buf[group[k]].timestamp.timeIntervalSinceReferenceDate
+                let back = previous - now
+                previous = now
+                if back > 0 { sorted = false }
+                if back > clockStep { bigSteps += 1 }
+            }
         }
         guard !sorted else { return (group, false) }
         var byTime = group
@@ -289,20 +299,82 @@ nonisolated enum TCPFlowAnalyzer {
     private static func screen(_ all: [Packet], _ order: [Int]) -> Screened {
         var s = Screened()
         s.analysed.reserveCapacity(order.count)
-        for (k, pi) in order.enumerated() {
-            if let ip = all[pi].decoded.ip, ip.moreFragments || ip.fragmentOffset > 0 {
+        let keys = CopyKey.keys(all, order)
+        /// Positions in `order` of the packets analysed so far.
+        var analysedAt: [Int] = []
+        analysedAt.reserveCapacity(order.count)
+        for k in 0..<order.count {
+            let pi = order[k]
+            if keys[k].fragment {
                 s.fragments += 1
                 continue
             }
-            if let original = captureCopy(all, pi, s.analysed.suffix(8)), !reportedByDSACK(all, pi, order[(k + 1)...].prefix(8)) {
+            if let original = captureCopy(all, order, keys, k, analysedAt[...], from: max(0, analysedAt.count - 8)),
+               !reportedByDSACK(all, pi, order[(k + 1)...].prefix(8)) {
                 s.copies += 1
                 if let v = all[pi].decoded.vlan { s.copyVLANs.insert(v) }
                 if let v = all[original].decoded.vlan { s.copyVLANs.insert(v) }
                 continue
             }
             s.analysed.append(pi)
+            analysedAt.append(k)
         }
         return s
+    }
+
+    /// What an exact capture copy repeats, read once per packet: comparing the `Packet`s
+    /// themselves copied each one (strings, payload) up to eight times — a quarter of the
+    /// analysis in a Debug build.
+    private struct CopyKey {
+        let time: Double
+        let tcp: Bool
+        let fragment: Bool
+        let sport: UInt16
+        let seq: UInt32
+        let ack: UInt32
+        let flags: UInt8
+        let len: Int
+        let window: UInt16
+        /// Timestamps option; bit 0 / 1 of `hasTS` = value / echo present.
+        let tsval: UInt32
+        let tsecr: UInt32
+        let hasTS: UInt8
+
+        /// `order`'s packets' keys (read in place: a Debug build copies a `Packet` taken out of
+        /// the array whole).
+        static func keys(_ all: [Packet], _ order: [Int]) -> [CopyKey] {
+            all.withUnsafeBufferPointer { buf in
+                var out: [CopyKey] = []
+                out.reserveCapacity(order.count)
+                for pi in order { out.append(CopyKey(buf[pi].timestamp, buf[pi].decoded.ip, buf[pi].decoded.tcp)) }
+                return out
+            }
+        }
+
+        init(_ timestamp: Date, _ ipHeader: IPHeader?, _ tcpHeader: TCPHeader?) {
+            time = timestamp.timeIntervalSinceReferenceDate
+            fragment = ipHeader.map { $0.moreFragments || $0.fragmentOffset > 0 } ?? false
+            guard let t = tcpHeader, ipHeader != nil else {
+                tcp = false; sport = 0; seq = 0; ack = 0; flags = 0; len = 0; window = 0; tsval = 0; tsecr = 0; hasTS = 0
+                return
+            }
+            tcp = true
+            sport = t.sourcePort
+            seq = t.sequence
+            ack = t.acknowledgment
+            flags = t.flags.rawValue
+            len = t.payloadLength
+            window = t.window
+            tsval = t.timestampValue ?? 0
+            tsecr = t.timestampEcho ?? 0
+            hasTS = (t.timestampValue != nil ? 1 : 0) | (t.timestampEcho != nil ? 2 : 0)
+        }
+
+        /// The TCP header fields `captureCopy` compares (all but the source address).
+        func sameSegment(_ o: CopyKey) -> Bool {
+            sport == o.sport && seq == o.seq && ack == o.ack && flags == o.flags && len == o.len
+                && window == o.window && tsval == o.tsval && tsecr == o.tsecr && hasTS == o.hasTS
+        }
     }
 
     // MARK: The walk through one conversation
@@ -463,6 +535,9 @@ nonisolated enum TCPFlowAnalyzer {
         }
 
         // MARK: Helpers
+
+        /// The flags a plain data segment may carry and still join the open data row.
+        static let plainDataFlags: TCPFlags = [.psh, .ack, .ece, .cwr]
 
         mutating func closeGroups() {
             openData = nil
@@ -637,7 +712,8 @@ nonisolated enum TCPFlowAnalyzer {
         /// probe a spurious retransmission and every 0-byte probe (and its answer) a duplicate
         /// ACK; with the side's data in the capture both rules agree.
         func belowPeerAck(_ s: Segment) -> Bool {
-            s.len <= 1 && !s.flags.contains(.fin) && (dirs[s.o].lastAck.map { $0 == s.tcp.sequence &+ 1 } ?? false)
+            guard s.len <= 1, !s.flags.contains(.fin), let peerAck = dirs[s.o].lastAck else { return false }
+            return peerAck == s.tcp.sequence &+ 1
         }
 
         /// A segment carrying data (`r` = its relative sequence number, `ws` Wireshark's flags).
@@ -759,7 +835,7 @@ nonisolated enum TCPFlowAnalyzer {
                 }
             } else if let od = openData, drafts[od].direction == s.dir,
                       t - drafts[od].lastTime <= 0.1,
-                      s.flags.subtracting([.psh, .ack, .ece, .cwr]).isEmpty,
+                      s.flags.subtracting(Self.plainDataFlags).isEmpty,
                       case .data(let n, let b) = drafts[od].kind {
                 drafts[od].kind = .data(count: n + 1, bytes: b + len)
                 extend(od, s)
@@ -1010,7 +1086,11 @@ nonisolated enum TCPFlowAnalyzer {
 
     /// Some packet of `order` (time order) is a capture copy of one just before it.
     private static func hasCopies(_ all: [Packet], _ order: [Int]) -> Bool {
-        for k in order.indices.dropFirst() where captureCopy(all, order[k], order[max(0, k - 8)..<k]) != nil { return true }
+        let keys = CopyKey.keys(all, order)
+        let positions = Array(order.indices)
+        for k in order.indices.dropFirst() where captureCopy(all, order, keys, k, positions[..<k], from: max(0, k - 8)) != nil {
+            return true
+        }
         return false
     }
 
@@ -1037,12 +1117,22 @@ nonisolated enum TCPFlowAnalyzer {
     /// `pi` repeats one of the last few packets exactly (TCP header, timestamps option) within
     /// 50 ms but was seen on another VLAN, with another TTL or other MACs: the same packet
     /// captured twice. Returns the original. A retransmission on one link keeps its MACs and TTL.
-    private static func captureCopy(_ all: [Packet], _ pi: Int, _ previous: ArraySlice<Int>) -> Int? {
-        let p = all[pi]
-        guard let t = p.decoded.tcp, let ip = p.decoded.ip else { return nil }
-        for qi in previous.reversed() {
-            let q = all[qi]
-            if p.timestamp.timeIntervalSince(q.timestamp) > 0.05 { break }
+    /// `order[k]` against the packets at the positions `previous[from...]` (positions in
+    /// `order`, newest last); `keys[i]` is `order[i]`'s `CopyKey`.
+    private static func captureCopy(_ all: [Packet], _ order: [Int], _ keys: [CopyKey],
+                                    _ k: Int, _ previous: ArraySlice<Int>, from: Int) -> Int? {
+        let pk = keys[k]
+        guard pk.tcp else { return nil }
+        var n = previous.endIndex
+        while n > max(from, previous.startIndex) {
+            n -= 1
+            let j = previous[n]
+            let qk = keys[j]
+            if pk.time - qk.time > 0.05 { break }
+            // Most packets repeat nothing: only a header match reads the packets themselves.
+            guard qk.tcp, qk.sameSegment(pk) else { continue }
+            let p = all[order[k]], q = all[order[j]], qi = order[j]
+            guard let t = p.decoded.tcp, let ip = p.decoded.ip else { return nil }
             guard let u = q.decoded.tcp, let qip = q.decoded.ip,
                   qip.source == ip.source, u.sourcePort == t.sourcePort,
                   u.sequence == t.sequence, u.acknowledgment == t.acknowledgment, u.flags == t.flags,

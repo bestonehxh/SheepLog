@@ -3,7 +3,7 @@ import Combine
 import Foundation
 
 enum MainPane: String, CaseIterable {
-    case status, log, sources, snmpTest, mibs, packets, flows, settings
+    case status, troubleshoot, log, sources, snmpTest, mibs, packets, flows, auth, settings
 }
 
 /// Persisted preferences. `~/Library/Application Support/SheepLog/settings.json`.
@@ -213,6 +213,8 @@ final class AppModel: ObservableObject {
     func startup() {
         guard !started else { return }
         started = true
+        // Authentication sessions feed the Troubleshoot pane's findings.
+        FindingRules.authProvider = { store in AuthFindings.findings(from: store.packets) }
         // The Test pane's model listens for snmpTarget / snmpOID from the other panes, so it
         // must exist before the pane is first shown.
         _ = SNMPTestModel.shared
@@ -242,7 +244,11 @@ final class AppModel: ObservableObject {
         packets.limit = Self.clampPacketLimit(settings.packetLimit)
         if settings.diskLogging {
             if logs.diskLogger?.directory != settings.logDirectoryURL {
-                logs.diskLogger?.retire()
+                // The new logger first, then the old one retired: a listener thread's batch
+                // handed to the old one before the switch is queued ahead of its retirement
+                // (and written). Retired first, a batch in between — for as long as the old
+                // logger took to write its backlog — was thrown away.
+                let old = logs.diskLogger
                 logs.diskLogger = DiskLogger(directory: settings.logDirectoryURL) { message in
                     DispatchQueue.main.async {
                         MainActor.assumeIsolated {
@@ -250,10 +256,11 @@ final class AppModel: ObservableObject {
                         }
                     }
                 }
+                if let old { retireLogger(old) }
             }
         } else if let logger = logs.diskLogger {
-            logger.retire()
             logs.diskLogger = nil
+            retireLogger(logger)
         }
         // The Test pane copied these at launch; later changes in Settings follow.
         if let old, old.snmpTimeout != settings.snmpTimeout || old.snmpRetries != settings.snmpRetries {
@@ -453,23 +460,37 @@ final class AppModel: ObservableObject {
     func restartListeners() {
         if !syslog.isRunning, syslog.lastError != nil { startSyslog() }
         if !traps.isRunning, traps.lastError != nil { startTraps() }
-        if syslog.isRunning, syslog.udpPort != settings.syslogUDPPort || syslog.tcpPort != settings.syslogTCPPort {
-            let oldUDP = syslog.udpPort, oldTCP = syslog.tcpPort
+        let moveSyslog = syslog.isRunning
+            && (syslog.udpPort != settings.syslogUDPPort || syslog.tcpPort != settings.syslogTCPPort)
+        let moveTraps = traps.isRunning && traps.port != settings.trapPort
+        let oldUDP = syslog.udpPort, oldTCP = syslog.tcpPort, oldTrap = traps.port
+        // Both moving listeners let go of their ports first: syslog may take the trap
+        // receiver's old port in the same Apply (or the two trade ports), which failed as
+        // "SheepLog's own trap receiver is listening there" when syslog moved first.
+        if moveSyslog { syslog.stop() }
+        if moveTraps { traps.stop() }
+        var syslogError: String?, trapError: String?
+        if moveSyslog {
             syslog.start(udpPort: settings.syslogUDPPort, tcpPort: settings.syslogTCPPort)
-            if let e = syslog.lastError {
-                syslog.start(udpPort: oldUDP, tcpPort: oldTCP)
-                report("Syslog could not move to the new ports, so it stays on \(Self.portsText(udp: oldUDP, tcp: oldTCP)).",
-                       detail: moveFailureDetail(e, traps: false))
-            }
+            if let e = syslog.lastError { syslogError = e; syslog.stop() }
         }
-        if traps.isRunning, traps.port != settings.trapPort {
-            let old = traps.port
+        if moveTraps {
             traps.start(port: settings.trapPort)
-            if let e = traps.lastError {
-                traps.start(port: old)
-                report("The trap receiver could not move to UDP \(settings.trapPort), so it stays on UDP \(old).",
-                       detail: moveFailureDetail(e, traps: true))
-            }
+            if let e = traps.lastError { trapError = e; traps.stop() }
+        }
+        // A listener that could not move goes back (its old ports may have gone to the other).
+        if let e = syslogError {
+            syslog.start(udpPort: oldUDP, tcpPort: oldTCP)
+            let old = Self.portsText(udp: oldUDP, tcp: oldTCP)
+            report(syslog.isRunning ? "Syslog could not move to the new ports, so it stays on \(old)."
+                                    : "Syslog could not move to the new ports, nor go back to \(old), so it is off.",
+                   detail: moveFailureDetail(e, traps: false))
+        }
+        if let e = trapError {
+            traps.start(port: oldTrap)
+            report(traps.isRunning ? "The trap receiver could not move to UDP \(settings.trapPort), so it stays on UDP \(oldTrap)."
+                                   : "The trap receiver could not move to UDP \(settings.trapPort), nor go back to UDP \(oldTrap), so it is off.",
+                   detail: moveFailureDetail(e, traps: true))
         }
     }
 
@@ -494,7 +515,9 @@ final class AppModel: ObservableObject {
     /// Shows the error sheet. While one is already up the error waits its turn (a duplicate of
     /// the one on screen or of a waiting one is dropped).
     func report(_ message: String, detail: String? = nil) {
-        if lastError == nil {
+        // Between two sheets (the next one is on its way) a new error waits its turn too: shown
+        // at once, it jumped the queue and the waiting one went to the back.
+        if lastError == nil, !nextErrorScheduled {
             lastError = message
             lastErrorDetail = detail
             return
@@ -511,20 +534,28 @@ final class AppModel: ObservableObject {
         lastError = nil
         lastErrorDetail = nil
         guard !pendingErrors.isEmpty else { return }
-        let next = pendingErrors.removeFirst()
+        nextErrorScheduled = true
         let token = errorToken
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.nextErrorDelay) {
             MainActor.assumeIsolated {
                 let m = AppModel.shared
                 guard m.errorToken == token else { return }
-                m.report(next.message, detail: next.detail)
+                m.nextErrorScheduled = false
+                guard m.lastError == nil, !m.pendingErrors.isEmpty else { return }
+                let next = m.pendingErrors.removeFirst()
+                m.lastError = next.message
+                m.lastErrorDetail = next.detail
             }
         }
     }
 
+    /// A dismissed sheet's successor is on its way (`clearError`).
+    private var nextErrorScheduled = false
+
     /// Drops the error on screen and every waiting one (tests; quitting).
     func dismissAllErrors() {
         errorToken += 1
+        nextErrorScheduled = false
         pendingErrors.removeAll()
         lastError = nil
         lastErrorDetail = nil
@@ -539,5 +570,19 @@ final class AppModel: ObservableObject {
         traps.stop()
         capture.stop()
         logs.diskLogger?.close()
+        // A logger replaced moments before ⌘Q may still be writing its backlog.
+        for l in retiredLoggers { l.sync() }
+        retiredLoggers = []
+    }
+
+    /// Loggers retired without waiting (their backlog is still being written): ⌘Q waits for them.
+    private var retiredLoggers: [DiskLogger] = []
+
+    private func retireLogger(_ logger: DiskLogger) {
+        logger.retire(wait: false)
+        retiredLoggers.append(logger)
+        // The last eight only: older ones finished long ago (their queued writes hold them
+        // alive until done either way; only the wait at ⌘Q needs the reference).
+        if retiredLoggers.count > 8 { retiredLoggers.removeFirst(retiredLoggers.count - 8) }
     }
 }
