@@ -37,6 +37,11 @@ corpus["arubacx"] = [
      "debug", "CX6300-CORE-01", "ntpd", 4, "2026-09-23T10:19:00+07:00"),
     ('<190>1 2026-09-23T10:20:05.250+07:00 CX6300-CORE-01 hpe-restd 3345 - - Event|4691|LOG_INFO|UKWN|1|User admin logged in from 10.1.0.5 through REST session',
      "info", "CX6300-CORE-01", "hpe-restd", 4, "2026-09-23T10:20:05.250+07:00"),
+    # Round 14: RFC 5424 structured data before the Event text — a port down and up again.
+    ('<190>1 2026-09-23T10:21:00.123+07:00 CX6300-CORE-01 intfd 1633 - [origin enterpriseId="47196"][meta sequenceId="12"] Event|403|LOG_INFO|AMM|1/1|Link status for interface 1/1/5 is down',
+     "info", "CX6300-CORE-01", "intfd", 6, "2026-09-23T10:21:00.123+07:00"),
+    ('<190>1 2026-09-23T10:21:30.123+07:00 CX6300-CORE-01 intfd 1633 - [origin enterpriseId="47196"] Event|404|LOG_INFO|AMM|1/1|Link status for interface 1/1/5 is up',
+     "info", "CX6300-CORE-01", "intfd", 5, "2026-09-23T10:21:30.123+07:00"),
 ]
 
 # ---------------------------------------------------------------- Aruba AOS 8 / Instant AP
@@ -337,6 +342,43 @@ corpus["other"] = [
      "warning", "ASA-FW02", "%ASA-4-411001", 0, "2026-09-23T10:19:30"),
     ("<165>Sep 23 2026 10:19:50 ASA-FW02 : %ASA-5-111008: User 'admin' executed the 'write memory' command.",
      "notice", "ASA-FW02", "%ASA-5-111008", 0, "2026-09-23T10:19:50"),
+    # Round 14: more vendors' forms, each read by the Troubleshoot rules.
+    # Arista EOS: a port's line protocol down and up, a configuration from the console, a BGP
+    # session reset (the NOTIFICATION is why the peer went down — not a second down).
+    ('<187>Sep 23 10:20:00 LEAF-EOS-1 Ebra: %LINEPROTO-5-UPDOWN: Line protocol on Interface Ethernet5, changed state to down',
+     "error", "LEAF-EOS-1", "Ebra", 0, "2026-09-23T10:20:00"),
+    ('<189>Sep 23 10:20:30 LEAF-EOS-1 Ebra: %LINEPROTO-5-UPDOWN: Line protocol on Interface Ethernet5, changed state to up',
+     "notice", "LEAF-EOS-1", "Ebra", 0, "2026-09-23T10:20:30"),
+    ('<189>Sep 23 10:21:00 LEAF-EOS-1 ConfigAgent: %SYS-5-CONFIG_I: Configured from console by admin on vty3 (10.0.0.5)',
+     "notice", "LEAF-EOS-1", "ConfigAgent", 0, "2026-09-23T10:21:00"),
+    ('<187>Sep 23 10:21:20 LEAF-EOS-1 Bgp: %BGP-3-NOTIFICATION: received from neighbor 10.0.0.2 (VRF default AS 65002) 4/0 (Hold Timer Expired Error/Unspecific) 0 bytes',
+     "error", "LEAF-EOS-1", "Bgp", 0, "2026-09-23T10:21:20"),
+    ('<189>Sep 23 10:21:20 LEAF-EOS-1 Bgp: %BGP-5-ADJCHANGE: peer 10.0.0.2 (VRF default AS 65002) old state Established event HoldTimerExpired new state Idle',
+     "notice", "LEAF-EOS-1", "Bgp", 0, "2026-09-23T10:21:20"),
+    ('<189>Sep 23 10:21:50 LEAF-EOS-1 Bgp: %BGP-5-ADJCHANGE: peer 10.0.0.2 (VRF default AS 65002) old state OpenConfirm event RecvKeepAlive new state Established',
+     "notice", "LEAF-EOS-1", "Bgp", 0, "2026-09-23T10:21:50"),
+    # Extreme EXOS: the event name in angle brackets, a port down and up.
+    ('<30>Sep 23 10:22:00 X460-G2 <Info:vlan.msgs.portLinkStateDown> Port 1:5 link down',
+     "info", "X460-G2", "-", 0, "2026-09-23T10:22:00"),
+    ('<30>Sep 23 10:22:30 X460-G2 <Info:vlan.msgs.portLinkStateUp> Port 1:5 link UP at speed 1 Gbps and full-duplex',
+     "info", "X460-G2", "-", 0, "2026-09-23T10:22:30"),
+    # Ruckus ICX: "Interface ethernet 1/1/5, state down" (no "link"), and up again.
+    ('<14>Sep 23 10:23:00 ICX7150-SW1 System: Interface ethernet 1/1/5, state down',
+     "info", "ICX7150-SW1", "System", 0, "2026-09-23T10:23:00"),
+    ('<14>Sep 23 10:23:40 ICX7150-SW1 System: Interface ethernet 1/1/5, state up',
+     "info", "ICX7150-SW1", "System", 0, "2026-09-23T10:23:40"),
+    # Cisco Meraki MS: version 1, epoch seconds, the device, the category ("events").
+    ('<134>1 1790133840.123456789 MS220-8P events port 3 status changed from 1Gfdx to down',
+     "info", "MS220-8P", "events", 0, "2026-09-23T03:24:00.123Z"),
+    ('<134>1 1790133870.123456789 MS220-8P events port 3 status changed from down to 1Gfdx',
+     "info", "MS220-8P", "events", 0, "2026-09-23T03:24:30.123Z"),
+    # Cisco IOS XR: the node before the time (no hostname, then `logging hostnameprefix`).
+    ('<187>100: RP/0/RSP0/CPU0:Sep 23 10:25:00.123 UTC: ifmgr[245]: %PKT_INFRA-LINK-3-UPDOWN : Interface GigabitEthernet0/0/0/1, changed state to Down',
+     "error", "-", "ifmgr", 2, "2026-09-23T10:25:00.123Z"),
+    ('<189>101: RP/0/RSP0/CPU0:Sep 23 10:25:30.123 UTC: ifmgr[245]: %PKT_INFRA-LINK-3-UPDOWN : Interface GigabitEthernet0/0/0/1, changed state to Up',
+     "notice", "-", "ifmgr", 2, "2026-09-23T10:25:30.123Z"),
+    ("<189>102: XR-PE1 RP/0/RSP0/CPU0:Sep 23 10:25:40.123 UTC: config[65727]: %MGBL-CONFIG-6-DB_COMMIT : Configuration committed by user 'admin'. Use 'show configuration commit changes 1000000021' to view the changes.",
+     "notice", "XR-PE1", "config", 2, "2026-09-23T10:25:40.123Z"),
 ]
 
 total = 0

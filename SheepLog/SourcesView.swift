@@ -12,6 +12,7 @@ struct SourcesView: View {
     private var rows: [SourceStats] { store.sources.sorted(using: sortOrder) }
 
     var body: some View {
+        let _ = PaneProbe.ran("body.sources")
         VStack(spacing: 0) {
             PaneHeader(eyebrow: "Syslog", heading: heading, subtitle: subtitle)
                 .paneColumn()

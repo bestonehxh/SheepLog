@@ -573,7 +573,13 @@ final class AppModel: ObservableObject {
         // A logger replaced moments before ⌘Q may still be writing its backlog.
         for l in retiredLoggers { l.sync() }
         retiredLoggers = []
+        // A Log export or packet Save still writing (a 200k-packet Save takes seconds): finish
+        // it rather than leave a truncated file — bounded, a stuck network volume must not
+        // keep the app from quitting.
+        PendingWrites.wait(timeout: Self.quitWriteWait)
     }
+
+    static let quitWriteWait: Double = 30
 
     /// Loggers retired without waiting (their backlog is still being written): ⌘Q waits for them.
     private var retiredLoggers: [DiskLogger] = []

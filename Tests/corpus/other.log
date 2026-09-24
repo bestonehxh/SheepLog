@@ -36,3 +36,18 @@
 <164>Sep 23 2026 10:19:00 ASA-FW02 : %ASA-4-411002: Line protocol on Interface outside, changed state to down
 <164>Sep 23 2026 10:19:30 ASA-FW02 : %ASA-4-411001: Line protocol on Interface outside, changed state to up
 <165>Sep 23 2026 10:19:50 ASA-FW02 : %ASA-5-111008: User 'admin' executed the 'write memory' command.
+<187>Sep 23 10:20:00 LEAF-EOS-1 Ebra: %LINEPROTO-5-UPDOWN: Line protocol on Interface Ethernet5, changed state to down
+<189>Sep 23 10:20:30 LEAF-EOS-1 Ebra: %LINEPROTO-5-UPDOWN: Line protocol on Interface Ethernet5, changed state to up
+<189>Sep 23 10:21:00 LEAF-EOS-1 ConfigAgent: %SYS-5-CONFIG_I: Configured from console by admin on vty3 (10.0.0.5)
+<187>Sep 23 10:21:20 LEAF-EOS-1 Bgp: %BGP-3-NOTIFICATION: received from neighbor 10.0.0.2 (VRF default AS 65002) 4/0 (Hold Timer Expired Error/Unspecific) 0 bytes
+<189>Sep 23 10:21:20 LEAF-EOS-1 Bgp: %BGP-5-ADJCHANGE: peer 10.0.0.2 (VRF default AS 65002) old state Established event HoldTimerExpired new state Idle
+<189>Sep 23 10:21:50 LEAF-EOS-1 Bgp: %BGP-5-ADJCHANGE: peer 10.0.0.2 (VRF default AS 65002) old state OpenConfirm event RecvKeepAlive new state Established
+<30>Sep 23 10:22:00 X460-G2 <Info:vlan.msgs.portLinkStateDown> Port 1:5 link down
+<30>Sep 23 10:22:30 X460-G2 <Info:vlan.msgs.portLinkStateUp> Port 1:5 link UP at speed 1 Gbps and full-duplex
+<14>Sep 23 10:23:00 ICX7150-SW1 System: Interface ethernet 1/1/5, state down
+<14>Sep 23 10:23:40 ICX7150-SW1 System: Interface ethernet 1/1/5, state up
+<134>1 1790133840.123456789 MS220-8P events port 3 status changed from 1Gfdx to down
+<134>1 1790133870.123456789 MS220-8P events port 3 status changed from down to 1Gfdx
+<187>100: RP/0/RSP0/CPU0:Sep 23 10:25:00.123 UTC: ifmgr[245]: %PKT_INFRA-LINK-3-UPDOWN : Interface GigabitEthernet0/0/0/1, changed state to Down
+<189>101: RP/0/RSP0/CPU0:Sep 23 10:25:30.123 UTC: ifmgr[245]: %PKT_INFRA-LINK-3-UPDOWN : Interface GigabitEthernet0/0/0/1, changed state to Up
+<189>102: XR-PE1 RP/0/RSP0/CPU0:Sep 23 10:25:40.123 UTC: config[65727]: %MGBL-CONFIG-6-DB_COMMIT : Configuration committed by user 'admin'. Use 'show configuration commit changes 1000000021' to view the changes.

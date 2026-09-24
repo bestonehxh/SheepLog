@@ -6,3 +6,5 @@
 <187>Sep 23 10:18:00 CX6200-ACC-03 port-access[3201]: Event|10505|LOG_ERR|AMM|1/1|Port 1/1/7 MAC-auth failed for client 02:00:5e:10:00:22
 <191>1 2026-09-23T10:19:00+07:00 CX6300-CORE-01 ntpd 1502 - - Event|1101|LOG_DEBUG|AMM|-|NTP server 10.1.0.1 selected as reference
 <190>1 2026-09-23T10:20:05.250+07:00 CX6300-CORE-01 hpe-restd 3345 - - Event|4691|LOG_INFO|UKWN|1|User admin logged in from 10.1.0.5 through REST session
+<190>1 2026-09-23T10:21:00.123+07:00 CX6300-CORE-01 intfd 1633 - [origin enterpriseId="47196"][meta sequenceId="12"] Event|403|LOG_INFO|AMM|1/1|Link status for interface 1/1/5 is down
+<190>1 2026-09-23T10:21:30.123+07:00 CX6300-CORE-01 intfd 1633 - [origin enterpriseId="47196"] Event|404|LOG_INFO|AMM|1/1|Link status for interface 1/1/5 is up

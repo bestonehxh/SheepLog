@@ -50,6 +50,7 @@ final class TroubleshootModel: ObservableObject {
     // MARK: Appearing
 
     func appeared() {
+        PaneProbe.ran("troubleshoot.appeared")
         // `-demoPane troubleshoot -demoPcap <file>`: the Packets pane (which opens it) never appeared.
         if AppModel.shared.packets.fileURL == nil, AppModel.shared.packets.packets.isEmpty, DemoFlags.openPcap() {
             AppModel.shared.mainPane = .troubleshoot
@@ -68,12 +69,16 @@ final class TroubleshootModel: ObservableObject {
 
     /// Leaving the pane stops the work (not just its result).
     func disappeared() {
+        PaneProbe.ran("troubleshoot.disappeared")
         visible = false
         storeSinks.removeAll()
         scheduled?.cancel(); scheduled = nil
         running?.cancel(); running = nil
         reportTask?.cancel(); reportTask = nil
         buildingReport = false
+        // Its sheet went with the pane: it must not come back over the next visit (its packets
+        // may be another capture's by then).
+        report = nil
         rerun = false
         analysing = false
     }
@@ -217,13 +222,19 @@ final class TroubleshootModel: ObservableObject {
 
     func buildReport(_ text: String) {
         reportTask?.cancel()
-        let input = { var i = currentInput(); i.flows = result?.flows ?? []; return i }()
+        var prepared = currentInput()
+        // The last analysis's conversations only when they are this capture's: after a Clear
+        // they were the old capture's (frame numbers and all), listed beside the new packets.
+        let flowsCurrent = result.map { $0.packetEpoch == prepared.packetEpoch } ?? false
+        prepared.flows = flowsCurrent ? result?.flows ?? [] : []
+        let input = prepared
         let findings = result?.findings ?? []
         buildingReport = true
         reportTask = Task {
             let work = Task.detached(priority: .userInitiated) { () -> ClientReport? in
                 var input = input
                 input.takeHeld()
+                if !flowsCurrent, !input.packets.isEmpty { input.flows = TCPFlowAnalyzer.analyze(input.packets) { Task.isCancelled } }
                 return ClientReport.build(text, input: input, findings: findings)
             }
             let built = await withTaskCancellationHandler { await work.value } onCancel: { work.cancel() }
@@ -356,6 +367,7 @@ struct TroubleshootView: View {
     @FocusState private var filterFocused: Bool
 
     var body: some View {
+        let _ = PaneProbe.ran("body.troubleshoot")
         VStack(alignment: .leading, spacing: 0) {
             TimelineView(.periodic(from: .now, by: 5)) { context in
                 PaneHeader(eyebrow: "Overview", heading: heading, subtitle: subtitle(now: context.date)) {
@@ -1069,6 +1081,8 @@ struct TimelineStrip: View {
 struct ClientReportSheet: View {
     let report: ClientReport
     let dismiss: () -> Void
+    /// Said here when a link's lines / frames / conversation are no longer in memory.
+    @State private var notice: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -1108,7 +1122,16 @@ struct ClientReportSheet: View {
                 CopyButton("Copy as Markdown", value: report.markdown, bordered: true, help: "Copy the report as Markdown, ready to paste into a ticket")
                 Button("Export…", action: export)
                 if report.packetTotal > 0 {
-                    Button("Show \(Format.count(report.packetTotal)) packets") { dismiss(); TroubleshootJump.packets(report.packetQuery) }
+                    Button(ReportLink.title("Show \(Format.count(report.packetTotal)) packets", report.packetEvidence, epoch: report.packetEpoch)) {
+                        open(report.packetEvidence)
+                    }
+                }
+                if let notice {
+                    Text(notice)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.caution)
+                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 0)
                 Button("Done", action: dismiss)
@@ -1197,7 +1220,7 @@ struct ClientReportSheet: View {
                     }
                     HStack {
                         Spacer()
-                        Button("Show on the Log pane") { dismiss(); TroubleshootJump.log(report.logQuery) }
+                        Button(ReportLink.title("Show on the Log pane", report.logEvidence, epoch: report.packetEpoch)) { open(report.logEvidence) }
                             .controlSize(.small)
                     }
                     .padding(.horizontal, 14)
@@ -1214,13 +1237,18 @@ struct ClientReportSheet: View {
                     NoteRow(text: "No TCP conversation of this client in the capture.")
                 } else {
                     ForEach(report.flows) { f in
-                        Button { dismiss(); TroubleshootJump.flow(f.ref) } label: {
+                        let gone = ReportLink.isGone(report.flowEvidence(f), epoch: report.packetEpoch)
+                        Button { open(report.flowEvidence(f)) } label: {
                             HStack(alignment: .firstTextBaseline, spacing: 8) {
                                 Circle().fill(f.health == .ok ? Theme.ok : f.health == .warn ? Theme.caution : Theme.err).frame(width: 7, height: 7)
                                 Text(f.text).font(.system(size: 12, design: .monospaced)).foregroundStyle(Theme.text)
                                     .lineLimit(2).multilineTextAlignment(.leading)
                                 Spacer(minLength: 0)
-                                Image(systemName: "arrow.left.arrow.right").font(.system(size: 10)).foregroundStyle(Theme.faintText)
+                                if gone {
+                                    Text("no longer in memory").font(.system(size: 10.5)).foregroundStyle(Theme.faintText)
+                                } else {
+                                    Image(systemName: "arrow.left.arrow.right").font(.system(size: 10)).foregroundStyle(Theme.faintText)
+                                }
                             }
                             .padding(.horizontal, 14)
                             .padding(.vertical, 7)
@@ -1234,6 +1262,13 @@ struct ClientReportSheet: View {
         }
     }
 
+    /// A link: the pane on it, or — rolled out, or the capture cleared since the report — a
+    /// note here and the sheet stays (it used to open an empty pane, or the new capture's
+    /// packets of the same address as if they were the report's).
+    private func open(_ e: Evidence) {
+        if let text = ReportLink.open(e, epoch: report.packetEpoch) { notice = text } else { dismiss() }
+    }
+
     private func export() {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]
@@ -1242,6 +1277,28 @@ struct ClientReportSheet: View {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do { try report.markdown.write(to: url, atomically: true, encoding: .utf8) }
         catch { AppModel.shared.report("Could not write \(url.lastPathComponent).", detail: error.localizedDescription) }
+    }
+}
+
+/// The client report's links (tested without the sheet).
+@MainActor
+enum ReportLink {
+    /// The button's words, saying when what it opens is gone or partly gone.
+    static func title(_ base: String, _ e: Evidence, epoch: Int) -> String {
+        guard let p = TroubleshootJump.present(e, epoch: epoch) else { return base }
+        if p.present == 0 { return base + " — no longer in memory" }
+        if p.present < p.total { return base + " — \(Format.count(p.present)) of \(Format.count(p.total)) still in memory" }
+        return base
+    }
+
+    static func isGone(_ e: Evidence, epoch: Int) -> Bool {
+        TroubleshootJump.present(e, epoch: epoch)?.present == 0
+    }
+
+    /// Opens the pane on `e`; the sentence to show instead when none of it is in memory.
+    static func open(_ e: Evidence, epoch: Int) -> String? {
+        if case .gone(let text) = TroubleshootJump.show(e, epoch: epoch) { return text }
+        return nil
     }
 }
 

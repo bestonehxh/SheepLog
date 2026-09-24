@@ -123,7 +123,10 @@ struct LogTableView: NSViewRepresentable {
 
         @objc func timeZoneChanged(_ note: Notification) {
             NSTimeZone.resetSystemTimeZone()
-            guard let table else { return }
+            // A table whose pane left (its window closed before SwiftUI let go of it) redraws
+            // nothing; the next appearance reloads anyway.
+            guard let table, table.window != nil else { return }
+            PaneProbe.ran("log.timeZoneReload")
             let rows = table.selectedRowIndexes
             applyingSelection = true
             table.reloadData()
@@ -136,6 +139,7 @@ struct LogTableView: NSViewRepresentable {
         // MARK: Sync with the store
 
         func sync(force: Bool) {
+            PaneProbe.ran("log.sync")
             guard let table, let scroll else { return }
             let count = store.visibleCount
             let newest = store.newestFirst

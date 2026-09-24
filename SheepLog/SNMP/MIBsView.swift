@@ -11,6 +11,7 @@ struct MIBsView: View {
     @State private var expanded: Set<OID> = [OID([1]), OID([1, 3]), OID([1, 3, 6]), OID([1, 3, 6, 1])]
 
     var body: some View {
+        let _ = PaneProbe.ran("body.mibs")
         VStack(spacing: 0) {
             PaneHeader(eyebrow: "SNMP",
                        heading: "\(Format.count(mibs.modules.count)) modules, \(Format.count(mibs.nodeCount)) objects.",

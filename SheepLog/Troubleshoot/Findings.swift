@@ -390,6 +390,10 @@ nonisolated enum FactKind: Sendable {
     case hardware(HardwareKind, recovered: Bool)
     case stp(STPKind, port: String?)
     case routing(proto: String, neighbor: String, up: Bool)
+    /// A BGP NOTIFICATION sent to / received from a neighbor (Cisco IOS / Arista
+    /// `%BGP-3-NOTIFICATION`): why the session that the adjacency line reports ended — never a
+    /// down of its own (with the ADJCHANGE after it, one reset read as two downs, "flapping").
+    case routingNotice(proto: String, neighbor: String, reason: String, sent: Bool)
     case reboot(cold: Bool, planned: Bool)
     case loginFail(ip: String?, user: String?)
     case loginOK(ip: String?, user: String?)
@@ -506,7 +510,7 @@ nonisolated final class Needles: @unchecked Sendable {
     private init() {
         let words: [[String]] = [
             ["link", "-line", "line protocol", "turned into down state", "turned into up state", "if_up", "if_down",
-             "interface-stat-change", "interface status changed"],
+             "interface-stat-change", "interface status changed", ", state down", ", state up", "status changed from"],
             ["power", "psu", "fan", "temperat", "thermal", "poe", "overheat", "pem"],
             ["stp", "topology", "bpdu", "loop", "storm", "spanning", "root bridge"],
             ["neighbo", "adjchg", "adjchange", "nbr"],
@@ -685,6 +689,13 @@ nonisolated enum LineClassifier {
         }
         var up: Bool?
         if let s = e.field("OperStatus") { up = s.uppercased().hasPrefix("UP") }
+        // Ruckus ICX: "Interface ethernet 1/1/5, state down"; Meraki MS: "port 3 status changed
+        // from 1Gfdx to down" (neither says "link": both were never read).
+        else if CText.has(c, ", state down") { up = false }
+        else if CText.has(c, ", state up") { up = true }
+        else if CText.has(c, "status changed from"), CText.hasAny(c, [" to down", "from down to "]) {
+            up = !CText.has(c, " to down")
+        }
         else if CText.hasAny(c, ["link down", "linkdown", "link_down", "link is down", "link status for interface", "off-line",
                              "changed state to down", "entered the down state", "link failure", "went down", "turned into down state"]) {
             up = CText.hasAny(c, ["link status for interface"]) ? !CText.has(c, " is down") : false
@@ -707,7 +718,14 @@ nonisolated enum LineClassifier {
         }
         let m = e.message
         for marker in ["interface ", "Interface ", "port ", "Port ", "ifName=", "ifName "] {
-            if let t = FText.token(after: marker, in: m), !t.isEmpty, t.lowercased() != "status" { return t }
+            if let t = FText.token(after: marker, in: m), !t.isEmpty, t.lowercased() != "status" {
+                // Ruckus / Brocade: "Interface ethernet 1/1/5" — the type word, then the port.
+                if ["ethernet", "ethe", "ve", "lag", "loopback", "tunnel", "management"].contains(t.lowercased()),
+                   let n = FText.token(after: marker + t + " ", in: m), n.first?.isNumber ?? false {
+                    return "\(t) \(n)"
+                }
+                return t
+            }
         }
         // UniFi switches: "TRAPMGR: Link Down: 0/9" — the port follows (the word before " Link"
         // was every port's "TRAPMGR:", so all their events were one port flapping).
@@ -742,16 +760,47 @@ nonisolated enum LineClassifier {
         else if CText.hasAny(c, ["temperat", "thermal", "overheat"]) { kind = .temperature }
         else if CText.hasWord(c, "poe") || CText.hasAny(c, ["power denied", "power budget", "insufficient power", "power limit"]) { kind = .poe }
         else { return nil }
-        let failed = CText.hasAny(c, failWords)
-        let ok = CText.hasAny(c, okWords)
-        if !failed && !ok && e.severity > .warning { return nil }
+        // Thresholds a line merely states ("warning threshold 70C", "high threshold 90C") are
+        // not what happened: "Temperature sensor 2 is normal, warning threshold 70C" was a
+        // temperature failure.
+        let stated = hardwareText(e.message)
+        let failed = stated.withCString { CText.hasAny($0, failWords) }
+        let ok = stated.withCString { CText.hasAny($0, okWords) }
+        // A fan's speed following the temperature ("Fan speed adjusted to 60%", "… to high")
+        // is the fan doing its job.
+        if kind == .fan, CText.hasAny(c, ["speed adjusted", "speed changed", "speed set", "speed increased", "speed decreased"]),
+           !CText.hasAny(c, ["fail", "fault", "stopped", "stall", "removed", "absent", "not present", "not spinning", "too low", "below"]) {
+            return nil
+        }
+        // Neither a failure nor a recovery word: a warning or worse is one ("fan module 2 status"
+        // at warning) — unless the line is a reading against its thresholds ("CPU temperature
+        // 45C, high threshold 90C" at warning was a temperature failure).
+        let reading = stated.contains("threshold")
+        if !failed && !ok && (e.severity > .warning || reading) { return nil }
         if kind == .poe && !failed { return nil }
         return .hardware(kind, recovered: ok && !failed)
+    }
+
+    /// The message without the thresholds it states.
+    static func hardwareText(_ m: String) -> String {
+        var t = m.lowercased()
+        guard t.contains("threshold") else { return t }
+        for w in ["warning", "high", "critical", "alarm", "shutdown", "low", "major", "minor"] {
+            t = t.replacingOccurrences(of: w + " threshold", with: "threshold")
+            t = t.replacingOccurrences(of: w + "-threshold", with: "threshold")
+        }
+        return t
     }
 
     // Spanning tree, loops, storms
 
     static func stp(_ e: LogEntry, _ c: UnsafePointer<CChar>) -> FactKind? {
+        // A routing protocol's own "topology change" (OSPF / IS-IS SPF runs) or "AS path loop"
+        // is not spanning tree: read as STP, a BGP path loop was a layer-2 loop.
+        if isRoutingProtocolLine(e, c), !CText.hasAny(c, ["spanning", "stp", "bpdu", "vlan"]),
+           !CText.contains(e.program, "STP"), !CText.contains(e.program, "SPANTREE") {
+            return nil
+        }
         let port = FText.token(after: "port ", in: e.message) ?? FText.token(after: "interface ", in: e.message)
         if CText.hasWord(c, "loop") && CText.hasAny(c, ["detect", "protect", "found", "block", "disabl", "loop-protect"]) {
             return .stp(.loop, port: port)
@@ -772,11 +821,20 @@ nonisolated enum LineClassifier {
         return nil
     }
 
+    static let routingWords = ["ospf", "is-is", "isis", "bgp", " spf", "spf ", "eigrp", "as path", "as-path", "as_path", "rip "]
+    static let routingPrograms = ["OSPF", "BGP", "ISIS", "EIGRP", "ospfd", "bgpd", "isisd", "zebra", "rpd", "ROUTING-"]
+
+    static func isRoutingProtocolLine(_ e: LogEntry, _ c: UnsafePointer<CChar>) -> Bool {
+        CText.hasAny(c, routingWords) || routingPrograms.contains { CText.contains(e.program, $0) }
+    }
+
     // Routing neighbours
 
     static func routing(_ e: LogEntry, _ c: UnsafePointer<CChar>) -> FactKind? {
         let proto: String
         let p = e.program
+        if CText.has(c, "notification") || CText.contains(p, "NOTIFICATION"),
+           let notice = bgpNotification(e, c) { return notice }
         if CText.has(c, "ospf") || CText.contains(p, "OSPF") || e.field("module") == "OSPF" { proto = "OSPF" }
         else if CText.has(c, "bgp") || CText.contains(p, "BGP") { proto = "BGP" }
         else if CText.has(c, "eigrp") || CText.contains(p, "EIGRP") || CText.contains(p, "DUAL") { proto = "EIGRP" }
@@ -785,6 +843,16 @@ nonisolated enum LineClassifier {
         else { return nil }
         var up: Bool?
         if let s = e.field("NeighborCurrentState") { up = !s.lowercased().hasPrefix("down") && !s.lowercased().hasPrefix("init") }
+        // Arista / FRR: "old state X event Y new state Z" — a session reaching Established is up,
+        // one leaving it is down, and the steps between (Idle → Connect → OpenSent) are neither
+        // (the word "Idle" in "old state Idle … new state Connect" read as a down).
+        else if let r = e.message.range(of: "new state ", options: .caseInsensitive) {
+            let new = e.message[r.upperBound...].prefix { $0.isLetter }.lowercased()
+            let old = FText.token(after: "old state ", in: e.message)?.lowercased() ?? ""
+            if new == "established" || new == "full" { up = old == new ? nil : true }
+            else if old == "established" || old == "full" { up = false }
+            else { return nil }
+        }
         else if CText.hasAny(c, ["to down", "neighbor down", "neighbour down", "changed to down", "state down", " down", "idle", "dead timer", "hold time expired"]) {
             up = CText.hasAny(c, ["to full", "to up"]) && !CText.has(c, "to down") ? true : false
         } else if CText.hasAny(c, ["to full", " up", "established", "to up", "went full"]) {
@@ -796,6 +864,26 @@ nonisolated enum LineClassifier {
             ?? FText.firstIPv4(after: "neighbor", in: e.message) ?? FText.firstIPv4(after: "nbr", in: e.message)
             ?? FText.firstIPv4(after: "peer", in: e.message) ?? "?"
         return .routing(proto: proto, neighbor: neighbor, up: up)
+    }
+
+    /// `%BGP-3-NOTIFICATION: sent to neighbor 10.0.0.2 4/0 (hold time expired) 0 bytes` (IOS),
+    /// `… received from neighbor 10.0.0.2 (VRF default AS 65002) 4/0 (Hold Timer Expired
+    /// Error/Unspecific) 0 bytes` (Arista). An adjacency line that also names a notification
+    /// (IOS XR "neighbor … Down - BGP Notification sent, hold time expired") stays a down.
+    static func bgpNotification(_ e: LogEntry, _ c: UnsafePointer<CChar>) -> FactKind? {
+        let m = e.message
+        let sent: Bool
+        let after: String
+        if let r = m.range(of: "sent to neighbor", options: .caseInsensitive) { sent = true; after = String(m[r.upperBound...]) }
+        else if let r = m.range(of: "received from neighbor", options: .caseInsensitive) { sent = false; after = String(m[r.upperBound...]) }
+        else { return nil }
+        guard let neighbor = FText.firstIPv4(after: "", in: after) ?? FText.token(after: " ", in: after) else { return nil }
+        // The reason: the parentheses after the "code/subcode" pair.
+        var reason = ""
+        if let code = after.range(of: #"\d+/\d+\s*\("#, options: .regularExpression) {
+            reason = String(after[code.upperBound...].prefix { $0 != ")" })
+        }
+        return .routingNotice(proto: "BGP", neighbor: neighbor, reason: reason, sent: sent)
     }
 
     // Restarts
@@ -857,6 +945,8 @@ nonisolated enum LineClassifier {
         if CText.hasAny(c, ["fail", "error", "invalid"]) && !paloConfig { return nil }
         let user = ["user", "UserName", "username", "admin", "administrator", "srcuser"].lazy.compactMap { e.field($0) }.first
             ?? e.fields.first { $0.key.hasSuffix(".username") }?.value
+            // IOS XR: "Configuration committed by user 'admin'." (was the user "user").
+            ?? FText.token(after: " by user ", in: e.message)
             ?? FText.token(after: " by ", in: e.message)
             ?? ((junosCommit || asaConfig) ? FText.token(after: "user ", in: e.message) : nil)
         return .config(user: user)
@@ -1099,7 +1189,12 @@ nonisolated extension FindingRules {
     static func routingRules(_ ctx: inout RuleContext) -> [Finding] {
         struct Key: Hashable { let device: String; let proto: String; let neighbor: String }
         var groups: [Key: [(t: Date, up: Bool, f: LineFact)]] = [:]
+        var notices: [Key: [(t: Date, reason: String, sent: Bool, f: LineFact)]] = [:]
         for f in ctx.facts {
+            if case .routingNotice(let proto, let nb, let reason, let sent) = f.kind {
+                notices[Key(device: ctx.device(f), proto: proto, neighbor: nb), default: []].append((ctx.time(f), reason, sent, f))
+                continue
+            }
             guard case .routing(let proto, let nb, let up) = f.kind else { continue }
             groups[Key(device: ctx.device(f), proto: proto, neighbor: nb), default: []].append((ctx.time(f), up, f))
         }
@@ -1113,14 +1208,24 @@ nonisolated extension FindingRules {
             let nb = key.neighbor == "?" ? "a neighbor" : key.neighbor
             let flapping = downs.count >= 2
             guard stillDown || flapping else { continue }
+            // The NOTIFICATION that ended the last session (within 30 s before its down): says
+            // whether the peer timed out or somebody reset it.
+            let lastDown = downs.last!.t
+            let why = notices[key]?.last { $0.t <= lastDown.addingTimeInterval(2) && $0.t >= lastDown.addingTimeInterval(-30) }
+            let whyText = why.map { n in
+                "The session ended with a NOTIFICATION \(n.sent ? "sent to" : "received from") the neighbor"
+                    + (n.reason.isEmpty ? "." : ": \(n.reason).")
+                    + (n.reason.lowercased().contains("administrative") ? " An administrative reset or shutdown is somebody's command, not a fault." : "")
+                    + " "
+            } ?? ""
             let f = Finding(id: "routing|\(key.device)|\(key.proto)|\(key.neighbor)", rule: "routing.neighbor",
                             severity: stillDown ? .bad : .warn, category: .routing, source: .logs,
                             title: stillDown
                                 ? "\(key.proto) neighbor \(nb) on \(key.device) went down at \(FText.clock(downs.last!.t)) and has not come back."
                                 : "\(key.proto) neighbor \(nb) on \(key.device) went down \(downs.count) times (\(FText.clock(downs[0].t))–\(FText.clock(downs.last!.t))).",
-                            detail: "Routes learned from \(nb) are withdrawn while the adjacency is down, so traffic takes another path or none. "
+                            detail: whyText + "Routes learned from \(nb) are withdrawn while the adjacency is down, so traffic takes another path or none. "
                                 + (flapping ? "A flapping adjacency usually follows a flapping link, MTU or timer mismatch, or a CPU-starved peer." : "Check the link to the neighbor and its \(key.proto) process."),
-                            evidence: logEvidence(ids: items.map(\.f.id), trapIDs: [],
+                            evidence: logEvidence(ids: (items.map(\.f.id) + (notices[key] ?? []).map(\.f.id)).sorted(), trapIDs: [],
                                                   query: ctx.hostTerm(address: address, name: key.device) + " " + key.proto.lowercased()
                                                     + (key.neighbor == "?" ? "" : " " + FText.quote(key.neighbor)),
                                                   trapQuery: ""),
@@ -2032,33 +2137,68 @@ nonisolated extension FindingRules {
     static let ifInPacketsHC = [7, 8, 9].map { OID([1, 3, 6, 1, 2, 1, 31, 1, 1, 1, $0]) }
     static let ifOutPacketsHC = [11, 12, 13].map { OID([1, 3, 6, 1, 2, 1, 31, 1, 1, 1, $0]) }
 
-    /// One direction of one port in one walk: discards and the packets that went through.
+    /// One direction of one port in one walk: discards and the packets that went through, each
+    /// counter column on its own (a Counter32 wraps by itself: the sum of ifInUcastPkts and
+    /// ifInNUcastPkts cannot be unwrapped).
     struct PortFlow: Sendable {
         var discards: UInt64?
-        var packets32: UInt64?
-        var packetsHC: UInt64?
+        /// ifTable's Counter32 packet columns, and ifXTable's Counter64 ones, by column number.
+        var p32: [UInt32: UInt64] = [:]
+        var pHC: [UInt32: UInt64] = [:]
+        var packets32: UInt64? { p32.isEmpty ? nil : p32.values.reduce(0, &+) }
+        var packetsHC: UInt64? { pHC.isEmpty ? nil : pHC.values.reduce(0, &+) }
         var packets: UInt64? { packetsHC ?? packets32 }
     }
 
     /// Discards and packet counts per ifIndex and direction (0 in, 1 out) from a walk's var-binds.
     static func portFlows(_ values: [OID: String]) -> [UInt32: [PortFlow]] {
         var out: [UInt32: [PortFlow]] = [:]
-        func add(_ oid: OID, _ value: String, _ dir: Int, _ path: WritableKeyPath<PortFlow, UInt64?>) {
+        func add(_ oid: OID, _ value: String, _ dir: Int, _ f: (inout PortFlow, UInt64) -> Void) {
             guard let idx = oid.parts.last, let n = UInt64(value.prefix { $0.isNumber }) else { return }
             var list = out[idx] ?? [PortFlow(), PortFlow()]
-            list[dir][keyPath: path] = (list[dir][keyPath: path] ?? 0) &+ n
+            f(&list[dir], n)
             out[idx] = list
         }
         for (oid, value) in values where oid.parts.count >= 11 {
             let column = OID(Array(oid.parts.dropLast()))
-            if column == ifInDiscards { add(oid, value, 0, \.discards) }
-            else if column == ifOutDiscards { add(oid, value, 1, \.discards) }
-            else if ifInPackets32.contains(column) { add(oid, value, 0, \.packets32) }
-            else if ifOutPackets32.contains(column) { add(oid, value, 1, \.packets32) }
-            else if ifInPacketsHC.contains(column) { add(oid, value, 0, \.packetsHC) }
-            else if ifOutPacketsHC.contains(column) { add(oid, value, 1, \.packetsHC) }
+            let col = column.parts.last ?? 0
+            if column == ifInDiscards { add(oid, value, 0) { $0.discards = $1 } }
+            else if column == ifOutDiscards { add(oid, value, 1) { $0.discards = $1 } }
+            else if ifInPackets32.contains(column) { add(oid, value, 0) { $0.p32[col] = $1 } }
+            else if ifOutPackets32.contains(column) { add(oid, value, 1) { $0.p32[col] = $1 } }
+            else if ifInPacketsHC.contains(column) { add(oid, value, 0) { $0.pHC[col] = $1 } }
+            else if ifOutPacketsHC.contains(column) { add(oid, value, 1) { $0.pHC[col] = $1 } }
         }
         return out
+    }
+
+    /// How much a Counter32 went up between two readings: past 4,294,967,295 it starts again at
+    /// 0 (RFC 2578 §7.1.6) — a 1 Gb/s port's ifInUcastPkts does that in about an hour at full
+    /// rate. A smaller value was read as "counters cleared" (the walk's totals) and the wrap's
+    /// discards were lost or the rate taken over all time. A wrap needs the earlier reading in
+    /// the counter's upper half and the new one in its lower half; anything else smaller is a
+    /// `clear counters` (nil).
+    static func delta32(_ now: UInt64, _ before: UInt64) -> UInt64? {
+        if now >= before { return now - before }
+        let half: UInt64 = 1 << 31
+        guard before <= UInt64(UInt32.max), before >= half, now < half else { return nil }
+        return now + (UInt64(UInt32.max) + 1) - before
+    }
+
+    /// Packets through one direction between two walks: the Counter64 columns when both walks
+    /// have them (they never wrap: smaller means cleared), else the Counter32 ones, column by column.
+    static func packetDelta(_ now: PortFlow, _ before: PortFlow) -> UInt64? {
+        if !now.pHC.isEmpty, Set(now.pHC.keys) == Set(before.pHC.keys) {
+            var sum: UInt64 = 0
+            for (c, v) in now.pHC { guard let b = before.pHC[c], v >= b else { return nil }; sum &+= v - b }
+            return sum
+        }
+        if !now.p32.isEmpty, Set(now.p32.keys) == Set(before.p32.keys) {
+            var sum: UInt64 = 0
+            for (c, v) in now.p32 { guard let b = before.p32[c], let d = delta32(v, b) else { return nil }; sum &+= d }
+            return sum
+        }
+        return nil
     }
 
     /// "12.5" / "340": discards per 10,000 packets.
@@ -2165,7 +2305,13 @@ nonisolated extension FindingRules {
         guard let cur = counted.last else { return [] }
         let prev = counted.count >= 2 ? counted[counted.count - 2] : nil
         let now = portFlows(cur.values)
-        let before = prev.map { portFlows($0.values) }
+        // A device that restarted between the walks cleared its counters: smaller values are
+        // then a new start, not a wrap (its uptime is shorter than the time between the walks).
+        let restarted: Bool = {
+            guard let p = prev, let up = cur.sysUpTime else { return false }
+            return Double(up) / 100 < cur.taken.timeIntervalSince(p.taken)
+        }()
+        let before = restarted ? nil : prev.map { portFlows($0.values) }
         let dirWord = ["in", "out"]
         var growing: [(text: String, weight: Double)] = []
         var totals: [(text: String, weight: Double)] = []
@@ -2177,11 +2323,10 @@ nonisolated extension FindingRules {
                 // Per 10,000 packets through the port (a received packet that was discarded is not
                 // in ifInUcastPkts; one that was to be sent is in ifOutUcastPkts).
                 func rate(_ d: UInt64, _ p: UInt64) -> Double { Double(d) / Double(max(1, p &+ (dir == 0 ? d : 0))) * 10_000 }
-                if let b = before?[idx]?[dir], let d0 = b.discards, disc >= d0 {
-                    let d = disc - d0
+                if let b = before?[idx]?[dir], let d0 = b.discards, let d = delta32(disc, d0) {
                     guard d > 0 else { continue }
-                    if let p1 = pkts, let p0 = b.packets, p1 >= p0 {
-                        let r = rate(d, p1 - p0)
+                    if let dp = packetDelta(flows[dir], b) {
+                        let r = rate(d, dp)
                         if r >= discardRate { growing.append(("\(n) \(dirWord[dir]) \(rateText(r)) per 10,000 packets (+\(Format.count(Int(d))))", r)) }
                     } else if d >= discardGrowth {
                         growing.append(("\(n) \(dirWord[dir]) +\(Format.count(Int(d)))", Double(d)))

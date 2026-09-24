@@ -895,9 +895,9 @@ final class Round13Tests: XCTestCase {
         let dir = Round12Tests.testsDir.appending(path: "corpus")
         let other = try String(contentsOf: dir.appending(path: "other.log"), encoding: .utf8).split(whereSeparator: \.isNewline).map(String.init)
         let forti = try String(contentsOf: dir.appending(path: "fortigate.log"), encoding: .utf8).split(whereSeparator: \.isNewline).map(String.init)
-        XCTAssertEqual(other.count, 38)
+        XCTAssertEqual(other.count, 53, "round 14 added lines 39–53 (Round14Tests reads them)")
         XCTAssertEqual(forti.count, 10)
-        let read = (other[21...] + forti[8...]).map { LineClassifier.line(parsedLine($0, from: "10.9.9.9")).map { "\($0)" } ?? "nil" }
+        let read = (other[21..<38] + forti[8...]).map { LineClassifier.line(parsedLine($0, from: "10.9.9.9")).map { "\($0)" } ?? "nil" }
         XCTAssertEqual(read, [
             "routing(proto: \"OSPF\", neighbor: \"10.0.12.2\", up: false)", "routing(proto: \"OSPF\", neighbor: \"10.0.12.2\", up: true)",
             "config(user: Optional(\"netops\"))", "hardware(SheepLog.HardwareKind.psu, recovered: false)",

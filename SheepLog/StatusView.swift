@@ -15,6 +15,7 @@ struct StatusView: View {
     private var primary: String { addresses.first?.address ?? "this Mac" }
 
     var body: some View {
+        let _ = PaneProbe.ran("body.status")
         VStack(spacing: 0) {
             PaneHeader(eyebrow: "Overview", heading: heading, subtitle: subtitle) {
                 Button("Stop all") { model.stopAll() }
@@ -44,6 +45,7 @@ struct StatusView: View {
             LeakProbe.add("Status.addressLoop")
             defer { LeakProbe.remove("Status.addressLoop") }
             while !Task.isCancelled {
+                PaneProbe.ran("status.addressLoop")
                 let fresh = HostAddresses.ipv4()
                 if !HostAddresses.same(fresh, addresses) { addresses = fresh }
                 try? await Task.sleep(for: .seconds(HostAddresses.cacheSeconds))

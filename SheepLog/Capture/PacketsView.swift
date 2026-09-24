@@ -16,6 +16,7 @@ struct PacketsView: View {
     }
 
     var body: some View {
+        let _ = PaneProbe.ran("body.packets")
         VStack(spacing: 0) {
             PacketsHeader(interfaces: interfaces)
                 .paneColumn()
@@ -37,7 +38,11 @@ struct PacketsView: View {
             }
         }
         .paneKeyCommands(copy: { table.copySelectedRows() })
-        .onAppear { PacketsDemo.run(table: table) }
+        .onAppear {
+            table.reattach()
+            PacketsDemo.run(table: table)
+        }
+        .onDisappear { table.detach() }
         .task {
             // Off the main thread (pcap_findalldevs walks every interface), and again every few
             // seconds while the pane is open so a cable plugged in / a VPN coming up shows in the
@@ -45,6 +50,7 @@ struct PacketsView: View {
             LeakProbe.add("Packets.interfaceLoop")
             defer { LeakProbe.remove("Packets.interfaceLoop") }
             while !Task.isCancelled {
+                PaneProbe.ran("packets.interfaceLoop")
                 let fresh = await Task.detached(priority: .utility) { CaptureEngine.interfaces(maxAge: 0) }.value
                 if fresh != interfaces { interfaces = fresh }
                 try? await Task.sleep(for: .seconds(5))
@@ -862,9 +868,31 @@ final class PacketTableController: NSObject, ObservableObject {
         var rightAligned: Bool { self == .no || self == .len || self == .vlan }
     }
 
+    /// Between the pane's disappearing and its next appearance: no store, capture, scroll or
+    /// time-zone subscription. A pane whose window closed before SwiftUI tore it down kept its
+    /// controller, which re-read the store on every ingest for as long as the view lived.
+    private(set) var detached = false
+    private weak var scrollView: NSScrollView?
+
+    /// The pane left: stop following the store.
+    func detach() {
+        detached = true
+        subscriptions.removeAll()
+    }
+
+    /// The pane is back (same controller): follow the store again, from where it is now.
+    func reattach() {
+        guard detached else { return }
+        detached = false
+        guard let tv = tableView, let scroll = scrollView else { return }
+        attach(tv, scrollView: scroll)
+    }
+
     func attach(_ tv: PacketNSTableView, scrollView: NSScrollView) {
         tableView = tv
+        self.scrollView = scrollView
         subscriptions.removeAll()
+        guard !detached else { return }
         store.objectWillChange
             .sink { [weak self] _ in self?.scheduleRefresh() }
             .store(in: &subscriptions)
@@ -910,11 +938,13 @@ final class PacketTableController: NSObject, ObservableObject {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.refreshScheduled = false
+            guard !self.detached else { return }
             self.refresh()
         }
     }
 
     private func refresh() {
+        PaneProbe.ran("packets.refresh")
         guard let tv = tableView else { return }
         let count = store.visible.count
         if store.generation != shownGeneration || count < shownCount {

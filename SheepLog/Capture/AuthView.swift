@@ -121,6 +121,7 @@ struct AuthView: View {
     private static let demoSelect = CommandLine.value(after: "-demoAuthSelect")
 
     var body: some View {
+        let _ = PaneProbe.ran("body.auth")
         VStack(alignment: .leading, spacing: 0) {
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 PaneHeader(eyebrow: "Capture", heading: heading, subtitle: subtitle(now: context.date)) {
@@ -155,6 +156,7 @@ struct AuthView: View {
     }
 
     private func appeared() {
+        PaneProbe.ran("auth.appeared")
         // `-demoPane auth -demoPcap <file>`: the Packets pane (which opens it) never appeared.
         if store.fileURL == nil, store.packets.isEmpty, DemoFlags.openPcap() {
             AppModel.shared.mainPane = .auth
@@ -164,6 +166,7 @@ struct AuthView: View {
     }
 
     private func disappeared() {
+        PaneProbe.ran("auth.disappeared")
         visible = false
         scheduledTask?.cancel(); scheduledTask = nil
         analysisTask?.cancel(); analysisTask = nil

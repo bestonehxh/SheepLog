@@ -588,7 +588,10 @@ final class FakeAgent: @unchecked Sendable {
     private let fd: Int32
     private let lock = NSLock()
     private var stopped = false
-    private let mib: [VarBind]
+    private var _mib: [VarBind]
+    /// The objects it answers with (in OID order); replaceable between requests (counters
+    /// that moved on between two walks).
+    var mib: [VarBind] { get { locked { _mib } } set { locked { _mib = newValue } } }
     private var started = Date()
     private var _timeBase: UInt32 = 5_000
     private var _boots: UInt32 = 3
@@ -662,7 +665,7 @@ final class FakeAgent: @unchecked Sendable {
     private func locked<T>(_ f: () -> T) -> T { lock.lock(); defer { lock.unlock() }; return f() }
 
     init(mib: [VarBind]) throws {
-        self.mib = mib
+        self._mib = mib
         let sock = socket(AF_INET, SOCK_DGRAM, 0)
         var a = sockaddr_in(sin_len: UInt8(MemoryLayout<sockaddr_in>.size), sin_family: sa_family_t(AF_INET), sin_port: 0,
                             sin_addr: in_addr(s_addr: inet_addr("127.0.0.1")), sin_zero: (0, 0, 0, 0, 0, 0, 0, 0))

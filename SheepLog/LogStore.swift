@@ -866,7 +866,11 @@ final class LogStore: ObservableObject {
         exportNote = nil
         await settle()
         let rows = exportRows
-        let failure = await Task.detached(priority: .userInitiated) { Self.writeExport(rows, csv: csv, to: url) }.value
+        PendingWrites.begin()          // ⌘Q waits for the write
+        let failure = await Task.detached(priority: .userInitiated) {
+            defer { PendingWrites.end() }
+            return Self.writeExport(rows, csv: csv, to: url)
+        }.value
         isExporting = false
         if failure == nil {
             exportNote = "Exported \(Format.count(rows.count)) \(rows.count == 1 ? "line" : "lines") to \(url.lastPathComponent)"

@@ -254,7 +254,7 @@ final class CorpusTests: XCTestCase {
         // Aruba AOS-CX
         await expect(s, #"cx "LOG_CRIT" OR "LOG_ALERT""#, ["arubacx:3", "arubacx:4"])
         await expect(s, "vendor:aos-cx sev:<=err", ["arubacx:3", "arubacx:4", "arubacx:5"])
-        await expect(s, "host:CX6300-CORE- f:module=AMM -lldp", ["arubacx:1", "arubacx:6"])
+        await expect(s, "host:CX6300-CORE- f:module=AMM -lldp", ["arubacx:1", "arubacx:6", "arubacx:8", "arubacx:9"])   // 8, 9: round 14's SD lines
         // Aruba AOS 8 / IAP
         await expect(s, "vendor:iap sev:<=warn", ["arubaos:1", "arubaos:4", "arubaos:5", "arubaos:7", "arubaos:9"])
         await expect(s, "f:username=alice", ["arubaos:0"])
