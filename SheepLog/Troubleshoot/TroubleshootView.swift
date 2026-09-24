@@ -19,6 +19,8 @@ final class TroubleshootModel: ObservableObject {
     /// The client report on screen (a sheet).
     @Published var report: ClientReport?
     @Published private(set) var buildingReport = false
+    /// Said instead of opening an empty pane: the evidence of a finding has rolled out of memory.
+    @Published var jumpNotice: String?
 
     private(set) var snmpHistory: [SNMPSnapshot] = []
     private var storeSinks: [AnyCancellable] = []
@@ -111,6 +113,7 @@ final class TroubleshootModel: ObservableObject {
         // user read the Log, a port flapping now was invisible here until Resume.
         if app.logs.paused { input.held = app.logs.heldEntries }
         input.packets = app.packets.packets
+        input.packetEpoch = app.packets.epoch
         input.snmp = snmpHistory
         input.counters = EngineCounters(logCount: app.logs.entries.count, logLimit: app.logs.limit,
                                         logDropped: app.logs.dropped, logLost: app.logs.lost,
@@ -144,6 +147,7 @@ final class TroubleshootModel: ObservableObject {
         guard mine == token, !Task.isCancelled else { return }
         let applied = Monotonic.now()
         self.result = result
+        jumpNotice = nil
         analysing = false
         analysedAt = Date()
         mainThreadCost(Monotonic.now() - applied)
@@ -155,13 +159,35 @@ final class TroubleshootModel: ObservableObject {
     private func mainThreadCost(_ s: Double) { longestMainThreadCost = max(longestMainThreadCost, s) }
     func resetMainThreadCost() { longestMainThreadCost = 0 }
 
+    /// An evidence button: the pane on it — or, when what it points at has rolled out of
+    /// memory since the analysis, a note here instead of an empty (or another) pane.
+    func show(_ e: Evidence) {
+        switch TroubleshootJump.show(e, epoch: result?.packetEpoch) {
+        case .gone(let text): jumpNotice = text
+        default: jumpNotice = nil
+        }
+    }
+
     // MARK: SNMP results
 
     /// Keeps the Test pane's current results (a new walk, or the first look at this pane).
     func recordSNMP() {
         let m = SNMPTestModel.shared
-        guard !m.rows.isEmpty || !m.interfaces.isEmpty else { return }
-        add(Self.snapshot(host: m.host.trimmingCharacters(in: .whitespaces), rows: m.rows, interfaces: m.interfaces, taken: Date()))
+        guard let snap = Self.snapshot(of: m.lastFinished, rows: m.rows, interfaces: m.interfaces, taken: Date()) else { return }
+        add(snap)
+    }
+
+    /// The Test pane's results as one device's snapshot — under the host the run asked (the form
+    /// may name another by now), only when it succeeded (a failed run leaves the previous run's
+    /// rows on screen), with the ports only when the run was the Interfaces walk (they stay on
+    /// screen through later runs: a Quick test of another switch was recorded with the first
+    /// one's ports, and a GET of the same one compared its walk with itself).
+    nonisolated static func snapshot(of run: SNMPTestModel.FinishedRun?, rows: [VarBindRow],
+                                     interfaces: [InterfaceRow], taken: Date) -> SNMPSnapshot? {
+        guard let run, run.succeeded else { return nil }
+        let ports = run.label == "Interfaces" ? interfaces : []
+        guard !rows.isEmpty || !ports.isEmpty else { return nil }
+        return snapshot(host: run.host.trimmingCharacters(in: .whitespaces), rows: rows, interfaces: ports, taken: taken)
     }
 
     func add(_ snap: SNMPSnapshot) {
@@ -213,11 +239,72 @@ final class TroubleshootModel: ObservableObject {
 
 @MainActor
 enum TroubleshootJump {
-    static func show(_ e: Evidence) {
+    enum Outcome: Equatable {
+        case shown
+        /// Some of it rolled out; the pane shows the rest.
+        case partly(present: Int, of: Int)
+        /// None of it is in memory any more: no pane was opened.
+        case gone(String)
+    }
+
+    /// Opens the pane on `e` unless every line / frame / conversation of it has rolled out of
+    /// memory (or the capture was cleared since the analysis: `epoch` is the packet store's at
+    /// analysis time) — then says so and opens nothing. A log filter over lines that are gone
+    /// showed an empty Log pane, or the device's newer lines as if they were the evidence.
+    @discardableResult
+    static func show(_ e: Evidence, epoch: Int? = nil) -> Outcome {
+        let presence = present(e, epoch: epoch)
+        if let p = presence, p.present == 0 { return .gone(goneText(e, total: p.total)) }
         switch e.kind {
         case .logLines, .traps: log(e.query)
         case .packets: packets(e.query)
-        case .flows: if let f = e.flows.first { flow(f) }
+        case .flows: if let f = e.flows.first(where: { flowPresent($0, epoch: epoch) }) ?? e.flows.first { flow(f) }
+        }
+        if let p = presence, p.present < p.total { return .partly(present: p.present, of: p.total) }
+        return .shown
+    }
+
+    /// How much of the evidence is still in memory; nil when that cannot be told (a filter with
+    /// no ids: a clock or a flood finding).
+    static func present(_ e: Evidence, epoch: Int?) -> (present: Int, total: Int)? {
+        let packets = AppModel.shared.packets
+        let sameCapture = epoch.map { $0 == packets.epoch } ?? true
+        switch e.kind {
+        case .logLines, .traps:
+            guard !e.ids.isEmpty else { return nil }
+            return (AppModel.shared.logs.countPresent(ids: e.ids), Set(e.ids).count)
+        case .packets:
+            guard !e.ids.isEmpty else { return nil }
+            let ids = Set(e.ids)
+            return (sameCapture ? ids.filter { packets.contains(id: $0) }.count : 0, ids.count)
+        case .flows:
+            guard !e.flows.isEmpty else { return nil }
+            return (e.flows.filter { flowPresent($0, epoch: epoch) }.count, e.flows.count)
+        }
+    }
+
+    /// Some frame of the conversation is still in the ring (frames leave oldest first).
+    static func flowPresent(_ f: FlowRef, epoch: Int?) -> Bool {
+        let packets = AppModel.shared.packets
+        if let epoch, epoch != packets.epoch { return false }
+        guard let first = packets.packets.first?.id else { return false }
+        return (f.lastPacketID ?? f.packetID) >= first
+    }
+
+    static func goneText(_ e: Evidence, total: Int) -> String {
+        switch e.kind {
+        case .logLines, .traps:
+            let what = e.kind == .traps ? "trap\(total == 1 ? "" : "s")" : "log line\(total == 1 ? "" : "s")"
+            let logs = AppModel.shared.logs
+            return "\(total == 1 ? "This" : "These \(Format.count(total))") \(what) of the finding \(total == 1 ? "has" : "have") rolled out of memory "
+                + "(the log keeps the newest \(Format.count(logs.limit)) lines" + (logs.entries.isEmpty ? " — it was cleared" : "") + "). "
+                + "The disk log (Settings) keeps every line."
+        case .packets:
+            return "\(total == 1 ? "This packet" : "These \(Format.count(total)) packets") of the finding \(total == 1 ? "is" : "are") no longer in memory: "
+                + "the capture rolled past \(total == 1 ? "it" : "them") or was cleared. Save captures you want to keep (Packets ▸ Save)."
+        case .flows:
+            return "\(total == 1 ? "This conversation" : "These \(total) conversations") of the finding \(total == 1 ? "is" : "are") no longer in memory: "
+                + "the capture rolled past \(total == 1 ? "it" : "them") or was cleared."
         }
     }
 
@@ -259,13 +346,11 @@ enum TroubleshootJump {
 
 struct TroubleshootView: View {
     @ObservedObject private var model = TroubleshootModel.shared
-    @State private var category: FindingCategory?
-    @State private var filterText = ""
+    /// Chip, text, Problems only and time range (`TroubleshootFilter`: the list is their intersection).
+    @State private var filter = TroubleshootFilter()
     @State private var clientText = ""
-    @State private var problemsOnly = false
     @State private var expanded: Set<String> = []
     @State private var timelineShown = true
-    @State private var range: ClosedRange<Date>?
     @State private var paneWidth: CGFloat = 0
     @State private var scrollTarget: String?
     @FocusState private var filterFocused: Bool
@@ -333,15 +418,13 @@ struct TroubleshootView: View {
     private var heading: String {
         guard model.result != nil else { return model.analysing ? "Looking at what SheepLog has…" : "Troubleshoot" }
         if nothingToRead { return "Nothing to troubleshoot yet." }
-        let bad = findings.filter { $0.severity == .bad }.count
-        let warn = findings.filter { $0.severity == .warn }.count
-        guard bad + warn > 0 else { return "Nothing wrong that SheepLog can see." }
-        var parts: [String] = []
-        if bad > 0 { parts.append("\(Format.count(bad)) problem\(bad == 1 ? "" : "s")") }
-        if warn > 0 { parts.append("\(Format.count(warn)) warning\(warn == 1 ? "" : "s")") }
-        let devices = Set(findings.filter { $0.severity >= .warn }.compactMap(\.device))
-        let tail = devices.count == 1 ? " on \(devices.first!)." : (devices.count > 1 ? " across \(devices.count) devices." : ".")
-        return parts.joined(separator: ", ") + tail
+        return TroubleshootFilter.heading(findings, range: filter.range, wide: wide)
+    }
+
+    /// The data covers more than a day: times of the range carry their day.
+    private var wide: Bool {
+        guard let r = model.result else { return false }
+        return TroubleshootFilter.wide(summary: r.summary, timeline: r.timeline)
     }
 
     private func subtitle(now: Date) -> String {
@@ -383,7 +466,7 @@ struct TroubleshootView: View {
             Button { model.start() } label: { Label("Re-analyse", systemImage: "arrow.clockwise") }
                 .disabled(model.analysing)
                 .help("Run every check again now")
-            Toggle(isOn: $problemsOnly) { Label("Problems only", systemImage: "exclamationmark.triangle") }
+            Toggle(isOn: $filter.problemsOnly) { Label("Problems only", systemImage: "exclamationmark.triangle") }
                 .toggleStyle(.button)
                 .help("Hide notes; show problems and warnings only")
             Button { exportReport() } label: { Label("Export report…", systemImage: "square.and.arrow.up") }
@@ -423,9 +506,8 @@ struct TroubleshootView: View {
         Rectangle().fill(Theme.hairline).frame(width: 0.5, height: 18)
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 4) {
-                chip(nil, "All", count: baseRows.count)
-                ForEach(categoriesPresent, id: \.self) { c in
-                    chip(c, c.label, count: baseRows.filter { $0.category == c }.count)
+                ForEach(filter.chips(findings)) { chip in
+                    self.chip(chip.category, chip.category?.label ?? "All", count: chip.count)
                 }
             }
             .padding(.vertical, 2)
@@ -439,14 +521,14 @@ struct TroubleshootView: View {
                 LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing).frame(width: 18)
             }
         }
-        FilterField(text: $filterText, prompt: "Filter findings", mono: false,
+        FilterField(text: $filter.text, prompt: "Filter findings", mono: false,
                     help: "Matches titles, details, devices and clients as you type. ⌘F to focus, Esc to clear", focus: $filterFocused)
             .frame(width: paneWidth > 0 && paneWidth < 900 ? 130 : 190)
     }
 
     private func chip(_ c: FindingCategory?, _ title: String, count: Int) -> some View {
-        let selected = category == c
-        return Button { category = c } label: {
+        let selected = filter.category == c
+        return Button { filter.category = c } label: {
             HStack(spacing: 4) {
                 Text(title).font(.system(size: 11.5, weight: selected ? .semibold : .regular))
                 Text(Format.count(count)).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(selected ? Theme.accent : Theme.faintText)
@@ -468,36 +550,7 @@ struct TroubleshootView: View {
 
     // MARK: Filtering
 
-    /// Before the category chip, the text filter and the time range (the chips count these).
-    private var baseRows: [Finding] {
-        findings.filter { !problemsOnly || $0.severity >= .warn }
-    }
-
-    private var categoriesPresent: [FindingCategory] {
-        let present = Set(baseRows.map(\.category))
-        return FindingCategory.allCases.filter { present.contains($0) }
-    }
-
-    private var rows: [Finding] {
-        let needle = filterText.trimmingCharacters(in: .whitespaces).lowercased()
-        return baseRows.filter { f in
-            if let category, f.category != category { return false }
-            if let range, f.lastSeen < range.lowerBound || f.firstSeen > range.upperBound { return false }
-            guard !needle.isEmpty else { return true }
-            return f.title.lowercased().contains(needle) || f.detail.lowercased().contains(needle)
-                || (f.device?.lowercased().contains(needle) ?? false) || (f.client?.lowercased().contains(needle) ?? false)
-                || f.category.label.lowercased().contains(needle)
-        }
-    }
-
-    private var scopeText: String? {
-        var parts: [String] = []
-        if let category { parts.append(category.title) }
-        if problemsOnly { parts.append("problems and warnings only") }
-        if let range { parts.append("\(FText.clock(range.lowerBound))–\(FText.clock(range.upperBound))") }
-        if !filterText.trimmingCharacters(in: .whitespaces).isEmpty { parts.append("matching “\(filterText)”") }
-        return parts.isEmpty ? nil : parts.joined(separator: ", ")
-    }
+    private var rows: [Finding] { filter.rows(findings) }
 
     // MARK: Timeline
 
@@ -525,14 +578,14 @@ struct TroubleshootView: View {
                     .foregroundStyle(Theme.faintText)
                     .lineLimit(1)
                 Spacer(minLength: 0)
-                if range != nil {
-                    Button("Clear range") { range = nil }
+                if filter.range != nil {
+                    Button("Clear range") { filter.range = nil }
                         .controlSize(.small)
                 }
             }
             .padding(.horizontal, 2)
             if timelineShown {
-                TimelineStrip(timeline: t, range: $range) { event in
+                TimelineStrip(timeline: t, range: $filter.range) { event in
                     if case .finding(let id) = event.target { reveal(id) } else { TroubleshootJump.go(event.target) }
                 }
             }
@@ -540,10 +593,8 @@ struct TroubleshootView: View {
     }
 
     private func reveal(_ id: String) {
-        if category != nil, findings.first(where: { $0.id == id })?.category != category { category = nil }
-        if !filterText.isEmpty { filterText = "" }
-        if problemsOnly, findings.first(where: { $0.id == id })?.severity == .info { problemsOnly = false }
-        if let f = findings.first(where: { $0.id == id }), let r = range, f.lastSeen < r.lowerBound || f.firstSeen > r.upperBound { range = nil }
+        guard let f = findings.first(where: { $0.id == id }) else { return }
+        filter.reveal(f)
         expanded.insert(id)
         scrollTarget = id
     }
@@ -553,6 +604,18 @@ struct TroubleshootView: View {
     @ViewBuilder private var findingsSection: some View {
         let list = rows
         PaneSection("Findings", note: findingsNote(list.count)) {
+            if let notice = model.jumpNotice {
+                GroupedList {
+                    HStack(alignment: .top, spacing: 8) {
+                        NoteRow(text: notice, systemImage: "clock.badge.exclamationmark", tint: Theme.caution)
+                        Button("Dismiss") { model.jumpNotice = nil }
+                            .controlSize(.small)
+                            .padding(.trailing, 14)
+                            .padding(.top, 8)
+                    }
+                }
+                .padding(.bottom, 8)
+            }
             if model.result == nil {
                 GroupedList { NoteRow(text: model.analysing ? "Analysing…" : "Starting…", systemImage: "hourglass") }
             } else if nothingToRead {
@@ -561,13 +624,14 @@ struct TroubleshootView: View {
                 allClear
             } else if list.isEmpty {
                 GroupedList {
-                    NoteRow(text: "No finding matches the filter\(range != nil ? " in the selected time range" : "").", systemImage: "line.3.horizontal.decrease")
+                    NoteRow(text: "No finding matches the filter\(filter.range != nil ? " in the selected time range" : "").", systemImage: "line.3.horizontal.decrease")
                 }
             } else {
                 GroupedList {
                     ForEach(list) { f in
                         FindingRow(finding: f, expanded: expanded.contains(f.id), toggle: { toggle(f.id) },
-                                   troubleshootClient: { c in clientText = c; model.buildReport(c) })
+                                   troubleshootClient: { c in clientText = c; model.buildReport(c) },
+                                   show: { e in model.show(e) })
                             // The scroll anchor: an `.id` on a GroupedList row itself is taken by
                             // the list's variadic layout and `scrollTo` never finds it.
                             .overlay(alignment: .top) { Color.clear.frame(height: 1).id(f.id) }
@@ -589,7 +653,9 @@ struct TroubleshootView: View {
     private func findingsNote(_ shown: Int) -> String {
         guard !findings.isEmpty else { return "" }
         var s = shown == findings.count ? "\(Format.count(shown)), oldest first" : "\(Format.count(shown)) of \(Format.count(findings.count)) shown"
-        if let range { s += " · \(FText.clock(range.lowerBound))–\(FText.clock(range.upperBound))" }
+        if let range = filter.range {
+            s += " · \(TroubleshootFilter.time(range.lowerBound, wide: wide))–\(TroubleshootFilter.time(range.upperBound, wide: wide))"
+        }
         return s
     }
 
@@ -617,7 +683,9 @@ struct TroubleshootView: View {
 
     private func exportReport() {
         guard let r = model.result else { return }
-        let md = ReportText.findings(rows, summary: r.summary, timeline: r.timeline, heading: heading, scope: scopeText, generated: Date())
+        // What the list shows, and the heading of that: the range's counts, which filters and
+        // range it used, how many of the findings it holds.
+        let md = filter.report(findings, summary: r.summary, timeline: r.timeline, generated: Date())
         let panel = NSSavePanel()
         panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]
         panel.nameFieldStringValue = "SheepLog-troubleshoot-\(Format.compactStamp.string(from: Date())).md"
@@ -652,6 +720,8 @@ struct FindingRow: View {
     let expanded: Bool
     let toggle: () -> Void
     let troubleshootClient: (String) -> Void
+    /// An evidence button: the Log / Packets / Flows pane on it, or a note that it rolled out.
+    var show: (Evidence) -> Void = { _ = TroubleshootJump.show($0) }
     @State private var hovering = false
 
     var body: some View {
@@ -721,7 +791,7 @@ struct FindingRow: View {
             if !finding.evidence.isEmpty || finding.snmpTarget != nil || Self.reportTarget(finding) != nil {
                 WrapLayout(spacing: 6) {
                     ForEach(finding.evidence) { e in
-                        Button { TroubleshootJump.show(e) } label: {
+                        Button { show(e) } label: {
                             Label(e.label, systemImage: Self.symbol(e.kind))
                         }
                         .help(help(e))

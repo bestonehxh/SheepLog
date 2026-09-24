@@ -128,6 +128,18 @@ final class LogStore: ObservableObject {
     /// Lines received while paused, held back from the table (Troubleshoot reads them too: a
     /// paused Log pane is about what the user is reading, not about what the network did).
     var heldEntries: [LogEntry] { pausedQueue }
+
+    /// How many of `ids` are still in memory (in the ring, or held back by Pause).
+    func countPresent(ids: [Int]) -> Int {
+        guard !ids.isEmpty else { return 0 }
+        let want = Set(ids)
+        var n = 0
+        entries.withUnsafeBufferPointer { buf in
+            for e in buf where want.contains(e.id) { n += 1 }
+        }
+        for e in pausedQueue where want.contains(e.id) { n += 1 }
+        return n
+    }
     /// `cost` summed over `entries`.
     private(set) var entryBytes = 0
     /// Addresses not given a Sources row because `maxSources` were already tracked (their

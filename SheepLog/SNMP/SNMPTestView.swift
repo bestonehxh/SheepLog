@@ -179,6 +179,15 @@ final class SNMPTestModel: ObservableObject {
         didSet { interfaces.sort(using: interfaceSort) }
     }
 
+    /// The last run that finished: its target (as asked, not the form's host now), what it was
+    /// and whether it succeeded — what the Troubleshoot pane records its results under.
+    nonisolated struct FinishedRun: Equatable, Sendable {
+        let host: String
+        let label: String
+        let succeeded: Bool
+    }
+    private(set) var lastFinished: FinishedRun?
+
     private var task: Task<Void, Never>?
     private var pending: [VarBind] = []
     private var flushScheduled = false
@@ -659,16 +668,19 @@ final class SNMPTestModel: ObservableObject {
         subtitle = "\(label) — \(Self.display(host: client.target.host, port: client.target.port)) · \(client.credentials.version.label)"
         task = Task { @MainActor [weak self] in
             guard let self else { return }
+            var ok = true
             do {
                 try await body(client, self)
             } catch {
                 // Replaced by a newer operation: that one owns the form now.
                 guard self.runID == run else { return }
+                ok = false
                 self.flushPending()
                 let e = (error as? SNMPError) ?? (error is CancellationError ? .cancelled : .network(error.localizedDescription))
                 self.failed(e, label: label)
             }
             guard self.runID == run else { return }
+            self.lastFinished = FinishedRun(host: client.target.host, label: label, succeeded: ok)
             self.running = nil
             self.task = nil
         }

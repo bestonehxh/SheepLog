@@ -123,6 +123,10 @@ nonisolated struct TCPFlow: Identifiable, Sendable {
     /// Frame id → verdict, for every retransmitted (fast / spurious too, repeated SYNs and
     /// SYN/ACKs included) or out-of-order segment.
     var verdicts: [Int: SegmentVerdict] = [:]
+    /// Segments that carried data, both ways (retransmissions and copies of the same data too).
+    var dataSegments: Int = 0
+    /// The request the longest wait was for ("GET /api/report"), when the application is known.
+    var longestWaitFor: String? = nil
 
     var clientEndpoint: String { TCPFlow.endpoint(client, clientPort) }
     var serverEndpoint: String { TCPFlow.endpoint(server, serverPort) }
@@ -253,7 +257,8 @@ nonisolated enum TCPFlowAnalyzer {
             clientSideDelay: clientDelay, serverSideDelay: serverDelay,
             synRetransmissions: walk.synRetransmissions, outOfOrder: walk.outOfOrder,
             spuriousRetransmissions: walk.spurious, refused: walk.refused, capturedTwice: screened.copies, notes: notes,
-            firstPacketID: ids.0, lastPacketID: ids.1, verdicts: walk.verdicts)
+            firstPacketID: ids.0, lastPacketID: ids.1, verdicts: walk.verdicts, dataSegments: walk.dataSegments,
+            longestWaitFor: walk.longestWaitFor)
     }
 
     /// The group in time order, for captures merged from two points (each packet twice, the
@@ -1228,7 +1233,8 @@ nonisolated extension TCPFlow {
                 longestResponseWait: longestResponseWait, clientSideDelay: clientSideDelay,
                 serverSideDelay: serverSideDelay, synRetransmissions: synRetransmissions, outOfOrder: outOfOrder,
                 spuriousRetransmissions: spuriousRetransmissions, refused: refused, capturedTwice: capturedTwice,
-                notes: notes, firstPacketID: firstPacketID, lastPacketID: lastPacketID, verdicts: verdicts)
+                notes: notes, firstPacketID: firstPacketID, lastPacketID: lastPacketID, verdicts: verdicts,
+                dataSegments: dataSegments, longestWaitFor: longestWaitFor)
     }
 }
 

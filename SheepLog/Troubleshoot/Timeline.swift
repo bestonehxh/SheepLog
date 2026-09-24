@@ -196,7 +196,7 @@ nonisolated enum TimelineBuilder {
             let e = TimelineEvent(id: nextID, time: f.firstTime, end: f.firstTime.addingTimeInterval(f.duration), kind: .flow,
                                   severity: f.health == .bad ? .bad : .warn,
                                   label: "\(f.clientEndpoint) → \(f.serverEndpoint): \(f.reasons.first ?? "")",
-                                  target: .flow(FlowRef(key: f.key, packetID: f.firstPacketID)))
+                                  target: .flow(FlowRef(key: f.key, packetID: f.firstPacketID, lastPacketID: f.lastPacketID)))
             add(captureLane, e, slot(f.firstTime))
             nextID += 1
         }
