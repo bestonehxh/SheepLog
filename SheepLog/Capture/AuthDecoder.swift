@@ -9,8 +9,10 @@ import Foundation
 // frame gives a shorter answer, never a crash.
 
 nonisolated enum AuthDecoder {
-    /// The Packets-pane filter that keeps only what the Authentication pane reads.
-    static let packetFilterPreset = "proto:eapol OR port:1812 OR port:1813 OR proto:dhcp OR proto:dns OR proto:http"
+    /// The Packets-pane filter that keeps only what the Authentication pane reads — RADIUS on
+    /// every port `isRADIUSPort` reads (the legacy 1645 / 1646 and CoA 3799 were decoded into
+    /// attempts but hidden by "Auth packets").
+    static let packetFilterPreset = "proto:eapol OR port:1812 OR port:1813 OR port:1645 OR port:1646 OR port:3799 OR proto:dhcp OR proto:dns OR proto:http"
 
     static let eapolEtherType: UInt16 = 0x888E
 
@@ -287,6 +289,8 @@ nonisolated enum AuthDecoder {
         var noncePresent: Bool
         var micPresent: Bool
         var keyDataLength: Int
+        /// The frame holds the whole nonce field (a short snap length or a wrong EAPOL length cuts it).
+        var nonceCaptured = true
 
         var descriptorVersion: Int { Int(info & 0x0007) }
         var pairwise: Bool { info & 0x0008 != 0 }
@@ -314,6 +318,9 @@ nonisolated enum AuthDecoder {
             if pairwise {
                 if ack { return mic ? .m3 : .m1 }
                 guard mic else { return .unknown }
+                // Cut before the nonce: 2/4 or 4/4 is not known — only the secure bit (set in an RSN
+                // 4/4, never in a 2/4) says 4/4. Read as 4/4, a cut 2/4 made a wrong PSK "Accept".
+                guard nonceCaptured else { return secure ? .m4 : .unknown }
                 if secure && keyDataLength == 0 { return .m4 }
                 return noncePresent ? .m2 : .m4
             }
@@ -375,7 +382,7 @@ nonisolated enum AuthDecoder {
             let mic = k.has(77, 16) ? k.slice(77, 16) : []
             f.key = EAPOLKey(descriptor: d, info: k.u16(1), keyLength: Int(k.u16(3)), replayCounter: k.u64(5),
                              noncePresent: nonce.contains { $0 != 0 }, micPresent: mic.contains { $0 != 0 },
-                             keyDataLength: k.has(93, 2) ? Int(k.u16(93)) : 0)
+                             keyDataLength: k.has(93, 2) ? Int(k.u16(93)) : 0, nonceCaptured: k.has(13, 32))
         default:
             break
         }

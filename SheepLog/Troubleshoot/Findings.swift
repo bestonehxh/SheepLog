@@ -141,6 +141,15 @@ nonisolated struct TroubleshootInput: Sendable {
     var now = Date()
     /// Findings computed elsewhere (the Authentication pane's `authProvider`).
     var extra: [Finding] = []
+    /// Lines the paused Log pane holds back (newer than `entries`); `takeHeld()` joins them to
+    /// `entries` off the main actor.
+    var held: [LogEntry] = []
+
+    mutating func takeHeld() {
+        guard !held.isEmpty else { return }
+        entries += held
+        held = []
+    }
 }
 
 nonisolated struct AnalysisSummary: Sendable, Equatable {
@@ -196,6 +205,11 @@ nonisolated enum FindingRules {
     static let chattyUnknown = 500
     static let floodRate = 1_000
     static let recentBoot: UInt32 = 60_000        // ticks = 10 min
+    /// A restart line this soon after a requested reload of the same device is that reload.
+    static let plannedBoot: Double = 1_800
+    /// NXDOMAIN counts as a DNS failure from this many different names (one mistyped name, with
+    /// its search-domain variants, is the user's typo, not the resolver's fault).
+    static let nxNames = 3
 
     static func analyze(_ input: TroubleshootInput, isCancelled: () -> Bool = { false }) -> TroubleshootResult {
         var ctx = RuleContext(input: input)
@@ -236,11 +250,12 @@ nonisolated enum FindingRules {
         return result
     }
 
-    /// The Authentication pane's findings (RADIUS / 802.1X sessions), asked for on the main actor
-    /// before each analysis. EXTENSION POINT: the Authentication pane (`AuthSessions`) sets this
-    /// when it is integrated, e.g. `FindingRules.authProvider = { AuthSessions.findings(from: $0) }`;
-    /// findings it returns should use `category: .auth, source: .auth`.
-    @MainActor static var authProvider: ((PacketStore) -> [Finding])?
+    /// The Authentication pane's findings (RADIUS / 802.1X sessions) of the packets being
+    /// analysed. Read on the main actor, run with the rest of the analysis off it: run on the
+    /// main actor (as it was) it rebuilt every authentication session there before each analysis
+    /// — every 2 s during a live capture. EXTENSION POINT: `AppModel.startup` sets it to
+    /// `AuthFindings.findings(from:)`; findings it returns use `category: .auth, source: .auth`.
+    @MainActor static var authProvider: (@Sendable ([Packet]) -> [Finding])?
 }
 
 // MARK: - Shared state of one analysis
@@ -285,6 +300,9 @@ nonisolated struct RuleContext: Sendable {
     func device(_ address: String, hostname: String, isTrap: Bool) -> String {
         if isTrap { return nameByAddress[address] ?? (hostname.isEmpty ? address : hostname) }
         if !hostname.isEmpty { return hostname }
+        // An address that sends several hostnames (a relay, a stack) cannot name a line that has
+        // none: its most frequent name put another device's port or fan in the finding.
+        if multiHost.contains(address) { return address }
         return nameByAddress[address] ?? address
     }
 
@@ -469,7 +487,7 @@ nonisolated final class Needles: @unchecked Sendable {
 
     private init() {
         let words: [[String]] = [
-            ["link", "-line", "line protocol"],
+            ["link", "-line", "line protocol", "turned into down state", "turned into up state"],
             ["power", "psu", "fan", "temperat", "thermal", "poe", "overheat"],
             ["stp", "topology", "bpdu", "loop", "storm", "spanning", "root bridge"],
             ["neighbo", "adjchg", "adjchange", "nbr"],
@@ -542,7 +560,7 @@ nonisolated enum LogScan {
                 }
             }
             if !isTrap {
-                if e.vendor == .unknown { acc.unknownVendor += 1 }
+                if e.vendor == .unknown, LineClassifier.looksLikeKnownVendor(e.message) { acc.unknownVendor += 1 }
                 if !e.hostname.isEmpty { acc.hostnames[e.hostname, default: 0] += 1 }
             }
             let sec = Int(e.received.timeIntervalSinceReferenceDate)
@@ -585,14 +603,32 @@ nonisolated enum LineClassifier {
         }
     }
 
+    /// A line vendor detection left as "Other" that carries a supported vendor's marks (a
+    /// FortiGate line missing `logid=`, a Huawei `%%01` line in an odd header, an AOS-CX event
+    /// relayed with a prefix): the per-source vendor setting would read its fields. Plain
+    /// RFC 3164 / 5424 lines (Cisco, Linux, a NAS) are "Other" by design — counting them told a
+    /// busy Cisco switch or Linux server its format was unknown.
+    static let vendorMarks = ["devname=", "devid=", "logid=", "%%0", "%%1", "Event|", "CPPM_", "Common.", "product=", "product:",
+                              ",TRAFFIC,", ",THREAT,", ",SYSTEM,", ",CONFIG,", ",GLOBALPROTECT,", "|LOG_"]
+
+    static func looksLikeKnownVendor(_ message: String) -> Bool {
+        message.withCString { c in vendorMarks.contains { strstr(c, $0) != nil } }
+    }
+
     static func line(_ e: LogEntry) -> FactKind? {
         if isSessionLog(e) { return nil }
         return e.message.withCString { c -> FactKind? in
             var bits: UInt8 = 0
-            for g in Needles.shared.groups {
-                for n in g.needles where strcasestr(c, n) != nil {
-                    bits |= 1 << UInt8(g.group)
-                    break
+            // Cisco IOS's own form puts the mnemonic in the program (`%LINK-3-UPDOWN`,
+            // `%BGP-5-ADJCHANGE`) and leaves "Interface Gi0/1, changed state to down" /
+            // "neighbor 203.0.113.1 Up" as the message: the program is screened too (those lines
+            // were never read — a BGP peer that came back stayed "down and has not come back").
+            e.program.withCString { pc in
+                for g in Needles.shared.groups {
+                    for n in g.needles where strcasestr(c, n) != nil || strcasestr(pc, n) != nil {
+                        bits |= 1 << UInt8(g.group)
+                        break
+                    }
                 }
             }
             func hit(_ g: Int) -> Bool { bits & (1 << UInt8(g)) != 0 }
@@ -619,10 +655,10 @@ nonisolated enum LineClassifier {
         var up: Bool?
         if let s = e.field("OperStatus") { up = s.uppercased().hasPrefix("UP") }
         else if CText.hasAny(c, ["link down", "linkdown", "link_down", "link is down", "link status for interface", "off-line",
-                             "changed state to down", "entered the down state", "link failure", "went down"]) {
+                             "changed state to down", "entered the down state", "link failure", "went down", "turned into down state"]) {
             up = CText.hasAny(c, ["link status for interface"]) ? !CText.has(c, " is down") : false
         } else if CText.hasAny(c, ["link up", "linkup", "link_up", "link is up", "on-line", "changed state to up",
-                               "entered the up state", "came up"]) {
+                               "entered the up state", "came up", "turned into up state"]) {
             up = true
         } else if CText.has(c, " is down") {
             up = false
@@ -703,11 +739,12 @@ nonisolated enum LineClassifier {
 
     static func routing(_ e: LogEntry, _ c: UnsafePointer<CChar>) -> FactKind? {
         let proto: String
-        if CText.has(c, "ospf") || CText.contains(e.program, "OSPF") || e.field("module") == "OSPF" { proto = "OSPF" }
-        else if CText.has(c, "bgp") { proto = "BGP" }
-        else if CText.has(c, "eigrp") { proto = "EIGRP" }
-        else if CText.hasAny(c, ["isis", "is-is"]) { proto = "IS-IS" }
-        else if CText.has(c, "bfd") { proto = "BFD" }
+        let p = e.program
+        if CText.has(c, "ospf") || CText.contains(p, "OSPF") || e.field("module") == "OSPF" { proto = "OSPF" }
+        else if CText.has(c, "bgp") || CText.contains(p, "BGP") { proto = "BGP" }
+        else if CText.has(c, "eigrp") || CText.contains(p, "EIGRP") || CText.contains(p, "DUAL") { proto = "EIGRP" }
+        else if CText.hasAny(c, ["isis", "is-is"]) || CText.contains(p, "ISIS") || CText.contains(p, "CLNS") { proto = "IS-IS" }
+        else if CText.has(c, "bfd") || CText.contains(p, "BFD") { proto = "BFD" }
         else { return nil }
         var up: Bool?
         if let s = e.field("NeighborCurrentState") { up = !s.lowercased().hasPrefix("down") && !s.lowercased().hasPrefix("init") }
@@ -1082,20 +1119,39 @@ nonisolated extension FindingRules {
         }
         for (device, raw) in reboots {
             let items = raw.sorted { $0.t < $1.t }
-            let unplanned = items.contains { $0.cold || !$0.planned }
-            let cold = items.contains { $0.cold }
+            // A reload someone asked for is followed by the boot's own lines ("System restarted",
+            // an SNMP cold start): those are the requested restart, not a crash.
+            let explained = items.indices.map { k in
+                items[k].planned || items[..<k].contains { $0.planned && items[k].t.timeIntervalSince($0.t) <= plannedBoot }
+            }
+            let unplanned = items.indices.contains { !explained[$0] }
+            let cold = items.indices.contains { items[$0].cold && !explained[$0] }
+            // Restarts, not lines: a request and its boot's lines, or lines of one boot (a
+            // "System restarted" and the cold start a second later), are one ("3 times in all"
+            // for one reload).
+            var restarts = 0
+            var lastLine: Date?, lastRequest: Date?
+            for it in items {
+                let sameBoot = lastLine.map { it.t.timeIntervalSince($0) <= 120 } ?? false
+                let afterRequest = !it.planned && (lastRequest.map { it.t.timeIntervalSince($0) <= plannedBoot } ?? false)
+                if !sameBoot && !afterRequest { restarts += 1 }
+                if it.planned { lastRequest = it.t }
+                lastLine = it.t
+            }
             let address = items[0].f.address
             out.append(Finding(id: "reboot|\(device)", rule: "device.restart", severity: unplanned ? .warn : .info, category: .config,
                                source: items.allSatisfy { $0.f.isTrap } ? .traps : .logs,
-                               title: "\(device) restarted at \(FText.clock(items.last!.t))\(cold ? " (cold start)" : "")\(items.count > 1 ? ", \(items.count) times in all" : "").",
+                               title: "\(device) restarted at \(FText.clock(items.last!.t))\(cold ? " (cold start)" : "")\(restarts > 1 ? ", \(restarts) times in all" : "").",
                                detail: cold
                                    ? "A cold start means the device lost power or crashed and booted from scratch. Everything behind it was down while it booted."
                                    : (unplanned ? "The restart was not announced as requested by someone. Check whether it crashed (a crash file, show version \"last reload reason\")."
                                                 : "The restart was requested (a reload or reboot command)."),
                                evidence: logEvidence(ids: items.filter { !$0.f.isTrap }.map(\.f.id), trapIDs: items.filter { $0.f.isTrap }.map(\.f.id),
-                                                     query: ctx.hostTerm(address: address, name: device) + " (restart OR reboot OR reload OR boot)",
+                                                     // Every word the lines were picked by ("cold start" lines were hidden).
+                                                     query: ctx.hostTerm(address: address, name: device)
+                                                        + " (restart OR reboot OR reload OR boot OR coldstart OR warmstart OR \"cold start\" OR \"warm start\" OR \"power on\" OR \"power-on\" OR \"power cycle\")",
                                                      trapQuery: "host:\(address) (app:coldStart OR app:warmStart)"),
-                               firstSeen: items[0].t, lastSeen: items.last!.t, count: items.count,
+                               firstSeen: items[0].t, lastSeen: items.last!.t, count: restarts,
                                device: device, deviceAddress: address,
                                nextSteps: ["Check the reload reason on \(device) (show version / show system) and its power source (UPS, PDU).",
                                            "Quick test SNMP on \(device): sysUpTime says when it came back."],
@@ -1163,8 +1219,8 @@ nonisolated extension FindingRules {
             }
             if acc.unknownVendor >= chattyUnknown, acc.trapCount < acc.count / 2 {
                 out.append(Finding(id: "vendor|\(addr)", rule: "syslog.vendor", severity: .info, category: .config, source: .logs,
-                                   title: "\(name) sent \(Format.count(acc.unknownVendor)) lines in a format SheepLog does not know.",
-                                   detail: "Only the syslog header of these lines is read (vendor “Other”), so their fields — ports, users, addresses — cannot be filtered or used by these checks.",
+                                   title: "\(name) sent \(Format.count(acc.unknownVendor)) lines that look like a supported vendor's but were not recognised.",
+                                   detail: "They carry a supported vendor's marks (FortiOS, Huawei, Aruba, Palo Alto, Check Point, ClearPass) but vendor detection left them “Other”: only the syslog header is read, so their fields — ports, users, addresses — cannot be filtered or used by these checks.",
                                    evidence: [Evidence(kind: .logLines, label: "\(Format.count(acc.unknownVendor)) log lines", ids: [],
                                                        query: ctx.hostTerm(address: addr, name: name) + " vendor:other")],
                                    firstSeen: acc.recvMin, lastSeen: acc.recvMax, count: acc.unknownVendor,
@@ -1316,6 +1372,9 @@ nonisolated struct DHCPFact: Sendable {
     let lease: UInt32?
     let yourIP: String?
     let vlan: UInt16?
+    /// Between a relay agent and the server (UDP 67 → 67): a copy of a client's message or of
+    /// the server's answer on its way to the relay, not what the client's segment saw.
+    var relayHop = false
 }
 
 nonisolated struct DNSFact: Sendable {
@@ -1346,6 +1405,8 @@ nonisolated struct ICMPFact: Sendable {
     let type: UInt8
     let router: String
     let destination: String
+    /// Where the expired / redirected packet was going (the quoted IPv4 header).
+    var probeDestination: String? = nil
 }
 
 nonisolated enum PacketScan {
@@ -1398,7 +1459,14 @@ nonisolated enum PacketScan {
             return
         }
         if let icmp = d.icmp, let ip = d.ip, ip.version == 4, icmp.type == 11 || icmp.type == 5 {
-            out.icmp.append(ICMPFact(id: p.id, time: p.timestamp, type: icmp.type, router: ip.source, destination: ip.destination))
+            var inner: String?
+            let o = d.payloadOffset
+            if o > 0, p.data.count >= o + 20 {
+                let b = p.data.startIndex + o
+                if p.data[b] >> 4 == 4 { inner = "\(p.data[b + 16]).\(p.data[b + 17]).\(p.data[b + 18]).\(p.data[b + 19])" }
+            }
+            out.icmp.append(ICMPFact(id: p.id, time: p.timestamp, type: icmp.type, router: ip.source, destination: ip.destination,
+                                     probeDestination: inner))
             return
         }
         switch d.app {
@@ -1406,7 +1474,8 @@ nonisolated enum PacketScan {
             let opts = dhcpOptions(p.data, d.payloadOffset)
             out.dhcp.append(DHCPFact(id: p.id, time: p.timestamp, type: type, clientMAC: mac ?? "?", xid: opts.xid,
                                      server: opts.server ?? (type == "Offer" || type == "ACK" || type == "NAK" ? d.ip?.source : nil),
-                                     lease: opts.lease, yourIP: yi, vlan: d.vlan))
+                                     lease: opts.lease, yourIP: yi, vlan: d.vlan,
+                                     relayHop: d.udp.map { $0.sourcePort == 67 && $0.destinationPort == 67 } ?? false))
         case .dns(let q, let isResponse, _, let rcode)?:
             guard d.protocolName == "DNS", let ip = d.ip, let udp = d.udp else { return }
             let txid = p.data.count >= d.payloadOffset + 2
@@ -1459,7 +1528,8 @@ nonisolated extension FindingRules {
         let offers = facts.filter { $0.type == "Offer" }
         // Discovers without an Offer within 10 s, per client, grouped by VLAN.
         var byClient: [String: [DHCPFact]] = [:]
-        for f in facts where f.type == "Discover" { byClient[f.clientMAC, default: []].append(f) }
+        // The client's own Discovers (a relay's copy to the server is the same Discover again).
+        for f in facts where f.type == "Discover" && !f.relayHop { byClient[f.clientMAC, default: []].append(f) }
         struct Stuck { var clients: [String] = []; var discovers: [DHCPFact] = [] }
         var stuck: [UInt16?: Stuck] = [:]
         for (mac, ds) in byClient {
@@ -1491,9 +1561,11 @@ nonisolated extension FindingRules {
                            one ? "Troubleshoot client \(s.clients[0]) to see everything it did." : "Capture on the server side of the relay to see whether the requests arrive."]
             out.append(f)
         }
-        // Two servers answering.
+        // Two servers answering — on the clients' side: the server's answer to a relay and the
+        // relay's to the client are one server (with server-id override the relay even names
+        // itself in option 54).
         var serversByVLAN: [UInt16?: [String: [DHCPFact]]] = [:]
-        for f in facts where f.type == "Offer" || f.type == "ACK" {
+        for f in facts where (f.type == "Offer" || f.type == "ACK") && !f.relayHop {
             if let s = f.server { serversByVLAN[f.vlan, default: [:]][s, default: []].append(f) }
         }
         for (vlan, servers) in serversByVLAN where servers.count >= 2 {
@@ -1563,9 +1635,15 @@ nonisolated extension FindingRules {
             let answered = list.filter(\.answered)
             let noAnswer = list.count - answered.count
             let servfail = answered.filter { $0.rcode == 2 }.count
-            let nx = answered.filter { $0.rcode == 3 }.count
+            // NXDOMAIN for one mistyped name (and its search-domain variants) is the typo; for
+            // many different names it is a zone the resolver lost.
+            let nxQueried = Set(answered.filter { $0.rcode == 3 }.map { $0.f.name.lowercased() })
+            let nxRoots = nxQueried.filter { n in !nxQueried.contains { m in m != n && n.hasPrefix(m + ".") } }
+            let nxCounts = nxRoots.count >= nxNames
+            let nx = nxCounts ? answered.filter { $0.rcode == 3 }.count : 0
             let refused = answered.filter { $0.rcode == 5 }.count
-            let failed = list.filter { !$0.answered || [2, 3, 5].contains($0.rcode) }
+            func bad(_ q: Q1) -> Bool { !q.answered || q.rcode == 2 || q.rcode == 5 || (q.rcode == 3 && nxCounts) }
+            let failed = list.filter(bad)
             let ids = failed.flatMap { [$0.f.id] + ($0.responseID.map { [$0] } ?? []) }
             let one = clients.count == 1
             if answered.isEmpty && list.count >= 3 {
@@ -1585,9 +1663,8 @@ nonisolated extension FindingRules {
             var minutes: [Int: (n: Int, bad: Int)] = [:]
             for q in list {
                 let m = Int(q.f.time.timeIntervalSinceReferenceDate / 60)
-                let bad = !q.answered || [2, 3, 5].contains(q.rcode)
                 minutes[m, default: (0, 0)].n += 1
-                if bad { minutes[m, default: (0, 0)].bad += 1 }
+                if bad(q) { minutes[m, default: (0, 0)].bad += 1 }
             }
             let share = Double(failed.count) / Double(list.count)
             let worst = minutes.filter { $0.value.n >= dnsMinQueries }.max { Double($0.value.bad) / Double($0.value.n) < Double($1.value.bad) / Double($1.value.n) }
@@ -1666,9 +1743,19 @@ nonisolated extension FindingRules {
                                                "Check the VLAN of the port the asking hosts are on."]))
             }
         }
-        // ICMP time exceeded / redirects in bursts.
+        // ICMP time exceeded / redirects in bursts. A traceroute (or mtr, which never stops) gets
+        // time-exceeded from every hop on the way to one destination; a routing loop expires one
+        // host's packets to a destination at the same router every time. Probes answered by two
+        // or more routers are a trace, not a loop.
+        var hopsByProbe: [String: Set<String>] = [:]
+        for i in pk.icmp where i.type == 11 {
+            hopsByProbe["\(i.destination)>\(i.probeDestination ?? "?")", default: []].insert(i.router)
+        }
         var byRouter: [String: [ICMPFact]] = [:]
-        for i in pk.icmp { byRouter["\(i.type)|\(i.router)", default: []].append(i) }
+        for i in pk.icmp {
+            if i.type == 11, (hopsByProbe["\(i.destination)>\(i.probeDestination ?? "?")"]?.count ?? 0) >= 2 { continue }
+            byRouter["\(i.type)|\(i.router)", default: []].append(i)
+        }
         for (key, list) in byRouter {
             let sorted = list.sorted { $0.time < $1.time }
             let redirect = sorted[0].type == 5
@@ -1860,7 +1947,9 @@ nonisolated extension FindingRules {
                 if let r = recent.first, let age = r.sinceChange {
                     detail += " \(names[r.index] ?? "") went down \(FText.duration(Double(age) / 100)) before the walk — that one is new."
                 }
-                out.append(base("operdown", "snmp.operDown", .warn,
+                // Enabled ports with nothing plugged in are every access switch's normal state: a
+                // warning only when one of them lost its link in the last hour.
+                out.append(base("operdown", "snmp.operDown", recent.isEmpty ? .info : .warn,
                                 "\(downs.count) port\(downs.count == 1 ? "" : "s") on \(name) \(downs.count == 1 ? "is" : "are") enabled but down: \(FText.list(list, max: 6)).",
                                 detail, ["Shut unused ports (and put them in an unused VLAN) so real faults stand out.",
                                          recent.isEmpty ? "Check the ports that should be up." : "Check what was connected to \(names[recent[0].index] ?? "") and whether it has power."],

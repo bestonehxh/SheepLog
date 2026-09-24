@@ -107,6 +107,9 @@ final class TroubleshootModel: ObservableObject {
         if snmpHistory.isEmpty { recordSNMP() }
         var input = TroubleshootInput()
         input.entries = app.logs.entries
+        // A paused Log pane holds new lines back from its table, not from the checks: while the
+        // user read the Log, a port flapping now was invisible here until Resume.
+        if app.logs.paused { input.held = app.logs.heldEntries }
         input.packets = app.packets.packets
         input.snmp = snmpHistory
         input.counters = EngineCounters(logCount: app.logs.entries.count, logLimit: app.logs.limit,
@@ -114,7 +117,6 @@ final class TroubleshootModel: ObservableObject {
                                         packetCount: app.packets.packets.count, packetLimit: app.packets.limit,
                                         packetDropped: app.packets.dropped, packetLost: app.packets.lost)
         input.now = nowOverride ?? Date()
-        input.extra = FindingRules.authProvider?(app.packets) ?? []
         return input
     }
 
@@ -124,19 +126,34 @@ final class TroubleshootModel: ObservableObject {
         token += 1
         let mine = token
         analysing = true
+        PaneProbe.troubleshootAnalysisStarted()
+        let started = Monotonic.now()
         let input = currentInput()
+        let auth = FindingRules.authProvider
+        mainThreadCost(Monotonic.now() - started)
         let work = Task.detached(priority: .userInitiated) { () -> TroubleshootResult in
             var input = input
+            input.takeHeld()
             input.flows = TCPFlowAnalyzer.analyze(input.packets) { Task.isCancelled }
+            if Task.isCancelled { return TroubleshootResult() }
+            input.extra = auth?(input.packets) ?? []
             if Task.isCancelled { return TroubleshootResult() }
             return FindingRules.analyze(input) { Task.isCancelled }
         }
         let result = await withTaskCancellationHandler { await work.value } onCancel: { work.cancel() }
         guard mine == token, !Task.isCancelled else { return }
+        let applied = Monotonic.now()
         self.result = result
         analysing = false
         analysedAt = Date()
+        mainThreadCost(Monotonic.now() - applied)
     }
+
+    /// The longest stretch one analysis held the main actor (reading the stores, publishing the
+    /// result), for tests.
+    private(set) var longestMainThreadCost: Double = 0
+    private func mainThreadCost(_ s: Double) { longestMainThreadCost = max(longestMainThreadCost, s) }
+    func resetMainThreadCost() { longestMainThreadCost = 0 }
 
     // MARK: SNMP results
 
@@ -178,7 +195,11 @@ final class TroubleshootModel: ObservableObject {
         let findings = result?.findings ?? []
         buildingReport = true
         reportTask = Task {
-            let work = Task.detached(priority: .userInitiated) { ClientReport.build(text, input: input, findings: findings) }
+            let work = Task.detached(priority: .userInitiated) { () -> ClientReport? in
+                var input = input
+                input.takeHeld()
+                return ClientReport.build(text, input: input, findings: findings)
+            }
             let built = await withTaskCancellationHandler { await work.value } onCancel: { work.cancel() }
             guard !Task.isCancelled else { return }
             buildingReport = false
@@ -697,7 +718,7 @@ struct FindingRow: View {
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: 760, alignment: .leading)
-            if !finding.evidence.isEmpty || finding.snmpTarget != nil || finding.client != nil {
+            if !finding.evidence.isEmpty || finding.snmpTarget != nil || Self.reportTarget(finding) != nil {
                 WrapLayout(spacing: 6) {
                     ForEach(finding.evidence) { e in
                         Button { TroubleshootJump.show(e) } label: {
@@ -709,7 +730,7 @@ struct FindingRow: View {
                         Button { TroubleshootJump.snmp(host) } label: { Label("SNMP test", systemImage: "antenna.radiowaves.left.and.right") }
                             .help("Open \(host) on the SNMP Test pane")
                     }
-                    if let c = finding.client {
+                    if let c = Self.reportTarget(finding) {
                         Button { troubleshootClient(c) } label: { Label("Troubleshoot \(c)", systemImage: "person.crop.circle.badge.questionmark") }
                             .help("Everything SheepLog holds about \(c)")
                     }
@@ -737,6 +758,13 @@ struct FindingRow: View {
         .padding(.leading, 32)
         .padding(.trailing, 14)
         .padding(.bottom, 12)
+    }
+
+    /// The client a "Troubleshoot …" button can build a report for: a MAC or an IP. A RADIUS
+    /// attempt with no MAC is `user:<name>` — its button could only beep.
+    static func reportTarget(_ f: Finding) -> String? {
+        guard let c = f.client, ClientID.parse(c) != nil else { return nil }
+        return c
     }
 
     static func symbol(_ k: Evidence.Kind) -> String {

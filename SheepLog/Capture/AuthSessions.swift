@@ -132,7 +132,8 @@ nonisolated struct AuthEvent: Identifiable, Sendable {
 
 nonisolated struct AuthSession: Identifiable, Sendable {
     let id: Int
-    /// The client MAC (`aa:bb:cc:dd:ee:ff`), or `user:<name>` when RADIUS carried no MAC.
+    /// The client MAC (`aa:bb:cc:dd:ee:ff`), `user:<name>` when RADIUS carried no MAC, or
+    /// `port:<authenticator MAC>` for a switch port's requests that no supplicant answered.
     let client: String
     /// EAP identity or RADIUS User-Name (a MAC identity is shown as the MAC).
     let user: String?
@@ -193,6 +194,9 @@ nonisolated struct AuthSession: Identifiable, Sendable {
         [vlan.map { "VLAN \($0)" }, role].compactMap { $0 }.joined(separator: " · ")
     }
 
+    /// A switch port's own attempt: its requests went unanswered, no client is known.
+    var isPortOnly: Bool { client.hasPrefix("port:") }
+
     var firstPacketID: Int { packetIDs.min() ?? 0 }
     var lastPacketID: Int { packetIDs.max() ?? 0 }
 
@@ -214,6 +218,11 @@ nonisolated enum AuthSessions {
     static let dhcpGrace: Double = 10
     /// A conversation with no answer for this long before the capture ended has stopped.
     static let stallAfter: Double = 30
+    /// A switch port's EAP-Request Identity unanswered this long: no supplicant there.
+    static let supplicantWait: Double = 5
+
+    /// The client of a port's own attempt (group-addressed requests nobody answered).
+    static func portClient(_ authenticator: String) -> String { "port:" + authenticator }
 
     static func build(_ packets: [Packet]) -> [AuthSession] { build(packets) { false } }
 
@@ -233,10 +242,18 @@ nonisolated enum AuthSessions {
         for k in 1..<obs.count where obs[k].time < obs[k - 1].time { sorted = false; break }
         if !sorted { obs.sort { ($0.time, $0.index) < ($1.time, $1.index) } }
         run.captureEnd = packets.map { $0.timestamp.timeIntervalSince1970 }.max() ?? obs.last!.time
+        // Every client's EAP-Response by id, in time order: whether a group-addressed request
+        // was also answered by another client (the same id on two ports) is known ahead.
+        for o in obs {
+            if case .eapol(let f) = o.frame, let eap = f.eap, eap.isResponse {
+                run.responses[eap.id, default: []].append((o.time, packets[o.index].decoded.sourceMAC))
+            }
+        }
         for (n, o) in obs.enumerated() {
             if n & 0x3FFF == 0, isCancelled() { return [] }
             run.handle(o, packets[o.index])
         }
+        run.finishPorts()
         var sessions: [AuthSession] = []
         for b in run.builders where b.hasAuthContent {
             sessions.append(b.finish(id: sessions.count + 1, run: run))
@@ -291,6 +308,44 @@ nonisolated enum AuthSessions {
         /// Supporting events (DHCP, probes) seen before any session of their client: a captive
         /// session created later takes the ones of the minute before it.
         var recent: [String: [Builder.Raw]] = [:]
+        /// The builders bound to each authenticator MAC (a frame between the two, or a reply to
+        /// its group-addressed request), newest last — a dictionary: a backwards scan of every
+        /// builder per frame was quadratic (10,000 attempts took 7 s). A group-addressed EAP frame
+        /// from the authenticator goes to the one of them whose exchange it continues (EAP ids).
+        var bound: [String: [Int]] = [:]
+        /// Clients that sent EAPOL to the PAE group address with no authenticator known yet, and
+        /// when. On a wired port both sides may address every EAPOL frame to the group: the
+        /// switch's frames then belong to the one client that is talking.
+        var groupTalkers: [String: Double] = [:]
+        /// Group-addressed EAP-Requests no client could be named for yet, per authenticator (a
+        /// switch asking a port whose device has not said anything). The client whose
+        /// EAP-Response carries the request's id takes it; what nobody answers is, at the end, an
+        /// attempt of the port itself: "no supplicant answered".
+        var portFrames: [String: [PortFrame]] = [:]
+        /// Clients' EAP-Responses by EAP id, in time order (filled before the pass).
+        var responses: [UInt8: [(time: Double, client: String)]] = [:]
+
+        /// Another client than `client` answered EAP id `id` between `t0` and `t1`: a request of
+        /// that id then could have been either's.
+        func contested(_ id: UInt8, from t0: Double, to t1: Double, except client: String) -> Bool {
+            guard let list = responses[id] else { return false }
+            var lo = 0, hi = list.count
+            while lo < hi { let mid = (lo + hi) / 2; if list[mid].time < t0 { lo = mid + 1 } else { hi = mid } }
+            var k = lo
+            while k < list.count, list[k].time <= t1 {
+                if list[k].client != client { return true }
+                k += 1
+            }
+            return false
+        }
+
+        struct PortFrame {
+            let frame: AuthDecoder.EAPOLFrame
+            let time: Double
+            let packet: Int
+            let eapID: UInt8
+            let identity: Bool
+        }
 
         // MARK: Attempt selection
 
@@ -301,10 +356,14 @@ nonisolated enum AuthSessions {
         }
 
         /// The builder for an auth packet of `client`, starting a new attempt when this one ends the last.
-        mutating func builder(for client: String, _ trigger: Trigger, at t: Double) -> Int {
+        /// `authenticator`: the AP / switch MAC of an EAPOL frame. Another one than the attempt's means
+        /// the client roamed: EAP state belongs to one authenticator, so what follows is a new attempt
+        /// (the abandoned exchange and the new one were one attempt, named after the second AP).
+        mutating func builder(for client: String, _ trigger: Trigger, at t: Double, authenticator: String? = nil) -> Int {
             if let i = current[client] {
                 var b = builders[i]
-                var split = t - b.last > AuthSessions.idleSplit
+                let roamed = authenticator.map { a in b.nasMAC.map { $0 != a } ?? false } ?? false
+                var split = roamed || t - b.last > AuthSessions.idleSplit
                 if !split {
                     switch trigger {
                     case .eapolStart:
@@ -373,6 +432,11 @@ nonisolated enum AuthSessions {
 
         static let paeGroup: Set<String> = ["01:80:c2:00:00:03", "01:80:c2:00:00:0e", "01:80:c2:00:00:00", "ff:ff:ff:ff:ff:ff"]
 
+        /// A group (multicast / broadcast) MAC: never a client or an authenticator.
+        static func isGroup(_ mac: String) -> Bool {
+            paeGroup.contains(mac) || mac.hasPrefix("01:") || mac.hasPrefix("33:33")
+        }
+
         mutating func eapol(_ f: AuthDecoder.EAPOLFrame, _ o: Obs, _ p: Packet) {
             let src = p.decoded.sourceMAC, dst = p.decoded.destinationMAC
             var fromAuthenticator = false
@@ -384,21 +448,179 @@ nonisolated enum AuthSessions {
             var client = fromAuthenticator ? dst : src
             let authenticator = fromAuthenticator ? src : dst
             guard !client.isEmpty else { return }
-            // A switch sends its EAP-Request Identity to the PAE group address (01:80:c2:00:00:03):
-            // it belongs to the client last seen on that authenticator, if any, else to nobody.
-            if Self.paeGroup.contains(client) || client.hasPrefix("01:") || client.hasPrefix("33:33") {
-                guard let i = builders.indices.last(where: { builders[$0].nasMAC == authenticator
-                                                             && o.time - builders[$0].last <= AuthSessions.idleSplit }) else { return }
-                client = builders[i].client
+            // A switch sends its EAP-Request Identity (on some ports every EAPOL frame) to the
+            // PAE group address (01:80:c2:00:00:03). Whose it is follows from the replies: the
+            // exchange it continues (by EAP id) among the clients bound to that authenticator,
+            // the one client that asked for an exchange (EAPOL-Start), else it waits for the
+            // client whose EAP-Response carries its id — and if nobody answers, it is the port's
+            // own attempt ("no supplicant answered on port …").
+            if Self.isGroup(client) {
+                guard fromAuthenticator, !authenticator.isEmpty, !Self.isGroup(authenticator) else { return }
+                switch groupTarget(f, from: authenticator, at: o.time) {
+                case .client(let c): client = c
+                case .port(let id, let identity):
+                    portFrames[authenticator, default: []].append(
+                        PortFrame(frame: f, time: o.time, packet: p.id, eapID: id, identity: identity))
+                    return
+                case .nobody: return
+                }
             }
-            let trigger: Trigger
-            if f.typeRaw == 1 { trigger = .eapolStart }
-            else if let eap = f.eap, eap.type == 1 { trigger = .identity }
-            else if let key = f.key { trigger = key.message == .m1 ? .keyM1 : .keyOther }
-            else { trigger = .eapOther }
-            let i = builder(for: client, trigger, at: o.time)
-            if !Self.paeGroup.contains(authenticator) { builders[i].nasMAC = authenticator }
+            // A reply to a request that waited for its client: the request joins the client's attempt first.
+            if !fromAuthenticator, let eap = f.eap, eap.isResponse, !portFrames.isEmpty {
+                adoptPortRequest(for: client, answering: eap.id,
+                                 authenticator: Self.isGroup(authenticator) ? nil : authenticator, at: o.time)
+            }
+            let i = builder(for: client, Self.trigger(f), at: o.time, authenticator: Self.isGroup(authenticator) ? nil : authenticator)
+            if !Self.isGroup(authenticator) {
+                bind(i, to: authenticator, at: o.time)
+            } else if !fromAuthenticator, builders[i].nasMAC == nil {
+                if groupTalkers.count >= 64 { groupTalkers = groupTalkers.filter { o.time - $0.value <= AuthSessions.idleSplit } }
+                groupTalkers[client] = o.time
+            }
             builders[i].eapol(f, time: o.time, packet: p.id, fromAuthenticator: fromAuthenticator)
+        }
+
+        static func trigger(_ f: AuthDecoder.EAPOLFrame) -> Trigger {
+            if f.typeRaw == 1 { return .eapolStart }
+            if let eap = f.eap, eap.type == 1 { return .identity }
+            if let key = f.key { return key.message == .m1 ? .keyM1 : .keyOther }
+            return .eapOther
+        }
+
+        mutating func bind(_ i: Int, to authenticator: String, at t: Double) {
+            builders[i].nasMAC = authenticator
+            var list = bound[authenticator] ?? []
+            if list.last != i, !list.contains(i) {
+                if list.count >= 16 { list.removeAll { t - builders[$0].last > AuthSessions.idleSplit } }
+                list.append(i)
+            }
+            bound[authenticator] = list
+            groupTalkers[builders[i].client] = nil
+        }
+
+        enum GroupTarget {
+            case client(String)
+            /// Held for the client that answers it (EAP id), else the port's own attempt.
+            case port(id: UInt8, identity: Bool)
+            case nobody
+        }
+
+        /// Whose exchange a group-addressed frame from `authenticator` continues: among the
+        /// clients bound to it and the clients talking to the group with no authenticator yet,
+        /// the one whose exchange its EAP id continues. Never a guess between two clients: an id
+        /// two exchanges could take is nobody's.
+        func groupTarget(_ f: AuthDecoder.EAPOLFrame, from authenticator: String, at t: Double) -> GroupTarget {
+            var pool = (bound[authenticator] ?? []).filter { i in
+                builders[i].nasMAC == authenticator && t - builders[i].last <= AuthSessions.idleSplit
+            }
+            for (c, at) in groupTalkers where t - at <= AuthSessions.idleSplit {
+                if let i = current[c], builders[i].nasMAC == nil, !pool.contains(i) { pool.append(i) }
+            }
+            func only(_ list: [Int]) -> GroupTarget? { list.count == 1 ? .client(builders[list[0]].client) : nil }
+            // Without an EAP id to go by, only where no other client could own it.
+            guard let eap = f.eap else { return only(pool) ?? .nobody }
+            if eap.isRequest {
+                let matches = pool.filter { builders[$0].awaits(request: eap.id, at: t) }
+                if matches.count == 1, contested(eap.id, from: t, to: t + 1, except: builders[matches[0]].client) {
+                    return eap.type == 1 ? .port(id: eap.id, identity: true) : .nobody
+                }
+                if let o = only(matches) { return o }
+                if matches.count > 1 { return eap.type == 1 ? .port(id: eap.id, identity: true) : .nobody }
+                if eap.type == 1 {
+                    // A new exchange: the one client that asked for it with an EAPOL-Start.
+                    if let o = only(pool.filter { builders[$0].startPending }) { return o }
+                    return .port(id: eap.id, identity: true)
+                }
+                // No id matched (an authenticator with random ids): the one exchange there is.
+                if let o = only(pool) { return o }
+                return pool.isEmpty ? .port(id: eap.id, identity: false) : .nobody
+            }
+            // Success / Failure carry the id of the response they end.
+            let exact = pool.filter { builders[$0].lastEAPResponseID == Int(eap.id) }
+            if let o = only(exact) { return o }
+            if exact.count > 1 { return .nobody }
+            let next = pool.filter { builders[$0].lastEAPResponseID.map { UInt8(truncatingIfNeeded: $0 &+ 1) == eap.id } ?? false }
+            if let o = only(next) { return o }
+            if next.count > 1 { return .nobody }
+            return only(pool) ?? .nobody
+        }
+
+        /// `client` answered EAP id `id`: the group-addressed request of that id waiting for its
+        /// client (on `authenticator`, on the one the client is bound to, or — a reply to the
+        /// group from a client not bound yet — on the one authenticator that has it) joins the
+        /// client's attempt, with its retransmissions. When the reply could answer requests of
+        /// two ports (the same id at the same moment), none is given to it: they are marked
+        /// answered (no "no supplicant" attempt for them) and belong to nobody.
+        mutating func adoptPortRequest(for client: String, answering id: UInt8, authenticator: String?, at t: Double) {
+            func candidates(_ a: String) -> [Int] {
+                guard let list = portFrames[a] else { return [] }
+                return list.indices.filter { list[$0].eapID == id && list[$0].time <= t && t - list[$0].time <= AuthSessions.idleSplit }
+            }
+            var holders: [String]
+            if let a = authenticator {
+                holders = [a]
+            } else if let i = current[client], let a = builders[i].nasMAC, t - builders[i].last <= AuthSessions.idleSplit {
+                holders = [a]
+            } else {
+                holders = Array(portFrames.keys)
+            }
+            holders = holders.filter { !candidates($0).isEmpty }
+            guard !holders.isEmpty else { return }
+            // One holder, and its same-id sends form one retransmission chain (each ≥ 1 s after
+            // the one before): the request this reply answers.
+            if holders.count == 1, let a = holders.first, let list = portFrames[a] {
+                let idx = candidates(a)
+                let chain = zip(idx, idx.dropFirst()).allSatisfy { list[$1].time - list[$0].time >= 1 }
+                if chain, !contested(id, from: list[idx[0]].time, to: t + 1, except: client) {
+                    let frames = idx.map { list[$0] }
+                    var rest = list
+                    for k in idx.reversed() { rest.remove(at: k) }
+                    portFrames[a] = rest.isEmpty ? nil : rest
+                    for pf in frames {
+                        let i = builder(for: client, Self.trigger(pf.frame), at: pf.time, authenticator: a)
+                        bind(i, to: a, at: pf.time)
+                        builders[i].first = min(builders[i].first, pf.time)
+                        builders[i].eapol(pf.frame, time: pf.time, packet: pf.packet, fromAuthenticator: true)
+                    }
+                    return
+                }
+            }
+            for a in holders {
+                guard var list = portFrames[a] else { continue }
+                for k in candidates(a).reversed() { list.remove(at: k) }
+                portFrames[a] = list.isEmpty ? nil : list
+            }
+        }
+
+        /// Requests nobody answered: one attempt per authenticator port and minute-long spell,
+        /// when it asked for an identity ("no supplicant answered").
+        mutating func finishPorts() {
+            for a in portFrames.keys.sorted() {
+                guard let list = portFrames[a]?.sorted(by: { $0.time < $1.time }) else { continue }
+                var spell: [PortFrame] = []
+                func flush() {
+                    defer { spell = [] }
+                    guard spell.contains(where: \.identity) else { return }
+                    var b = Builder(client: AuthSessions.portClient(a), first: spell[0].time)
+                    b.nasMAC = a
+                    b.portOnly = true
+                    // A client that talked on this port before: it stopped answering (gave up
+                    // after a failure, or left) — not a port with no supplicant at all.
+                    let t0 = spell[0].time
+                    if let i = (bound[a] ?? []).filter({ builders[$0].last <= t0 && !builders[$0].portOnly })
+                        .max(by: { builders[$0].last < builders[$1].last }) {
+                        b.portLastClient = (builders[i].client, builders[i].last, builders[i].eapFailed || builders[i].radiusRejected)
+                    }
+                    for pf in spell { b.eapol(pf.frame, time: pf.time, packet: pf.packet, fromAuthenticator: true) }
+                    builders.append(b)
+                }
+                for pf in list {
+                    if let l = spell.last, pf.time - l.time > AuthSessions.idleSplit { flush() }
+                    spell.append(pf)
+                }
+                flush()
+            }
+            portFrames = [:]
         }
 
         mutating func radius(_ r: AuthDecoder.RadiusPacket, _ o: Obs, _ p: Packet) {
@@ -591,7 +813,11 @@ nonisolated enum AuthSessions {
             /// Part of a TLS exchange (PEAP / EAP-TLS / TTLS / FAST, not its start).
             var tlsRound = false
             var clientResponse = false
+            /// Seconds since the session start of the row's last packet (set by `events`).
             var endTime: Double? = nil
+            /// When the last retransmission joined to the row arrived (absolute: rows pulled in
+            /// front later move the session start).
+            var endAt: Double? = nil
         }
 
         let client: String
@@ -610,6 +836,17 @@ nonisolated enum AuthSessions {
         var eapFailed = false
         var eapRequestRetries = 0
         var nasMAC: String?
+        /// The id of the client's last EAP-Response, and whether the exchange waits for the
+        /// authenticator's next request (the last EAP frame was that response).
+        var lastEAPResponseID: Int?
+        var awaitingRequest = false
+        var lastEAPRequestAt: Double = 0
+        /// The client sent an EAPOL-Start that no request has answered yet.
+        var startPending = false
+        /// No client is known: group-addressed requests of a switch port nobody answered.
+        var portOnly = false
+        /// The client last seen on that port before (when it had failed).
+        var portLastClient: (client: String, last: Double, failed: Bool)?
         // 4-way
         var m1 = 0, m2 = 0, m3 = 0, m4 = 0
         var group = 0
@@ -660,6 +897,15 @@ nonisolated enum AuthSessions {
             self.last = first
         }
 
+        /// A group-addressed EAP-Request with this id continues this exchange: the next one after
+        /// the client's response, or a retransmission of the one it has not answered.
+        /// (A retransmission comes a retransmission timer later, ≥ 1 s: the same id a moment
+        /// after is another port's request.)
+        func awaits(request id: UInt8, at t: Double) -> Bool {
+            if awaitingRequest, let r = lastEAPResponseID, UInt8(truncatingIfNeeded: r &+ 1) == id { return true }
+            return eapRequestsUnanswered > 0 && lastEAPRequestID == Int(id) && t - lastEAPRequestAt >= 1
+        }
+
         var eapExchanged: Bool { eapResponses > 0 || !eapTypes.isEmpty || eapSucceeded || eapFailed || lastEAPRequestID != nil }
         var keySeen: Bool { m1 + m2 + m3 + m4 + group > 0 }
         var isFinal: Bool { eapSucceeded || eapFailed || radiusAccepted || radiusRejected }
@@ -693,7 +939,8 @@ nonisolated enum AuthSessions {
                 raws.append(r)
                 first = min(first, r.time)
             }
-            raws.sort { $0.time < $1.time }
+            // Not sorted here: a pending Access-Request keeps its row by index (a retransmission
+            // joined the DHCP Discover pulled in front of it). `finish` orders the rows by time.
         }
 
         // MARK: EAPOL
@@ -707,12 +954,17 @@ nonisolated enum AuthSessions {
                     raw.kind = .eapRequest
                     if lastEAPRequestID == Int(eap.id), eapRequestsUnanswered > 0 { eapRequestRetries += 1 }
                     lastEAPRequestID = Int(eap.id)
+                    lastEAPRequestAt = t
                     eapRequestsUnanswered += 1
+                    awaitingRequest = false
+                    startPending = false
                 } else if eap.isResponse {
                     raw.kind = .eapResponse
                     raw.clientResponse = true
                     eapResponses += 1
                     eapRequestsUnanswered = 0
+                    lastEAPResponseID = Int(eap.id)
+                    awaitingRequest = true
                     if let id = eap.identity, eap.type == 1, !id.isEmpty { identity = id }
                 } else if eap.isSuccess {
                     raw.kind = .eapSuccess
@@ -724,6 +976,7 @@ nonisolated enum AuthSessions {
                     eapSucceeded = false
                     raw.problem = "EAP-Failure"
                 }
+                if eap.isSuccess || eap.isFailure { awaitingRequest = false; startPending = false }
                 noteMethod(eap)
                 if let type = eap.type, AuthDecoder.isTLSMethod(type), eap.tls?.start != true { raw.tlsRound = true }
                 add(raw)
@@ -748,7 +1001,7 @@ nonisolated enum AuthSessions {
                 return
             }
             var raw = Raw(time: t, kind: .eapol, from: from, to: to, label: f.summary, detail: nil, packets: [packet])
-            if f.typeRaw == 1 { starts += 1 }
+            if f.typeRaw == 1 { starts += 1; startPending = true; awaitingRequest = false }
             if f.typeRaw == 2 { raw.detail = "the client ended its 802.1X session" }
             add(raw)
         }
@@ -878,7 +1131,7 @@ nonisolated enum AuthSessions {
             guard pending.eventIndex < raws.count else { return }
             // The retransmission joins its request's row (drawn "×n").
             raws[pending.eventIndex].packets.append(packet)
-            raws[pending.eventIndex].endTime = t - first
+            raws[pending.eventIndex].endAt = t
             if !pending.answered {
                 unansweredTransmissions = max(unansweredTransmissions, pending.transmissions)
                 raws[pending.eventIndex].problem = "no answer (\(pending.transmissions) transmissions)"
@@ -944,7 +1197,13 @@ nonisolated enum AuthSessions {
             func bad(_ s: String) { reasons.append(s); health = .bad }
             func warn(_ s: String) { reasons.append(s); if health == .ok { health = .warn } }
 
-            let lastRaw = raws.last
+            // In time order (rows pulled in front of a captive session were appended; capture order within a time).
+            let ordered = raws.enumerated().sorted { ($0.element.time, $0.offset) < ($1.element.time, $1.offset) }.map {
+                var r = $0.element
+                if let end = r.endAt { r.endTime = end - first }
+                return r
+            }
+            let lastRaw = ordered.last
             let silentFor = end - last
             let server = serverIP ?? "the RADIUS server"
             let methodName = eapName ?? "802.1X"
@@ -952,7 +1211,23 @@ nonisolated enum AuthSessions {
 
             var result: AuthResult
             let fourWayComplete = m4 > 0
-            if eapFailed || radiusRejected {
+            if portOnly {
+                let port = nasMAC ?? "?"
+                let asked = raws.filter { $0.kind == .eapRequest }.count
+                if asked >= 2 || silentFor >= AuthSessions.supplicantWait {
+                    result = .timeout("no supplicant answered on port \(port)")
+                    let unanswered = "No 802.1X supplicant answered on switch port \(port): \(asked == 1 ? "its EAP-Request Identity" : "\(asked) EAP-Request Identity") went unanswered."
+                    if let c = portLastClient {
+                        warn(unanswered + " \(c.client) was on this port until \(AuthSessions.msText(first - c.last)) earlier (\(c.failed ? "its authentication failed" : "it authenticated")) "
+                             + "and has stopped answering — \(c.failed ? "a supplicant gives up after failures until it is reconnected" : "it left, or its supplicant was turned off").")
+                    } else {
+                        warn(unanswered + " The device there has 802.1X turned off or no supplicant at all (a printer, phone or camera); with MAC auth bypass (MAB) the switch lets it in by its MAC instead.")
+                    }
+                } else {
+                    result = .inProgress
+                    notes.append("The switch asked port \(port) for an identity; nothing had answered when the capture ended.")
+                }
+            } else if eapFailed || radiusRejected {
                 result = .rejected(replyMessage ?? (eapFailed ? "EAP-Failure" : "Access-Reject"))
                 if method == .macAuth || (macStage == nil && macAuthRequest && !dot1x) {
                     bad("MAC auth rejected: \(client) is not an allowed endpoint on the RADIUS server\(reply)")
@@ -1015,7 +1290,7 @@ nonisolated enum AuthSessions {
             if accepted, captive, !captivePassed {
                 warn("Captive portal redirect to \(portalHost ?? "the portal") not completed")
             }
-            if accepted, let acceptAt = acceptTime ?? (fourWayComplete ? raws.last(where: { $0.kind == .key(4) })?.time : nil) {
+            if accepted, let acceptAt = acceptTime ?? (fourWayComplete ? ordered.last(where: { $0.kind == .key(4) })?.time : nil) {
                 let vlanText = vlan.map { "VLAN \($0)" } ?? "the client's VLAN"
                 if dhcpDiscovers > 0 && dhcpOffers == 0 && dhcpAcks == 0 {
                     bad("Accepted, but \(dhcpDiscovers)× DHCP Discover got no Offer: \(vlanText) may have no DHCP server or relay")
@@ -1037,8 +1312,10 @@ nonisolated enum AuthSessions {
             if hasPassword && !dot1x && !macAuthRequest { notes.append("PAP / CHAP login (User-Password present, not shown).") }
             if !clientSide && radiusSeen { notes.append("Captured on the wired side: RADIUS only, no client frames (802.1X EAPOL is visible only on the client's own link).") }
 
-            var marked = raws
-            if case .timeout(let why) = result, why.hasPrefix("no 2/4"),
+            var marked = ordered
+            if portOnly, case .timeout = result, let i = marked.lastIndex(where: { $0.kind == .eapRequest }) {
+                marked[i].problem = "no supplicant answered"
+            } else if case .timeout(let why) = result, why.hasPrefix("no 2/4"),
                let i = marked.lastIndex(where: { $0.kind == .key(1) }) {
                 marked[i].problem = "no 2/4 from the client"
             } else if result == .rejected("wrong PSK"), let i = marked.lastIndex(where: { $0.kind == .key(2) }) {

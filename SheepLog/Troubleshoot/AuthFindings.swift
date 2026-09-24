@@ -13,6 +13,8 @@ nonisolated enum AuthFindings {
             let severity: FindingSeverity = s.health == .bad ? .bad : .warn
             let title: String
             switch s.result {
+            case .timeout where s.isPortOnly:
+                title = "No 802.1X supplicant answered on switch port \(s.nasMAC ?? s.client)."
             case .rejected(let why):
                 title = "\(who) was rejected (\(s.method.label)\(why.isEmpty ? "" : ": \(why)"))."
             case .timeout(let why):
@@ -30,6 +32,8 @@ nonisolated enum AuthFindings {
             case .rejected:
                 steps.append(s.method.isDot1x ? "Check the user's credentials and that the client trusts the RADIUS server certificate."
                                               : "Check the MAC / PSK on the NAS and the RADIUS server's policy for this client.")
+            case .timeout where s.isPortOnly:
+                steps.append("If the device on that port should use 802.1X, turn its supplicant on; otherwise check that MAC auth bypass (MAB) is set on the port.")
             case .timeout:
                 steps.append(s.hasRADIUS ? "Check that the RADIUS server is reachable from \(s.nas ?? "the NAS") and the shared secret matches."
                                          : "Capture on the switch/controller uplink to see whether RADIUS answered.")
@@ -38,17 +42,18 @@ nonisolated enum AuthFindings {
             if s.ip == nil, s.result == .accepted {
                 steps.append("Check that VLAN \(s.vlan ?? "?") has a DHCP scope reachable from this port.")
             }
-            steps.append("Open Authentication and select \(s.client) to see every step with timings.")
-            let query = s.packetIDs.count <= 50
-                ? s.packetIDs.map { "frame:\($0)" }.joined(separator: " OR ")
-                : "frame:>=\(s.packetIDs.min() ?? 0) frame:<=\(s.packetIDs.max() ?? 0) (\(AuthDecoder.packetFilterPreset))"
+            steps.append("Open Authentication and select \(s.isPortOnly ? "port \(s.nasMAC ?? s.client)" : s.client) to see every step with timings.")
+            // The Authentication pane's own filter: the frames themselves up to what one filter
+            // lists (from 51 frames the range showed every other client's auth traffic of those
+            // seconds — the round-11 fix of the pane, not made here).
+            let query = AuthView.packetFilter(s.packetIDs)
             out.append(Finding(id: "auth|\(s.client)|\(Int(s.firstTime.timeIntervalSince1970))",
                                rule: "auth.session", severity: severity, category: .auth, source: .auth,
                                title: title, detail: detail,
                                evidence: [Evidence(kind: .packets, label: "\(s.packetIDs.count) packets", ids: s.packetIDs, query: query)],
                                firstSeen: s.firstTime, lastSeen: s.firstTime.addingTimeInterval(s.duration),
                                count: max(1, s.retries + 1), device: s.nas, deviceAddress: s.nasIP,
-                               client: s.client, nextSteps: steps))
+                               client: s.isPortOnly ? nil : s.client, nextSteps: steps))
         }
         return out
     }

@@ -125,6 +125,9 @@ final class LogStore: ObservableObject {
 
     private var pausedQueue: [LogEntry] = []
     private var pausedBytes = 0
+    /// Lines received while paused, held back from the table (Troubleshoot reads them too: a
+    /// paused Log pane is about what the user is reading, not about what the network did).
+    var heldEntries: [LogEntry] { pausedQueue }
     /// `cost` summed over `entries`.
     private(set) var entryBytes = 0
     /// Addresses not given a Sources row because `maxSources` were already tracked (their
@@ -311,6 +314,9 @@ final class LogStore: ObservableObject {
         rescanGeneration += 1
         rescanTask?.cancel()
         rescanPending = false
+        // "Exported 1,204 lines to x.csv" stayed in the footer of the emptied table (an export
+        // still writing sets it again when done: its file is what the note names).
+        if exportNote != nil { exportNote = nil }
         evictedTotal += entries.count
         entries = []
         entryBytes = 0

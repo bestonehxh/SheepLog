@@ -186,6 +186,9 @@ private struct PacketsStrip: View {
                 .help(store.paused ? "Show the packets that arrived while paused" : "Freeze the table; packets keep being received")
             Picker("Capture interface", selection: $model.settings.captureInterface) {
                 Text("Automatic").tag("")
+                if let extra = InterfacePicker.extraRow(selected: model.settings.captureInterface, among: interfaces) {
+                    Text(extra).tag(model.settings.captureInterface)
+                }
                 ForEach(interfaces) { i in
                     Text(i.pickerTitle).tag(i.name)
                 }
@@ -1435,4 +1438,14 @@ struct PacketTableView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {}
+}
+
+/// The capture-interface pickers (Packets and Settings): the chosen interface always has a row.
+/// With none (the list still loading, or an adapter unplugged since) the picker showed a blank
+/// title — SwiftUI: "the selection is invalid and does not have an associated tag".
+nonisolated enum InterfacePicker {
+    static func extraRow(selected: String, among interfaces: [CaptureInterface]) -> String? {
+        guard !selected.isEmpty, !interfaces.contains(where: { $0.name == selected }) else { return nil }
+        return interfaces.isEmpty ? selected : "\(selected) — not present (Automatic is used)"
+    }
 }

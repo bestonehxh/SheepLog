@@ -36,9 +36,17 @@ nonisolated struct FlowSelectionState: Sendable {
     var pendingRequest: FlowSelectRequest?
     /// The frame whose event to select once `selection` has moved to its flow.
     var pendingEventPacket: Int?
+    /// The selection as the pane itself last set it (an analysis, a Follow request). Any other
+    /// selection is the user's click, and a click wins over a Follow request still waiting for
+    /// its analysis (the analysis landing after the click moved the selection back).
+    var selectedBySelf: Int?
 
     /// `onChange(of: selection)`.
     mutating func selectionChanged(in flows: [TCPFlow]) {
+        if selection != selectedBySelf {
+            pendingRequest = nil
+            selectedBySelf = selection
+        }
         let f = flows.first { $0.id == selection }
         event = pendingEventPacket.flatMap { id in f?.events.first { $0.packetIDs.contains(id) }?.id }
         pendingEventPacket = nil
@@ -61,6 +69,9 @@ nonisolated struct FlowSelectionState: Sendable {
     /// resolved to (the pane clears filters that would hide it).
     @discardableResult
     mutating func apply(_ result: [TCPFlow], previous: [TCPFlow]) -> TCPFlow? {
+        // The user chose another row after the request (its onChange may not have run yet).
+        if pendingRequest != nil, selection != selectedBySelf { pendingRequest = nil }
+        defer { selectedBySelf = selection }
         let shownFrames: [Int] = {
             guard let s = selection, let e = event, let f = previous.first(where: { $0.id == s }),
                   let ev = f.events.first(where: { $0.id == e }) else { return [] }
@@ -128,6 +139,8 @@ struct FlowView: View {
     @State private var pendingRequest: FlowSelectRequest?
     /// The frame whose event to select once `selection` has moved to its flow.
     @State private var pendingEventPacket: Int?
+    /// The selection as the pane last set it (`FlowSelectionState.selectedBySelf`).
+    @State private var selectedBySelf: Int?
     @State private var sortOrder: [KeyPathComparator<FlowRow>] = FlowRow.defaultOrder
     @State private var collapseAcks = true
     @State private var selectedEvent: Int?
@@ -204,9 +217,10 @@ struct FlowView: View {
     private var selectionState: FlowSelectionState {
         get {
             FlowSelectionState(selection: selection, key: selectedKey, start: selectedStart, event: selectedEvent,
-                               pendingRequest: pendingRequest, pendingEventPacket: pendingEventPacket)
+                               pendingRequest: pendingRequest, pendingEventPacket: pendingEventPacket, selectedBySelf: selectedBySelf)
         }
         nonmutating set {
+            if selectedBySelf != newValue.selectedBySelf { selectedBySelf = newValue.selectedBySelf }
             if selectedKey != newValue.key { selectedKey = newValue.key }
             if selectedStart != newValue.start { selectedStart = newValue.start }
             if selectedEvent != newValue.event { selectedEvent = newValue.event }
@@ -245,6 +259,8 @@ struct FlowView: View {
         // Always laid out (hidden when idle): inserting it shifted every button to its right.
         ProgressView().controlSize(.small).opacity(analysing ? 1 : 0).accessibilityHidden(!analysing)
         Group {
+            let _ = PaneProbe.button("flows.Re-analyse", enabled: !analysing) { if DemoFlags.flows { loadDemo() } else { startAnalysis() } }
+            let _ = PaneProbe.button("flows.Copy summary", enabled: selectedFlow != nil) { copySummary() }
             Button {
                 if DemoFlags.flows { loadDemo() } else { startAnalysis() }
             } label: {
@@ -380,11 +396,17 @@ struct FlowView: View {
         VStack(spacing: 0) {
             if let flow = selectedFlow {
                 let layout = layout(for: flow)
+                let _ = PaneProbe.drewFlow(flow, event: selectedEvent)
                 LadderHeader(flow: flow)
                 FlowTimeline(flow: flow, layout: layout, selected: $selectedEvent)
                     .padding(.horizontal, 14)
                     .padding(.bottom, 8)
                 Rectangle().fill(Theme.hairlineSoft).frame(height: 0.5)
+                // The tap below, for tests (a unit-test host cannot click a SwiftUI canvas).
+                let _ = PaneProbe.tapTarget("flows.ladder") { point in
+                    let hit = layout.hit(point)
+                    selectedEvent = hit == selectedEvent ? nil : hit
+                }
                 ScrollView(.vertical) {
                     LadderCanvas(layout: layout, selected: selectedEvent)
                         .frame(height: layout.height)
@@ -399,6 +421,7 @@ struct FlowView: View {
                 Rectangle().fill(Theme.hairlineSoft).frame(height: 0.5)
                 selectionFooter(flow)
             } else {
+                let _ = PaneProbe.drewFlow(nil, event: nil)
                 TableEmptyOverlay(text: "Select a conversation on the left to see its ladder diagram.")
             }
             Rectangle().fill(Theme.hairlineSoft).frame(height: 0.5)
@@ -421,10 +444,12 @@ struct FlowView: View {
                     .identifierText()
                     .textSelection(.enabled)
                 Spacer(minLength: 8)
+                let _ = PaneProbe.button("flows.Show packets", enabled: !ids.isEmpty) { showPackets(ids, flow: flow) }
                 Button("Show packets") { showPackets(ids, flow: flow) }
                     .controlSize(.small)
                     .disabled(ids.isEmpty)
             } else {
+                let _ = PaneProbe.button("flows.Show packets", enabled: false) {}
                 Text("Click an arrow or its label to see its packets.")
                     .font(.system(size: 11.5))
                     .foregroundStyle(Theme.faintText)
@@ -448,11 +473,12 @@ struct FlowView: View {
         NotificationCenter.default.post(name: .sheepLogPacketFilter, object: filter)
     }
 
-    /// The Packets filter for an event's frames: the frames themselves (up to 50), else this
-    /// conversation's packets from its first to its last frame — the first 50 alone left the
-    /// rest of a large group out without a word.
+    /// The Packets filter for an event's frames: the frames themselves (as many as one filter
+    /// takes; the matcher folds them into one lookup), else this conversation's packets from its
+    /// first to its last frame — the first 50 alone left the rest of a large group out without a
+    /// word. (The range from 51 frames showed the ACKs between a data group's segments too.)
     nonisolated static func packetFilter(_ ids: [Int], flow: TCPFlow) -> String {
-        guard ids.count > 50, let lo = ids.min(), let hi = ids.max() else {
+        guard ids.count > Query.maxTerms, let lo = ids.min(), let hi = ids.max() else {
             return ids.map { "frame:\($0)" }.joined(separator: " OR ")
         }
         let k = flow.key
@@ -488,6 +514,7 @@ struct FlowView: View {
     private func analyse() async {
         LeakProbe.add("Flows.analysis")
         defer { LeakProbe.remove("Flows.analysis") }
+        PaneProbe.flowAnalysisStarted()
         analysisToken += 1
         let token = analysisToken
         analysing = true
@@ -512,6 +539,7 @@ struct FlowView: View {
         if state.selection == nil, DemoFlags.flowSelect == "largest",
            let big = result.max(by: { $0.bytesToClient + $0.bytesToServer < $1.bytesToClient + $1.bytesToServer }) {
             state.selection = big.id
+            state.selectedBySelf = big.id
         }
         selectionState = state
     }
@@ -525,9 +553,12 @@ struct FlowView: View {
             revealSelection(match)
             let event = packetID.flatMap { id in match.events.first { $0.packetIDs.contains(id) }?.id }
             if selection == match.id { selectedEvent = event } else { pendingEventPacket = packetID }
+            pendingRequest = nil
+            selectedBySelf = match.id
             selection = match.id
         } else {
             pendingRequest = FlowSelectRequest(key: key, packetID: packetID)
+            selectedBySelf = selection
             if !DemoFlags.flows { startAnalysis() }
         }
     }
