@@ -11,3 +11,6 @@
 <187>Sep 23 2026 10:21:00 HW-NE40E %%01OSPF/3/NBR_CHG_DOWN(l)[23]:Neighbor event:neighbor state changed to Down. (ProcessId=1, NeighborAddress=10.0.0.10, NeighborEvent=InactivityTimer, NeighborPreviousState=Full, NeighborCurrentState=Down)
 <189>Sep 23 2026 10:21:20 HW-NE40E %%01OSPF/4/NBR_CHANGE_E(l)[24]:Neighbor changes event: neighbor status changed. (ProcessId=1, NeighborAddress=10.0.0.10, NeighborEvent=HelloReceived, NeighborPreviousState=Down, NeighborCurrentState=Init)
 <189>Sep 23 2026 10:21:40 HW-NE40E %%01OSPF/4/NBR_CHANGE_E(l)[25]:Neighbor changes event: neighbor status changed. (ProcessId=1, NeighborAddress=10.0.0.10, NeighborEvent=LoadingDone, NeighborPreviousState=Loading, NeighborCurrentState=Full)
+<188>Sep 23 2026 10:22:00 S5720-ACC-07 %%01ERRDOWN/4/ERRDOWN_DOWNNOTIFY(l)[26]:Notify interface to change status to error-down. (InterfaceName=GigabitEthernet0/0/5, Cause=link-flap)
+<188>Sep 23 2026 10:27:00 S5720-ACC-07 %%01ERRDOWN/4/ERRDOWN_DOWNRECOVER(l)[27]:Notify interface to recover state from error-down. (InterfaceName=GigabitEthernet0/0/5, Cause=link-flap, RecoverType=auto recovery)
+<188>Sep 23 2026 10:27:02 S5720-ACC-07 %%01IFNET/4/IF_STATE(l)[28]:Interface GigabitEthernet0/0/5 has turned into UP state.

@@ -496,7 +496,7 @@ struct FlowView: View {
             return ids.map { "frame:\($0)" }.joined(separator: " OR ")
         }
         let k = flow.key
-        return "frame:>=\(lo) frame:<=\(hi) ip:\(k.addressA) ip:\(k.addressB) port:\(k.portA) port:\(k.portB)"
+        return "frame:>=\(lo) frame:<=\(hi) proto:tcp " + ConversationFilter.text(k.addressA, k.portA, k.addressB, k.portB)
     }
 
     // MARK: Analysis

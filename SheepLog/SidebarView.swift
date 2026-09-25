@@ -32,19 +32,19 @@ struct SidebarView: View {
 
                     sectionHeader("Syslog")
                     group {
-                        row(.log, "Log", count: logs.entries.count)
-                        row(.sources, "Sources", count: logs.sources.count)
+                        row(.log, "Log", count: count(.log))
+                        row(.sources, "Sources", count: count(.sources))
                     }
 
                     sectionHeader("SNMP")
                     group {
                         row(.snmpTest, "Test")
-                        row(.mibs, "MIBs", count: mibs.modules.count)
+                        row(.mibs, "MIBs", count: count(.mibs))
                     }
 
                     sectionHeader("Capture")
                     group {
-                        row(.packets, "Packets", count: packets.packets.count)
+                        row(.packets, "Packets", count: count(.packets))
                         row(.flows, "TCP flows")
                         row(.auth, "Authentication")
                     }
@@ -57,6 +57,8 @@ struct SidebarView: View {
         .frame(maxHeight: .infinity, alignment: .top)
     }
 
+    private func count(_ pane: MainPane) -> Int? { Self.counts(logs: logs, packets: packets, mibs: mibs)[pane] }
+
     private var captureDetail: String {
         capture.interfaceName + (capture.runningPromiscuous ? " · promisc" : "")
     }
@@ -64,10 +66,19 @@ struct SidebarView: View {
     /// A service's switch (`isOn` = running): green dot and `detail` while running, "off" or a
     /// red "failed" when not.
     private func service(_ name: String, failed: Bool, detail: String, isOn: Binding<Bool>) -> some View {
-        SidebarServiceRow(name: name,
-                          detail: isOn.wrappedValue ? detail : (failed ? "failed" : "off"),
-                          dot: isOn.wrappedValue ? Theme.live : (failed ? Theme.err : Theme.faintText),
-                          isOn: isOn)
+        let look = Self.serviceLook(running: isOn.wrappedValue, failed: failed, detail: detail)
+        return SidebarServiceRow(name: name, detail: look.detail, dot: look.dot, isOn: isOn)
+    }
+
+    /// Green dot and what it is doing while running; "off", or a red "failed" when it could not
+    /// start.
+    static func serviceLook(running: Bool, failed: Bool, detail: String) -> (detail: String, dot: Color) {
+        (running ? detail : (failed ? "failed" : "off"), running ? Theme.live : (failed ? Theme.err : Theme.faintText))
+    }
+
+    /// The counts beside the panes' rows (the same numbers the panes lead with).
+    static func counts(logs: LogStore, packets: PacketStore, mibs: MIBRegistry) -> [MainPane: Int] {
+        [.log: logs.entries.count, .sources: logs.sources.count, .mibs: mibs.modules.count, .packets: packets.packets.count]
     }
 
     private func group(@ViewBuilder _ content: () -> some View) -> some View {

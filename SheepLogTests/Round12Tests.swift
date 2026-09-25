@@ -334,9 +334,13 @@ final class Round12Tests: XCTestCase {
             // neighbours that went down came back (MikroTik, UniFi, EdgeOS, NX-OS, ASA, Junos).
             // Round 14's: an Arista configuration and an IOS XR commit; their ports (Arista,
             // Extreme, Ruckus, Meraki, IOS XR) came back, and Arista's BGP peer re-established.
+            // Round 16's: Linux eth1 (ip monitor) and IOS Gi1/0/5 (err-disabled, recovered) came
+            // back, docker0's NO-CARRIER is nothing; three BGP sessions whose MD5 password does not
+            // match (IOS BADAUTH, Junos tcp_auth_ok, FRR bgpd + the Linux kernel: one peer) are.
             "other": ["link.down|CORE-RTR1", "link.down|N9K-LEAF-01", "link.down|web01", "link.down|HOSTLESS", "config.change|CORE-RTR1",
                       "config.change|MX204-EDGE", "hw.psu|MX204-EDGE", "config.change|ASA-FW02",
-                      "config.change|LEAF-EOS-1", "config.change|XR-PE1"],
+                      "config.change|LEAF-EOS-1", "config.change|XR-PE1",
+                      "routing.authFail|EDGE-RTR3", "routing.authFail|MX204-EDGE", "routing.authFail|frr-edge1"],
         ]
         var all: [String] = []
         for (k, name) in expected.keys.sorted().enumerated() {

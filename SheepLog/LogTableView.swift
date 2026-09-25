@@ -412,6 +412,14 @@ struct LogTableView: NSViewRepresentable {
             NSPasteboard.general.setString(text, forType: .string)
         }
 
+        func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+            let id = NSUserInterfaceItemIdentifier("logRow")
+            if let v = tableView.makeView(withIdentifier: id, owner: nil) as? SoftSelectionRowView { return v }
+            let v = SoftSelectionRowView()
+            v.identifier = id
+            return v
+        }
+
         func menuNeedsUpdate(_ menu: NSMenu) {
             menu.removeAllItems()
             guard let table else { return }
@@ -439,7 +447,8 @@ struct LogTableView: NSViewRepresentable {
             menu.addItem(.separator())
             item("Filter this host (\(e.sourceAddress))", #selector(filterTerm(_:)), "host:\(e.sourceAddress)")
             if !e.program.isEmpty {
-                item("Filter this program (\(e.program))", #selector(filterTerm(_:)), "app:\(Self.quoted(e.program))")
+                // The program itself (`$`): `app:sshd` also took sshd-session's lines.
+                item("Filter this program (\(e.program))", #selector(filterTerm(_:)), "app:\(Self.quoted(e.program + "$"))")
             }
             item("Exclude this host", #selector(filterTerm(_:)), "-host:\(e.sourceAddress)")
         }

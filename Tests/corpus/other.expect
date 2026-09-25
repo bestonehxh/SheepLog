@@ -61,3 +61,13 @@ info	frr-edge1	ospfd	0	2026-09-23T10:28:00
 info	frr-edge1	ospfd	0	2026-09-23T10:28:40
 info	frr-edge1	zebra	0	2026-09-23T10:29:00
 info	frr-edge1	zebra	0	2026-09-23T10:29:20
+info	lnx-gw1	netmon	0	2026-09-23T10:30:00
+info	lnx-gw1	netmon	0	2026-09-23T10:30:20
+info	lnx-gw1	netmon	0	2026-09-23T10:30:25
+warning	ACC-SW5	%PM-4-ERR_DISABLE	0	2026-09-23T10:31:00.000
+warning	ACC-SW5	%PM-4-ERR_RECOVER	0	2026-09-23T10:36:00.000
+error	ACC-SW5	%LINK-3-UPDOWN	0	2026-09-23T10:36:02.000
+info	EDGE-RTR3	%TCP-6-BADAUTH	0	2026-09-23T10:37:00.000
+warning	MX204-EDGE	/kernel	0	2026-09-23T10:37:10
+error	frr-edge1	bgpd	0	2026-09-23T10:37:20
+warning	frr-edge1	kernel	0	2026-09-23T10:37:21

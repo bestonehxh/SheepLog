@@ -114,7 +114,11 @@ nonisolated struct ClientReport: Sendable {
     }
 
     var logQuery: String {
-        let terms = (ips + macs).map { FText.quote($0) }
+        // Every spelling of its MAC the report searched (a Cisco line writes 0200.5e14.0021, a
+        // Windows one 02-00-5E-14-00-21) — with the colon form alone, Show hid lines it counted —
+        // by the rule it counted them by (`ClientSearch.Needle`): an address as a whole address,
+        // a MAC spelling as a whole word.
+        let terms = ips.map { FText.quote($0) } + macs.flatMap(ClientID.spellings(ofMAC:)).map(FText.wordTerm)
         return terms.count == 1 ? terms[0] : "(" + terms.joined(separator: " OR ") + ")"
     }
 
@@ -333,6 +337,7 @@ nonisolated enum ClientSearch {
     /// Lines whose raw text holds any of `needles` (case-insensitive; an address only as a whole address).
     static func lines(_ entries: [LogEntry], needles: [String]) -> [LogEntry] {
         guard !needles.isEmpty, !entries.isEmpty else { return [] }
+        let matchers = needles.map(Needle.init)
         let n = entries.count
         let chunks = max(1, min(ProcessInfo.processInfo.activeProcessorCount * 3, n / 2_000))
         let per = (n + chunks - 1) / chunks
@@ -343,8 +348,8 @@ nonisolated enum ClientSearch {
             if lo < hi {
                 for i in lo..<hi {
                     let e = entries[i]
-                    let hit = e.raw.withCString { s in needles.contains { contains(s, $0) } }
-                        || (e.transport == .trap && e.message.withCString { s in needles.contains { contains(s, $0) } })
+                    let hit = matchers.contains { $0.found(in: e.raw) }
+                        || (e.transport == .trap && matchers.contains { $0.found(in: e.message) })
                     if hit { out.append(e) }
                 }
             }
@@ -358,23 +363,26 @@ nonisolated enum ClientSearch {
     /// and `[10.1.0.5]` hold it — a colon was taken as part of a longer IPv6 / MAC address and
     /// every ASA line missed.
     static func contains(_ s: UnsafePointer<CChar>, _ needle: String) -> Bool {
-        let v4 = FText.isIPv4(needle)
-        return needle.withCString { np -> Bool in
-            let len = strlen(np)
-            var p = s
-            while let hit = strcasestr(p, np) {
-                let before: CChar = hit == s ? 0 : hit[-1]
-                let after = hit[len]
-                func glued(_ c: CChar) -> Bool {
-                    if v4 { return (c >= 48 && c <= 57) || c == 46 }
-                    return (c >= 48 && c <= 57) || (c >= 97 && c <= 102) || (c >= 65 && c <= 70) || c == 46 || c == 58
-                }
-                // "10.1.1.1." at the end of a sentence still counts.
-                let afterOK = !glued(after) || (after == 46 && !(hit[len + 1] >= 48 && hit[len + 1] <= 57))
-                if !glued(before) && afterOK { return true }
-                p = UnsafePointer(hit) + 1
+        Needle(needle).found(in: String(cString: s))
+    }
+
+    /// One name the report looks for, by the filter grammar's own rules — so the report's
+    /// "Show" filter shows exactly the lines it counted (its own glue rules differed: a MAC
+    /// spelling glued into longer hex was shown and not counted, "outside:2001:db8::1" counted
+    /// by one and not the other).
+    nonisolated enum Needle: Sendable {
+        case address(AddressWord)
+        case word(WholeWord)
+
+        init(_ n: String) {
+            if let a = AddressWord(n) { self = .address(a) } else { self = .word(WholeWord(n)) }
+        }
+
+        func found(in s: String) -> Bool {
+            switch self {
+            case .address(let a): a.found(in: s)
+            case .word(let w): w.found(in: s)
             }
-            return false
         }
     }
 

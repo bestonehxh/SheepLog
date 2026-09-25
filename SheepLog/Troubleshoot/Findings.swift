@@ -330,9 +330,11 @@ nonisolated struct RuleContext: Sendable {
 
     func device(_ f: LineFact) -> String { device(f.address, hostname: f.hostname, isTrap: f.isTrap) }
 
-    /// `host:` term for a device's lines.
+    /// `host:` term for a device's lines: its address, or — for an address that sends several
+    /// hostnames (a relay) — the name itself (`host:"SW1$"`: `host:SW1` was a prefix and showed
+    /// SW10–SW19's lines too).
     func hostTerm(address: String, name: String) -> String {
-        multiHost.contains(address) ? "host:" + FText.quote(name) : "host:" + address
+        multiHost.contains(address) ? "host:" + FText.quote(name + "$") : "host:" + address
     }
 
     func summary(input: TroubleshootInput, packets: PacketScan.Output) -> AnalysisSummary {
@@ -401,6 +403,9 @@ nonisolated enum FactKind: Sendable {
     /// A step between states that is neither up nor down (BGP Idle → Connect → Active, OSPF
     /// Init → 2-Way → ExStart): a peer that only ever does these never came up.
     case routingStep(proto: String, neighbor: String)
+    /// A routing session's segment from `neighbor` whose TCP MD5 signature was missing or wrong:
+    /// the session cannot come up (a password mismatch), and it is no admin login failure.
+    case routingAuth(proto: String, neighbor: String)
     case reboot(cold: Bool, planned: Bool)
     case loginFail(ip: String?, user: String?)
     case loginOK(ip: String?, user: String?)
@@ -519,7 +524,11 @@ nonisolated final class Needles: @unchecked Sendable {
             ["link", "-line", "line protocol", "turned into down state", "turned into up state", "if_up", "if_down",
              "interface-stat-change", "interface status changed", ", state down", ", state up", "status changed from",
              // FRR / Quagga zebra: "interface eth0 index 2 changed <UP,BROADCAST,MULTICAST>".
-             "multicast>", "running>", "lower_up>"],
+             "multicast>", "running>", "lower_up>",
+             // Linux `ip monitor link`: "3: eth1: <NO-CARRIER,BROADCAST,MULTICAST,UP> … state DOWN";
+             // a port the switch shut for an error (IOS `%PM-4-ERR_DISABLE`, Huawei error-down,
+             // AOS-CX "err-disabled").
+             "no-carrier", ",up>", "err-disable", "errdisable", "err_disable", "error-down"],
             ["power", "psu", "fan", "temperat", "thermal", "poe", "overheat", "pem"],
             ["stp", "topology", "bpdu", "loop", "storm", "spanning", "root bridge"],
             // "peer" / "bgp" / "ospf": Huawei `BGP/3/STATE_CHG_UPDOWN` ("The status of the peer …
@@ -527,7 +536,10 @@ nonisolated final class Needles: @unchecked Sendable {
             // state" and Junos `bgp_hold_timeout: NOTIFICATION sent to …` never say "neighbor"
             // (they were never read). `routing` still needs a protocol, and a neighbor it can
             // name unless the line says "neighbor".
-            ["neighbo", "adjchg", "adjchange", "nbr", "peer", "bgp", "ospf"],
+            ["neighbo", "adjchg", "adjchange", "nbr", "peer", "bgp", "ospf",
+             // A routing session's TCP MD5 signature rejected (IOS `%TCP-6-BADAUTH`, Junos
+             // `tcp_auth_ok`, Linux "MD5 Hash mismatch"): a routing fault, not an admin login.
+             "md5", "tcp_auth", "badauth"],
             ["reboot", "restart", "reload", "cold start", "coldstart", "booted", "boot up", "bootup", "booting"],
             ["login", "logon", "log in", "logging in", "logged in", "password", "authenticat", "invalid user"],
             ["config", "commit", "write mem", "-111010", "-111008"],
@@ -702,6 +714,7 @@ nonisolated enum LineClassifier {
             return .link(iface: iface, up: status.hasPrefix("up"))
         }
         if let k = kernelFlagsLink(e, c) { return k.up.map { .link(iface: k.iface, up: $0) } }
+        if CText.hasAny(c, ["err-disable", "errdisable", "err_disable", "error-down"]) { return errDisabled(e, c) }
         var up: Bool?
         if let s = e.field("OperStatus") { up = s.uppercased().hasPrefix("UP") }
         // Ruckus ICX: "Interface ethernet 1/1/5, state down"; Meraki MS: "port 3 status changed
@@ -733,16 +746,49 @@ nonisolated enum LineClassifier {
     /// such a line; `up` nil: such a line that is no link event.
     static func kernelFlagsLink(_ e: LogEntry, _ c: UnsafePointer<CChar>) -> (iface: String, up: Bool?)? {
         let m = e.message
-        guard CText.has(c, " index "), let open = m.lastIndex(of: "<"), let close = m[open...].firstIndex(of: ">"),
-              let iface = FText.token(after: "interface ", in: m) else { return nil }
+        let name = CText.has(c, " index ") ? FText.token(after: "interface ", in: m) : ipMonitorInterface(m)
+        guard let iface = name, let open = m.firstIndex(of: "<"), let close = m[open...].firstIndex(of: ">") else { return nil }
         let flags = Set(m[m.index(after: open)..<close].uppercased().split(separator: ",").map(String.init))
         guard !flags.isDisjoint(with: ["BROADCAST", "POINTOPOINT", "MULTICAST", "LOOPBACK", "RUNNING", "UP"]) else { return nil }
         if flags.contains("LOOPBACK") || !flags.contains("UP") { return (iface, nil) }
-        return (iface, flags.contains("RUNNING") || flags.contains("LOWER_UP"))
+        // A container host's bridges and veth pairs come and go with their containers: docker0
+        // is NO-CARRIER whenever no container runs — that is no port that went down.
+        if virtualInterfacePrefixes.contains(where: { iface.lowercased().hasPrefix($0) }) { return (iface, nil) }
+        return (iface, !flags.contains("NO-CARRIER") && (flags.contains("RUNNING") || flags.contains("LOWER_UP")))
+    }
+
+    static let virtualInterfacePrefixes = ["docker", "veth", "br-", "virbr", "cni", "flannel", "cali", "vnet", "lxc", "podman"]
+
+    /// Linux `ip monitor link` / `ip link` output relayed to syslog: "3: eth1: <NO-CARRIER,…>
+    /// mtu 1500 … state DOWN", "5: vlan10@eth0: <…>". A "Deleted 3: veth…" line is not a port.
+    static func ipMonitorInterface(_ m: String) -> String? {
+        let parts = m.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
+        guard parts.count == 3, parts[0].count >= 2, parts[0].hasSuffix(":"), parts[0].dropLast().allSatisfy(\.isNumber),
+              parts[1].count >= 2, parts[1].hasSuffix(":"), parts[2].hasPrefix("<") else { return nil }
+        var name = parts[1].dropLast()
+        if let at = name.firstIndex(of: "@") { name = name[..<at] }
+        return name.isEmpty ? nil : String(name)
+    }
+
+    /// A port the switch shut because of an error — IOS `%PM-4-ERR_DISABLE: link-flap error
+    /// detected on Gi1/0/5, putting Gi1/0/5 in err-disable state`, Huawei `ERRDOWN_DOWNNOTIFY …
+    /// error-down. (InterfaceName=…, Cause=link-flap)`, AOS-CX "Port 1/1/5 is err-disabled …":
+    /// that port down (it stays down until recovery or shut / no shut). A recovery attempt
+    /// (`%PM-4-ERR_RECOVER`, `ERRDOWN_DOWNRECOVER`) is not the link back — the link-up line
+    /// that follows is. A BPDU-guard / loop / storm cause is spanning tree's finding.
+    static func errDisabled(_ e: LogEntry, _ c: UnsafePointer<CChar>) -> FactKind? {
+        if CText.hasAny(c, ["recover", "re-enabl", "reenabl", "timer expired"]) { return nil }
+        if CText.hasAny(c, ["bpdu", "loop", "storm"]) { return nil }
+        let m = e.message
+        let port = e.field("InterfaceName") ?? e.field("ifName")
+            ?? FText.token(after: "putting ", in: m) ?? FText.token(after: "detected on ", in: m)
+            ?? interfaceName(e) ?? FText.token(after: " on ", in: m)
+        guard let port, !port.isEmpty else { return nil }
+        return .link(iface: port, up: false)
     }
 
     static func interfaceName(_ e: LogEntry) -> String? {
-        for k in ["ifName", "interface", "intf", "ifDescr", "port", "Interface"] {
+        for k in ["ifName", "interface", "intf", "ifDescr", "port", "Interface", "InterfaceName"] {
             if let v = e.field(k), !v.isEmpty { return v }
         }
         let m = e.message
@@ -831,6 +877,7 @@ nonisolated enum LineClassifier {
             return nil
         }
         let port = FText.token(after: "port ", in: e.message) ?? FText.token(after: "interface ", in: e.message)
+            ?? FText.token(after: "putting ", in: e.message) ?? e.field("InterfaceName")
         if CText.hasWord(c, "loop") && CText.hasAny(c, ["detect", "protect", "found", "block", "disabl", "loop-protect"]) {
             return .stp(.loop, port: port)
         }
@@ -860,6 +907,7 @@ nonisolated enum LineClassifier {
     // Routing neighbours
 
     static func routing(_ e: LogEntry, _ c: UnsafePointer<CChar>) -> FactKind? {
+        if let k = sessionAuthFailure(e, c) { return k }
         let proto: String
         let p = e.program
         if CText.has(c, "notification") || CText.contains(p, "NOTIFICATION"),
@@ -901,6 +949,30 @@ nonisolated enum LineClassifier {
         // "bgpd shutting down" or "OSPF process 1 is down" are no neighbor that went down.
         if neighbor == "?", !CText.hasAny(c, ["neighbo", "nbr", "adjch"]) { return nil }
         return .routing(proto: proto, neighbor: neighbor, up: up)
+    }
+
+    /// A routing session's TCP MD5 signature missing or wrong: IOS `%TCP-6-BADAUTH: Invalid MD5
+    /// digest from 10.0.0.2(179) to 10.0.0.1(11003)`, Junos `tcp_auth_ok: Packet from
+    /// 10.0.0.2:179 missing MD5 digest`, Linux (FRR's kernel) `MD5 Hash mismatch for (10.0.0.2,
+    /// 179)->(10.0.0.1, 40312)`, bgpd "MD5 authentication failed". The peer is the sender; the
+    /// protocol is BGP for TCP 179 or a line that says so, LDP for 646, MSDP for 639.
+    static func sessionAuthFailure(_ e: LogEntry, _ c: UnsafePointer<CChar>) -> FactKind? {
+        guard CText.hasAny(c, ["md5", "tcp_auth", "tcp-ao", "badauth"]) || CText.contains(e.program, "BADAUTH") else { return nil }
+        guard CText.hasAny(c, ["digest", "hash", "authenticat", "badauth", "tcp_auth", "signature", "mismatch", "md5 fail"])
+                || CText.contains(e.program, "BADAUTH") else { return nil }
+        // A password stored as an MD5 hash, an MD5 checksum of a file: not a session.
+        guard !CText.hasAny(c, ["checksum", "password hash", "image", "file "]) else { return nil }
+        let m = e.message
+        let peer = FText.firstIPv4(after: "from", in: m) ?? FText.firstIPv4(after: "neighbor", in: m)
+            ?? FText.firstIPv4(after: "peer", in: m) ?? FText.firstIPv4(after: "", in: m, excluding: e.sourceAddress)
+            ?? FText.firstIPv6(after: "from", in: m)
+        guard let peer else { return nil }
+        let proto: String
+        if CText.has(c, "ospf") || CText.contains(e.program, "OSPF") { proto = "OSPF" }
+        else if CText.hasAny(c, ["(646)", ":646", ", 646)", "ldp"]) { proto = "LDP" }
+        else if CText.hasAny(c, ["(639)", ":639", ", 639)", "msdp"]) { proto = "MSDP" }
+        else { proto = "BGP" }
+        return .routingAuth(proto: proto, neighbor: peer)
     }
 
     /// The neighbor a routing line names: the first IPv4 after "neighbor" / "nbr" / "peer", else
@@ -1111,9 +1183,15 @@ nonisolated extension FindingRules {
     static func linkRules(_ ctx: inout RuleContext) -> [Finding] {
         struct Key: Hashable { let device: String; let iface: String }
         var groups: [Key: [(t: Date, up: Bool, f: LineFact)]] = [:]
+        // A port by its full name: IOS's err-disable line says "Gi1/0/5" and its link line
+        // "GigabitEthernet1/0/5" — two ports, so the one that came back stayed "down and has
+        // not come back". Every spelling seen goes into the evidence filter.
+        var spellings: [Key: Set<String>] = [:]
         for f in ctx.facts {
             guard case .link(let iface, let up) = f.kind else { continue }
-            groups[Key(device: ctx.device(f), iface: iface), default: []].append((ctx.time(f), up, f))
+            let key = Key(device: ctx.device(f), iface: FText.canonicalInterface(iface))
+            groups[key, default: []].append((ctx.time(f), up, f))
+            spellings[key, default: []].insert(iface)
         }
         var out: [Finding] = []
         for (key, raw) in groups {
@@ -1127,8 +1205,9 @@ nonisolated extension FindingRules {
             let f0 = events[0].f
             let address = f0.address
             let evidence = logEvidence(ids: raw.filter { !$0.f.isTrap }.map(\.f.id), trapIDs: raw.filter { $0.f.isTrap }.map(\.f.id),
-                                       query: ctx.hostTerm(address: address, name: key.device) + " " + FText.quote(key.iface),
-                                       trapQuery: "host:\(raw.first { $0.f.isTrap }?.f.address ?? address) (app:linkDown OR app:linkUp)")
+                                       query: ctx.hostTerm(address: address, name: key.device) + " " + FText.wordTerms(spellings[key] ?? [key.iface]),
+                                       trapQuery: "host:\(raw.first { $0.f.isTrap }?.f.address ?? address) (app:linkDown OR app:linkUp)"
+                                        + (key.iface == "?" || key.iface.hasPrefix("ifIndex ") ? "" : " " + FText.wordTerms(spellings[key] ?? [key.iface])))
             // Flapping: ≥ 3 downs inside any 10 minutes.
             var best = (count: 0, from: 0, to: 0)
             var lo = 0
@@ -1161,6 +1240,9 @@ nonisolated extension FindingRules {
                                 source: lastDown.f.isTrap ? .traps : .logs,
                                 title: "Port \(key.iface) on \(key.device) went down at \(FText.clock(lastDown.t)) and has not come back.",
                                 detail: "No link-up for \(key.iface) was seen in the \(FText.duration(ctx.input.now.timeIntervalSince(lastDown.t))) since. "
+                                    + (lastDown.f.message.withCString { CText.hasAny($0, ["err-disable", "errdisable", "err_disable", "error-down"]) }
+                                       ? "The switch shut it itself (err-disabled: “\(FText.excerpt(lastDown.f.message))”): it stays down until error-disable recovery brings it back or someone enters shutdown / no shutdown, and it goes down again if the cause is still there. "
+                                       : "")
                                     + "If something should be connected there (an uplink, an AP, a server) it is unreachable through this port.",
                                 evidence: evidence, firstSeen: lastDown.t, lastSeen: lastDown.t, count: downs.count,
                                 device: key.device, deviceAddress: address)
@@ -1306,7 +1388,12 @@ nonisolated extension FindingRules {
         var groups: [Key: [(t: Date, up: Bool, f: LineFact)]] = [:]
         var notices: [Key: [(t: Date, reason: String, sent: Bool, f: LineFact)]] = [:]
         var steps: [Key: [(t: Date, f: LineFact)]] = [:]
+        var auth: [Key: [(t: Date, f: LineFact)]] = [:]
         for f in ctx.facts {
+            if case .routingAuth(let proto, let nb) = f.kind {
+                auth[Key(device: ctx.device(f), proto: proto, neighbor: nb), default: []].append((ctx.time(f), f))
+                continue
+            }
             if case .routingNotice(let proto, let nb, let reason, let sent) = f.kind {
                 notices[Key(device: ctx.device(f), proto: proto, neighbor: nb), default: []].append((ctx.time(f), reason, sent, f))
                 continue
@@ -1356,6 +1443,31 @@ nonisolated extension FindingRules {
                             nextSteps: ["Check the \(key.proto) neighbor table on \(key.device) (show ip \(key.proto.lowercased()) neighbor).",
                                         "Check the link towards \(nb) for flaps and errors."])
             out.append(f)
+        }
+        // TCP MD5 signatures rejected: the session cannot come up (or drops at its next
+        // keepalive) until both sides have the same password — a routing fault, which read as
+        // "failed admin logins from 10.0.0.2" (FRR "MD5 authentication failed") or not at all.
+        for (key, raw) in auth {
+            let items = raw.sorted { $0.t < $1.t }
+            guard let first = items.first, let last = items.last else { continue }
+            let nb = key.neighbor
+            let span = last.t.timeIntervalSince(first.t)
+            out.append(Finding(id: "routing.auth|\(key.device)|\(key.proto)|\(nb)", rule: "routing.authFail", severity: .bad,
+                               category: .routing, source: .logs,
+                               title: "\(key.proto) session with \(nb) on \(key.device) fails its MD5 authentication: \(items.count) segment\(items.count == 1 ? "" : "s") rejected"
+                                + (items.count == 1 ? " at \(FText.clock(first.t))." : " (\(FText.clock(first.t))–\(FText.clock(last.t))).") ,
+                               detail: "\(key.device) dropped TCP segments from \(nb) because their MD5 signature was missing or did not match. "
+                                + "The two sides are configured with different passwords (or one side has none), so the \(key.proto) session "
+                                + "cannot be established — or, if it was up, it fails at the next keepalive"
+                                + (span >= 60 ? "; this went on for \(FText.duration(span))." : ".")
+                                + " This is the routing session's password, not an administrator's login.",
+                               evidence: logEvidence(ids: items.map(\.f.id), trapIDs: [],
+                                                     query: ctx.hostTerm(address: first.f.address, name: key.device) + " md5 " + FText.quote(nb),
+                                                     trapQuery: ""),
+                               firstSeen: first.t, lastSeen: last.t, count: items.count,
+                               device: key.device, deviceAddress: first.f.address,
+                               nextSteps: ["Set the same \(key.proto) neighbor password on \(key.device) and on \(nb) (e.g. neighbor \(nb) password …), or remove it on both.",
+                                           "Check \(nb) is the peer you expect: a segment signed with an old password may come from a device that was replaced."]))
         }
         // A neighbor that only ever steps between states (BGP Idle → Connect → Active → Idle,
         // OSPF stuck in ExStart) for minutes never came up. Its steps were "downs" before round
@@ -2346,9 +2458,32 @@ nonisolated extension FindingRules {
     /// time between them, or shorter than it was at the first (clocks of the two walks aside).
     static func restartedBetween(_ before: SNMPSnapshot, _ now: SNMPSnapshot) -> Bool {
         guard let up = now.sysUpTime else { return false }
-        if Double(up) / 100 < now.taken.timeIntervalSince(before.taken) { return true }
+        let gap = now.taken.timeIntervalSince(before.taken)
+        // sysUpTime is TimeTicks (RFC 2578 §7.1.8): past 4,294,967,295 hundredths — 497 days —
+        // it starts again at 0. A device up that long read as restarted at every walk after.
+        if let was = before.sysUpTime, uptimeWrapped(was: was, now: up, gap: gap) { return false }
+        if Double(up) / 100 < gap { return true }
         if let was = before.sysUpTime, up < was { return true }
         return false
+    }
+
+    /// sysUpTime went past 2^32 hundredths (497.1 days) between two readings `gap` seconds apart
+    /// on the Mac's clock: the earlier reading plus the gap reaches past 2^32, and the new one is
+    /// that sum modulo 2^32 — give or take 30 s or 5 % (the walks' own timing, an agent's clock).
+    static func uptimeWrapped(was: UInt32, now: UInt32, gap: Double) -> Bool {
+        guard now < was, gap > 0, gap.isFinite else { return false }
+        let wrap = 4_294_967_296.0
+        let reached = Double(was) + gap * 100
+        guard reached >= wrap else { return false }
+        let expected = reached.truncatingRemainder(dividingBy: wrap)
+        return abs(Double(now) - expected) <= max(3_000, gap * 100 * 0.05)
+    }
+
+    /// Seconds a 32-bit packet counter of a port of `speedBits` takes to start again at full
+    /// rate (minimum frames); nil when the speed is not known.
+    static func wrapSeconds32(speedBits: UInt64) -> Double? {
+        guard speedBits > 0 else { return nil }
+        return 4_294_967_296.0 / (Double(speedBits) / 672)
     }
 
     static let ifCounterDiscontinuityTime = OID([1, 3, 6, 1, 2, 1, 31, 1, 1, 1, 19])
@@ -2411,7 +2546,11 @@ nonisolated extension FindingRules {
                         firstSeen: taken, lastSeen: taken, count: count, device: name, deviceAddress: host,
                         nextSteps: steps, snmpTarget: host)
             }
-            if let s = list.last(where: { $0.sysUpTime != nil }), let up = s.sysUpTime, up < recentBoot {
+            // A small sysUpTime that is the earlier walk's past 497 days (the TimeTicks wrap) is
+            // no restart.
+            if let i = list.lastIndex(where: { $0.sysUpTime != nil }), let up = list[i].sysUpTime, up < recentBoot,
+               !list[..<i].contains(where: { p in p.sysUpTime.map { uptimeWrapped(was: $0, now: up, gap: list[i].taken.timeIntervalSince(p.taken)) } ?? false }) {
+                let s = list[i]
                 out.append(base("uptime", "snmp.recentBoot", .info, "\(name) restarted \(FText.duration(Double(up) / 100)) before the SNMP walk (sysUpTime \(Format.uptime(ticks: UInt64(up)))).",
                                 "A device that has just booted lost its counters, its MAC and ARP tables and its sessions. If nobody restarted it, look for a power or crash reason.",
                                 ["Check the reload reason on \(name) (show version)."], count: 1, taken: s.taken))
@@ -2510,6 +2649,9 @@ nonisolated extension FindingRules {
         let dirWord = ["in", "out"]
         var growing: [(text: String, weight: Double)] = []
         var totals: [(text: String, weight: Double)] = []
+        /// Ports whose one-walk rate is taken over 32-bit packet counters that may have started
+        /// again since the clear (the port can wrap one faster than the device has been up).
+        var wrapped32: [(name: String, wrap: Double)] = []
         for (idx, flows) in now {
             let n = names[idx] ?? "ifIndex \(idx)"
             for dir in 0..<2 {
@@ -2537,7 +2679,16 @@ nonisolated extension FindingRules {
                 } else if let p = pkts {
                     // One walk (or the counters were reset since): totals since they were cleared.
                     let r = rate(disc, p)
-                    if r >= discardRate { totals.append(("\(n) \(dirWord[dir]) \(rateText(r)) per 10,000 packets", r)) }
+                    if r >= discardRate {
+                        totals.append(("\(n) \(dirWord[dir]) \(rateText(r)) per 10,000 packets", r))
+                        // ifInUcastPkts & co. are Counter32: on a 1 Gb/s port they can start again
+                        // every 48 minutes, so a total of months is what is left since the last
+                        // wrap — the rate was presented as exact.
+                        if flows[dir].packetsHC == nil, let w = rowsNow[idx].flatMap({ wrapSeconds32(speedBits: $0.speedBits) }),
+                           cur.sysUpTime.map({ Double($0) / 100 >= w }) ?? true, !wrapped32.contains(where: { $0.name == n }) {
+                            wrapped32.append((n, w))
+                        }
+                    }
                 }
             }
         }
@@ -2553,7 +2704,8 @@ nonisolated extension FindingRules {
             let top = totals.sorted { $0.weight > $1.weight }
             return [base("discards", "snmp.discards", .info,
                          "\(top.count) interface\(top.count == 1 ? "" : "s") on \(name) dropped over \(String(format: "%.1f", discardRate / 100)) % of \(top.count == 1 ? "its" : "their") packets since the counters were cleared: \(top.prefix(4).map(\.text).joined(separator: ", ")).",
-                         "Discards are good frames the switch dropped — full buffers or unwanted VLANs. These are totals since the counters were last cleared, so they may be old: walk the Interfaces table again in a few minutes and SheepLog says whether they still grow.",
+                         "Discards are good frames the switch dropped — full buffers or unwanted VLANs. These are totals since the counters were last cleared, so they may be old: walk the Interfaces table again in a few minutes and SheepLog says whether they still grow."
+                            + (wrapped32.isEmpty ? "" : " The packet counts of \(FText.list(wrapped32.map(\.name), max: 4)) come from 32-bit counters (ifTable), which start again past 4,294,967,295 — at full rate every \(FText.duration(wrapped32.map(\.wrap).min() ?? 0)) on \(wrapped32.count == 1 ? "that port" : "the fastest of them") — so these totals may be understated and the rate may be far off. An agent with ifXTable (ifHCInUcastPkts) gives the true count; two walks a few minutes apart give the rate between them."),
                          ["Run Interfaces again on the SNMP Test pane in a few minutes."], top.count, cur.taken)]
         }
         return []
@@ -2627,6 +2779,38 @@ nonisolated enum FText {
     }
 
     /// A filter term, quoted unless it is one plain word.
+    /// `word:<name>`: an interface (or any name) as a whole word — a plain word `Gi1/0/1` also
+    /// showed Gi1/0/10–19's lines, `ether1` ether10's.
+    static func wordTerm(_ s: String) -> String { "word:" + quote(s) }
+
+    /// `word:a`, or `(word:a OR word:b)` for a port written two ways.
+    static func wordTerms(_ names: Set<String>) -> String {
+        let terms = names.sorted().map(wordTerm)
+        return terms.count == 1 ? terms[0] : "(" + terms.joined(separator: " OR ") + ")"
+    }
+
+    /// Cisco's abbreviations spelled out (`Gi1/0/5` → `GigabitEthernet1/0/5`, `Te1/1/1`,
+    /// `Fa0/1`, `Po10`, NX-OS / Arista `Eth1/1` / `Et5`, Huawei `GE0/0/5` / `XGE0/0/1`): the
+    /// same port in a PM / err-disable line and in a LINK line. Anything else is kept.
+    static func canonicalInterface(_ s: String) -> String {
+        let letters = s.prefix { $0.isLetter }
+        guard !letters.isEmpty, letters.count < s.count, s[letters.endIndex].isNumber else { return s }
+        let full: [String: String] = [
+            "gi": "GigabitEthernet", "gig": "GigabitEthernet", "ge": "GigabitEthernet", "fa": "FastEthernet",
+            "te": "TenGigabitEthernet", "ten": "TenGigabitEthernet", "tw": "TwoGigabitEthernet", "fi": "FiveGigabitEthernet",
+            "twe": "TwentyFiveGigE", "fo": "FortyGigabitEthernet", "hu": "HundredGigE", "po": "Port-channel",
+            "eth": "Ethernet", "et": "Ethernet", "xge": "XGigabitEthernet",
+        ]
+        let lower = letters.lowercased()
+        // Linux's eth0 is no NX-OS Ethernet port: the short forms that are also other systems'
+        // names only with a slot ("Eth1/1", "GE0/0/5").
+        if ["eth", "et", "ge"].contains(lower), !s[letters.endIndex...].contains("/") { return s }
+        if let name = full[lower] { return name + s[letters.endIndex...] }
+        // Full names in any case ("gigabitethernet1/0/5") read as the same port.
+        for name in Set(full.values) where name.lowercased() == lower { return name + s[letters.endIndex...] }
+        return s
+    }
+
     static func quote(_ s: String) -> String {
         let plain = s.unicodeScalars.allSatisfy { CharacterSet.alphanumerics.contains($0) || "._-:".unicodeScalars.contains($0) }
         return plain && !s.isEmpty && !["AND", "OR", "NOT", "NOR"].contains(s.uppercased()) ? s : "\"" + s.replacingOccurrences(of: "\"", with: "") + "\""

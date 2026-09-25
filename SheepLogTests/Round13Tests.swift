@@ -275,6 +275,10 @@ final class Round13Tests: XCTestCase {
         cases.append(RuleCase(rule: "routing.notUp", severity: .bad,
                               title: "BGP neighbor 10.0.0.9 on R1 has not come up: 3 state changes from \(c(0)) to \(c(120)), none to Established.",
                               make: logs(steps([0, 60, 120])), below: logs(steps([0, 60, 110]))))
+        // Round 16: a routing session's MD5 password mismatch.
+        cases.append(RuleCase(rule: "routing.authFail", severity: .bad,
+                              title: "BGP session with 10.0.0.2 on R1 fails its MD5 authentication: 1 segment rejected at \(c(0)).",
+                              make: logs { $0.add(0, "R1", "%TCP-6-BADAUTH: Invalid MD5 digest from 10.0.0.2(179) to 10.0.0.1(11003) tableid - 0", sev: 6) }))
         cases.append(RuleCase(rule: "config.change", severity: .info, title: "Configuration changed on R1 by admin at \(c(0)).",
                               make: logs { $0.add(0, "R1", "%SYS-5-CONFIG_I: Configured from console by admin on vty0 (10.1.0.5)") }))
         cases.append(RuleCase(rule: "device.restart", severity: .warn, title: "R1 restarted at \(c(0)).",
@@ -902,7 +906,7 @@ final class Round13Tests: XCTestCase {
         let dir = Round12Tests.testsDir.appending(path: "corpus")
         let other = try String(contentsOf: dir.appending(path: "other.log"), encoding: .utf8).split(whereSeparator: \.isNewline).map(String.init)
         let forti = try String(contentsOf: dir.appending(path: "fortigate.log"), encoding: .utf8).split(whereSeparator: \.isNewline).map(String.init)
-        XCTAssertEqual(other.count, 63, "round 14 added lines 39–53 (Round14Tests reads them), round 15 lines 54–63 (Round15Tests)")
+        XCTAssertEqual(other.count, 73, "round 14 added lines 39–53 (Round14Tests reads them), round 15 lines 54–63 (Round15Tests), round 16 lines 64–73 (Round16Tests)")
         XCTAssertEqual(forti.count, 14, "round 15 added lines 11–14")
         let read = (other[21..<38] + forti[8..<10]).map { LineClassifier.line(parsedLine($0, from: "10.9.9.9")).map { "\($0)" } ?? "nil" }
         XCTAssertEqual(read, [

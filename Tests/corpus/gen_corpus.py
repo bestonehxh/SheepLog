@@ -52,6 +52,14 @@ corpus["arubacx"] = [
      "warning", "CX8360-AGG-02", "bgpd", 4, "2026-09-23T10:23:00.100+07:00"),
     ('<190>1 2026-09-23T10:23:30.100+07:00 CX8360-AGG-02 bgpd 2951 - - Event|4401|LOG_INFO|BGP|-|BGP peer 10.2.0.9 changed state from OpenConfirm to Established',
      "info", "CX8360-AGG-02", "bgpd", 4, "2026-09-23T10:23:30.100+07:00"),
+    # Round 16: a port err-disabled for flapping, its recovery (no link event of its own) and the
+    # link back.
+    ('<188>1 2026-09-23T10:24:00.100+07:00 CX6300-ACC-12 intfd 1633 - - Event|410|LOG_WARN|AMM|1/1|port 1/1/7 is err-disabled due to link-flap',
+     "warning", "CX6300-ACC-12", "intfd", 4, "2026-09-23T10:24:00.100+07:00"),
+    ('<190>1 2026-09-23T10:29:00.100+07:00 CX6300-ACC-12 intfd 1633 - - Event|411|LOG_INFO|AMM|1/1|port 1/1/7 recovered from err-disabled state',
+     "info", "CX6300-ACC-12", "intfd", 4, "2026-09-23T10:29:00.100+07:00"),
+    ('<190>1 2026-09-23T10:29:02.100+07:00 CX6300-ACC-12 intfd 1633 - - Event|403|LOG_INFO|AMM|1/1|Link status for interface 1/1/7 is up',
+     "info", "CX6300-ACC-12", "intfd", 4, "2026-09-23T10:29:02.100+07:00"),
 ]
 
 # ---------------------------------------------------------------- Aruba AOS 8 / Instant AP
@@ -147,6 +155,14 @@ corpus["huawei"] = [
      "warning", "HW-NE40E", "OSPF/4/NBR_CHANGE_E", 9, "2026-09-23T10:21:20"),
     ('<189>Sep 23 2026 10:21:40 HW-NE40E %%01OSPF/4/NBR_CHANGE_E(l)[25]:Neighbor changes event: neighbor status changed. (ProcessId=1, NeighborAddress=10.0.0.10, NeighborEvent=LoadingDone, NeighborPreviousState=Loading, NeighborCurrentState=Full)',
      "warning", "HW-NE40E", "OSPF/4/NBR_CHANGE_E", 9, "2026-09-23T10:21:40"),
+    # Round 16: a port put in error-down for flapping (the message never says "link"), its
+    # automatic recovery and the port back up.
+    ('<188>Sep 23 2026 10:22:00 S5720-ACC-07 %%01ERRDOWN/4/ERRDOWN_DOWNNOTIFY(l)[26]:Notify interface to change status to error-down. (InterfaceName=GigabitEthernet0/0/5, Cause=link-flap)',
+     "warning", "S5720-ACC-07", "ERRDOWN/4/ERRDOWN_DOWNNOTIFY", 6, "2026-09-23T10:22:00"),
+    ('<188>Sep 23 2026 10:27:00 S5720-ACC-07 %%01ERRDOWN/4/ERRDOWN_DOWNRECOVER(l)[27]:Notify interface to recover state from error-down. (InterfaceName=GigabitEthernet0/0/5, Cause=link-flap, RecoverType=auto recovery)',
+     "warning", "S5720-ACC-07", "ERRDOWN/4/ERRDOWN_DOWNRECOVER", 7, "2026-09-23T10:27:00"),
+    ('<188>Sep 23 2026 10:27:02 S5720-ACC-07 %%01IFNET/4/IF_STATE(l)[28]:Interface GigabitEthernet0/0/5 has turned into UP state.',
+     "warning", "S5720-ACC-07", "IFNET/4/IF_STATE", 4, "2026-09-23T10:27:02"),
 ]
 
 # ---------------------------------------------------------------- Check Point R81 (log_exporter)
@@ -445,6 +461,32 @@ corpus["other"] = [
      "info", "frr-edge1", "zebra", 0, "2026-09-23T10:29:00"),
     ('<30>Sep 23 10:29:20 frr-edge1 zebra[870]: interface eth3 index 5 changed <UP,BROADCAST,RUNNING,MULTICAST>.',
      "info", "frr-edge1", "zebra", 0, "2026-09-23T10:29:20"),
+    # Round 16: Linux `ip monitor link` relayed by a script — eth1 loses its carrier and gets it
+    # back; docker0 with no container is NO-CARRIER by design (nothing).
+    ('<30>Sep 23 10:30:00 lnx-gw1 netmon[2201]: 3: eth1: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc fq_codel state DOWN group default',
+     "info", "lnx-gw1", "netmon", 0, "2026-09-23T10:30:00"),
+    ('<30>Sep 23 10:30:20 lnx-gw1 netmon[2201]: 3: eth1: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP group default',
+     "info", "lnx-gw1", "netmon", 0, "2026-09-23T10:30:20"),
+    ('<30>Sep 23 10:30:25 lnx-gw1 netmon[2201]: 4: docker0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN group default',
+     "info", "lnx-gw1", "netmon", 0, "2026-09-23T10:30:25"),
+    # Cisco IOS: a port err-disabled for flapping (named "Gi1/0/5" there, "GigabitEthernet1/0/5"
+    # in the link line), the recovery attempt, the link back.
+    ('<188>1204: ACC-SW5: Sep 23 10:31:00.000: %PM-4-ERR_DISABLE: link-flap error detected on Gi1/0/5, putting Gi1/0/5 in err-disable state',
+     "warning", "ACC-SW5", "%PM-4-ERR_DISABLE", 0, "2026-09-23T10:31:00.000"),
+    ('<188>1210: ACC-SW5: Sep 23 10:36:00.000: %PM-4-ERR_RECOVER: Attempting to recover from link-flap err-disable state on Gi1/0/5',
+     "warning", "ACC-SW5", "%PM-4-ERR_RECOVER", 0, "2026-09-23T10:36:00.000"),
+    ('<187>1211: ACC-SW5: Sep 23 10:36:02.000: %LINK-3-UPDOWN: Interface GigabitEthernet1/0/5, changed state to up',
+     "error", "ACC-SW5", "%LINK-3-UPDOWN", 0, "2026-09-23T10:36:02.000"),
+    # BGP sessions whose TCP MD5 password does not match: IOS, Junos's kernel, FRR's bgpd and
+    # the Linux kernel under it — routing findings, not failed admin logins.
+    ('<190>1300: EDGE-RTR3: Sep 23 10:37:00.000: %TCP-6-BADAUTH: Invalid MD5 digest from 10.0.16.2(179) to 10.0.16.1(34567) tableid - 0',
+     "info", "EDGE-RTR3", "%TCP-6-BADAUTH", 0, "2026-09-23T10:37:00.000"),
+    ('<28>Sep 23 10:37:10 MX204-EDGE /kernel: tcp_auth_ok: Packet from 10.0.14.6:179 missing MD5 digest',
+     "warning", "MX204-EDGE", "/kernel", 0, "2026-09-23T10:37:10"),
+    ('<27>Sep 23 10:37:20 frr-edge1 bgpd[912]: [ZJVBN-MF2PQ] 10.0.15.10 [Error] MD5 authentication failed',
+     "error", "frr-edge1", "bgpd", 0, "2026-09-23T10:37:20"),
+    ('<4>Sep 23 10:37:21 frr-edge1 kernel: [812345.678901] MD5 Hash mismatch for (10.0.15.10, 179)->(10.0.15.9, 40312)',
+     "warning", "frr-edge1", "kernel", 0, "2026-09-23T10:37:21"),
 ]
 
 total = 0

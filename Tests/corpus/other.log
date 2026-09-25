@@ -61,3 +61,13 @@
 <30>Sep 23 10:28:40 frr-edge1 ospfd[915]: [AZ9HJ-RQ2WX] AdjChg: Nbr 10.0.15.6(default) on eth2:10.0.15.5 vrf default: Loading -> Full (LoadingDone)
 <30>Sep 23 10:29:00 frr-edge1 zebra[870]: interface eth3 index 5 changed <UP,BROADCAST,MULTICAST>.
 <30>Sep 23 10:29:20 frr-edge1 zebra[870]: interface eth3 index 5 changed <UP,BROADCAST,RUNNING,MULTICAST>.
+<30>Sep 23 10:30:00 lnx-gw1 netmon[2201]: 3: eth1: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc fq_codel state DOWN group default
+<30>Sep 23 10:30:20 lnx-gw1 netmon[2201]: 3: eth1: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP group default
+<30>Sep 23 10:30:25 lnx-gw1 netmon[2201]: 4: docker0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN group default
+<188>1204: ACC-SW5: Sep 23 10:31:00.000: %PM-4-ERR_DISABLE: link-flap error detected on Gi1/0/5, putting Gi1/0/5 in err-disable state
+<188>1210: ACC-SW5: Sep 23 10:36:00.000: %PM-4-ERR_RECOVER: Attempting to recover from link-flap err-disable state on Gi1/0/5
+<187>1211: ACC-SW5: Sep 23 10:36:02.000: %LINK-3-UPDOWN: Interface GigabitEthernet1/0/5, changed state to up
+<190>1300: EDGE-RTR3: Sep 23 10:37:00.000: %TCP-6-BADAUTH: Invalid MD5 digest from 10.0.16.2(179) to 10.0.16.1(34567) tableid - 0
+<28>Sep 23 10:37:10 MX204-EDGE /kernel: tcp_auth_ok: Packet from 10.0.14.6:179 missing MD5 digest
+<27>Sep 23 10:37:20 frr-edge1 bgpd[912]: [ZJVBN-MF2PQ] 10.0.15.10 [Error] MD5 authentication failed
+<4>Sep 23 10:37:21 frr-edge1 kernel: [812345.678901] MD5 Hash mismatch for (10.0.15.10, 179)->(10.0.15.9, 40312)

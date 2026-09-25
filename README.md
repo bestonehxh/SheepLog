@@ -6,9 +6,9 @@
 
 **Syslog viewer, SNMP tester and packet capture for network engineers — a native macOS app.**
 
-[![Download SheepLog for macOS](https://img.shields.io/badge/Download-SheepLog_1.5_for_macOS-2ea44f?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/bestonehxh/SheepLog/releases/latest)
+[![Download SheepLog for macOS](https://img.shields.io/badge/Download-SheepLog_1.6_for_macOS-2ea44f?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/bestonehxh/SheepLog/releases/latest)
 
-**[Get the latest release →](https://github.com/bestonehxh/SheepLog/releases/latest)** — download `SheepLog-1.5.zip`, unzip, and drag **SheepLog.app** into `Applications`. The build is not notarised: on first launch right-click the app and choose Open.
+**[Get the latest release →](https://github.com/bestonehxh/SheepLog/releases/latest)** — download `SheepLog-1.6.zip`, unzip, and drag **SheepLog.app** into `Applications`. The build is not notarised: on first launch right-click the app and choose Open.
 
 Syslog viewer, SNMP tester and packet capture for network engineers — a native macOS app in
 the Sheep family (SheepTerm · SheepText · SheepTap · SheepPing · SheepDrop · SheepArt ·

@@ -284,13 +284,15 @@ struct LogView: View {
         .overlay(alignment: .top) { Rectangle().fill(Theme.hairline).frame(height: 0.5) }
     }
 
-    private var footerText: String {
+    private var footerText: String { Self.footerText(store: store, diskLogging: model.settings.diskLogging) }
+
+    static func footerText(store: LogStore, diskLogging: Bool) -> String {
         let n = store.entries.count
         let limit = max(1, store.limit)
         var s = "\(Format.count(store.visible.count)) shown of \(Format.count(n)) · \(LogView.rateText(store.rate)) · buffer \(Format.count(limit)) (\(Int((Double(n) / Double(limit) * 100).rounded())) %)"
         s += Self.dropText(dropped: store.dropped, lost: store.lost)
         if let note = store.exportNote { s += " · \(note)" }
-        if model.settings.diskLogging, let logger = store.diskLogger {
+        if diskLogging, let logger = store.diskLogger {
             s += " · Saving to \(Self.abbreviate((logger.currentFile ?? logger.todaysFile).path))"
         }
         return s

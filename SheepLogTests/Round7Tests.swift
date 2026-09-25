@@ -529,7 +529,7 @@ final class Round7Tests: XCTestCase {
         let f = try demoLossFlow()
         XCTAssertEqual(FlowView.packetFilter([3, 5], flow: f), "frame:3 OR frame:5")
         let big = FlowView.packetFilter(Array(100...400), flow: f)
-        XCTAssertTrue(big.hasPrefix("frame:>=100 frame:<=400 ip:"), big)
+        XCTAssertTrue(big.hasPrefix("frame:>=100 frame:<=400 proto:tcp ((src:"), big)   // round 16: each address with its own port
         // Up to what one filter can list: the frames themselves (round 11 — a range showed the
         // ACKs between a data group's segments too).
         XCTAssertEqual(FlowView.packetFilter(Array(100...180), flow: f), (100...180).map { "frame:\($0)" }.joined(separator: " OR "))

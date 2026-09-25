@@ -1213,6 +1213,163 @@ nonisolated struct AddressNeedle: Sendable {
     }
 }
 
+/// A complete IPv4 / IPv6 address typed as a bare word (or phrase): found in a line's text only
+/// as a whole address. As a plain substring `10.0.0.2` also found 10.0.0.20–29 and 110.0.0.2,
+/// so every evidence filter that named a neighbor, a login source or a client showed the lines
+/// of the addresses that start or end with its digits. `10.0.0.` (a prefix) stays a substring;
+/// `raw:10.0.0.2` (logs) / `info:10.0.0.2` (packets) is the substring when one is wanted.
+nonisolated struct AddressWord: Sendable {
+    let text: String
+    let v6: Bool
+    /// The address's bytes (4 or 16).
+    let bytes: [UInt8]
+    /// Lower-cased spellings to look for: as typed and, for IPv6, inet_ntop's (what a device
+    /// that prints addresses with inet_ntop writes: `2001:DB8:0:0::1` typed finds `2001:db8::1`).
+    let forms: [[UInt8]]
+
+    init?(_ s: String) {
+        guard LogMatcher.isFullAddress(s), let b = CIDR.bytes(of: s) else { return nil }
+        text = s
+        bytes = b
+        v6 = b.count == 16
+        var f = [Array(s.lowercased().utf8)]
+        if v6 {
+            var a = in6_addr()
+            withUnsafeMutableBytes(of: &a) { raw in for i in 0..<16 { raw[i] = b[i] } }
+            var buf = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+            if inet_ntop(AF_INET6, &a, &buf, socklen_t(buf.count)) != nil {
+                let canon = Array(String(cString: buf).lowercased().utf8)
+                if canon != f[0] { f.append(canon) }
+            }
+        }
+        forms = f
+    }
+
+    /// `s` is this address (IPv6 compared by value).
+    func equals(_ s: String) -> Bool {
+        if s.caseInsensitiveCompare(text) == .orderedSame { return true }
+        guard v6, s.contains(":") else { return false }
+        return CIDR.bytes(of: s) == bytes
+    }
+
+    /// The address appears in `hay` as a whole address.
+    func found(in hay: String) -> Bool {
+        var h = hay
+        return h.withUTF8 { buf in forms.contains { Self.find($0, in: buf, v6: v6) } }
+    }
+
+    @inline(__always) static func isDigit(_ c: UInt8) -> Bool { c >= 0x30 && c <= 0x39 }
+    @inline(__always) static func isHex(_ c: UInt8) -> Bool { let l = c | 0x20; return isDigit(c) || (l >= 0x61 && l <= 0x66) }
+    @inline(__always) static func isAlnum(_ c: UInt8) -> Bool { let l = c | 0x20; return isDigit(c) || (l >= 0x61 && l <= 0x7A) }
+
+    static func find(_ n: [UInt8], in h: UnsafeBufferPointer<UInt8>, v6: Bool) -> Bool {
+        anyHit(n, in: h) { whole(h, $0, $0 + n.count, v6: v6) }
+    }
+
+    /// Each place `n` (lower-case ASCII) occurs in `h` case-insensitively, until `accept` takes
+    /// one. The first byte is found with memchr (both cases), as `Needle.search` does: a 256-term
+    /// filter of addresses over 100,000 lines compared every byte of every line 256 times.
+    static func anyHit(_ n: [UInt8], in h: UnsafeBufferPointer<UInt8>, _ accept: (Int) -> Bool) -> Bool {
+        let m = n.count, len = h.count
+        guard m > 0, m <= len, let base = h.baseAddress else { return false }
+        let first = n[0]
+        let other: UInt8? = first >= 0x61 && first <= 0x7A ? first & ~0x20 : nil
+        let last = len - m
+        var i = 0
+        while i <= last {
+            var at = Int.max
+            if let p = memchr(base + i, Int32(first), last - i + 1) { at = base.distance(to: p.assumingMemoryBound(to: UInt8.self)) }
+            if let o = other, let p = memchr(base + i, Int32(o), min(at, last + 1) - i) {
+                at = min(at, base.distance(to: p.assumingMemoryBound(to: UInt8.self)))
+            }
+            if at > last { return false }
+            var j = 1
+            while j < m {
+                var c = h[at + j]
+                if c >= 0x41, c <= 0x5A { c |= 0x20 }
+                if c != n[j] { break }
+                j += 1
+            }
+            if j == m, accept(at) { return true }
+            i = at + 1
+        }
+        return false
+    }
+
+    /// `h[start..<end]` is not part of a longer address or number: IPv4 — no digit (or a
+    /// digit and a dot) before, no digit (or a dot and a digit) after, so "10.0.0.2." ending
+    /// a sentence and "inside:10.0.0.2/22" are found; IPv6 — no hex digit, letter or dot
+    /// next to it and no further group after (`:` + hex), a `:` before only after a word
+    /// (ASA "outside:2001:db8::1").
+    static func whole(_ h: UnsafeBufferPointer<UInt8>, _ start: Int, _ end: Int, v6: Bool) -> Bool {
+        if start > 0 {
+            let b = h[start - 1]
+            if v6 {
+                if isAlnum(b) || b == 0x2E { return false }
+                if b == 0x3A {
+                    var k = start - 2, word = false, nonHex = false
+                    while k >= 0, isAlnum(h[k]) || h[k] == 0x5F || h[k] == 0x2D {
+                        word = true
+                        if !isHex(h[k]) { nonHex = true }
+                        k -= 1
+                    }
+                    if !(word && nonHex) { return false }
+                }
+            } else {
+                if isDigit(b) { return false }
+                if b == 0x2E, start >= 2, isDigit(h[start - 2]) { return false }
+            }
+        }
+        if end < h.count {
+            let a = h[end]
+            let next: UInt8? = end + 1 < h.count ? h[end + 1] : nil
+            if v6 {
+                if isAlnum(a) { return false }
+                if a == 0x3A, let n = next, isHex(n) || n == 0x3A { return false }
+                if a == 0x2E, let n = next, isDigit(n) { return false }
+            } else {
+                if isDigit(a) { return false }
+                if a == 0x2E, let n = next, isDigit(n) { return false }
+            }
+        }
+        return true
+    }
+}
+
+/// `word:<text>` (logs): the text as a whole word of the line — no letter or digit right
+/// before or after it, and not followed by `.`, `/` or `:` and a digit (a sub-interface or a
+/// deeper port). Interface names in evidence filters: as a plain word `Gi1/0/1` also showed
+/// Gi1/0/10–19 and `ether1` ether10.
+nonisolated struct WholeWord: Sendable {
+    let text: String
+    let lower: [UInt8]
+
+    init(_ text: String) {
+        self.text = text
+        lower = Array(text.lowercased().utf8)
+    }
+
+    func found(in hay: String) -> Bool {
+        guard !lower.isEmpty else { return true }
+        var h = hay
+        return h.withUTF8 { buf in
+            let m = lower.count, len = buf.count
+            guard m <= len else { return false }
+            let firstAlnum = AddressWord.isAlnum(lower[0]), lastAlnum = AddressWord.isAlnum(lower[m - 1])
+            return AddressWord.anyHit(lower, in: buf) { i in
+                let before: UInt8 = i > 0 ? buf[i - 1] : 0x20
+                let end = i + m
+                let after: UInt8 = end < len ? buf[end] : 0x20
+                let next: UInt8 = end + 1 < len ? buf[end + 1] : 0x20
+                let okBefore = !firstAlnum || !AddressWord.isAlnum(before)
+                let okAfter = !lastAlnum || (!AddressWord.isAlnum(after)
+                    && !((after == 0x2E || after == 0x2F || after == 0x3A) && AddressWord.isDigit(next)))
+                return okBefore && okAfter
+            }
+        }
+    }
+}
+
 /// An IPv4 or IPv6 subnet (`10.1.0.0/24`, `2001:db8::/32`), as ACLs and firewall rules write
 /// them: `host:` and address fields match the addresses inside it.
 nonisolated struct CIDR: Sendable {
@@ -1326,6 +1483,11 @@ nonisolated indirect enum LogMatcher: Sendable {
     /// A bare word or phrase: the raw line — and, for a trap (whose raw text is dotted OIDs),
     /// the message with the resolved names too.
     case word(Needle)
+    /// A bare complete IPv4 / IPv6 address: that address as a whole in the raw line (trap
+    /// message too) — not 10.0.0.20 for `10.0.0.2`.
+    case address(AddressWord)
+    /// `word:x`: x as a whole word of the raw line (trap message too).
+    case wholeWord(WholeWord)
     case message(QueryOp, Needle)
     case regex(GuardedRegex)
     case host(QueryOp, Needle)
@@ -1341,6 +1503,8 @@ nonisolated indirect enum LogMatcher: Sendable {
     case facility(QueryOp, Int)
     case vendor(QueryOp, Set<Vendor>)
     case program(QueryOp, Needle)
+    /// `app:sshd$`: that program and no longer one (`app:sshd` also found sshd-session).
+    case programIs(QueryOp, String)
     case pid(QueryOp, String)
     case port(QueryOp, Int)
     case transport(QueryOp, String)
@@ -1416,6 +1580,7 @@ nonisolated indirect enum LogMatcher: Sendable {
     /// has it (FortiOS writes `action="deny"` with quotes the raw text search misses, and the raw
     /// text of a 10.1.1.10 line contains "srcip=10.1.1.1"), else the raw text search.
     private static func compileWord(_ t: String) -> LogMatcher {
+        if let a = AddressWord(t) { return .address(a) }
         var m = LogMatcher.word(Needle(t))
         if let vendors = vendorWords[t.lowercased()] { m = .or(m, .vendor(.eq, vendors)) }
         if let eq = t.firstIndex(of: "="), eq != t.startIndex {
@@ -1478,6 +1643,11 @@ nonisolated indirect enum LogMatcher: Sendable {
         switch key {
         case "host", "hostname", "ip":
             if isFullAddress(value) { return .hostExact(op, AddressNeedle(value)) }
+            // `host:SW1$`: that name (or address) and no longer one — `host:SW1` is a prefix
+            // and also SW10–19 (a relay's findings named each switch that way).
+            if value.count > 1, value.hasSuffix("$"), op == .eq || op == .ne {
+                return .hostExact(op, AddressNeedle(String(value.dropLast())))
+            }
             if let c = CIDR(value), op == .eq || op == .ne { return .hostCIDR(op, c) }
             if let g = Glob(value), op == .eq || op == .ne { return .hostGlob(op, g) }
             return .host(op, Needle(value))
@@ -1513,9 +1683,15 @@ nonisolated indirect enum LogMatcher: Sendable {
             let set = Set(exact.isEmpty ? Vendor.parse(value) : exact)
             guard !set.isEmpty else { return fieldOr(op == .eq || op == .ne ? literal() : .never) }
             return .vendor(op, set)
-        case "app", "program", "prog", "tag": return .program(op, Needle(value))
+        case "app", "program", "prog", "tag":
+            if value.count > 1, value.hasSuffix("$"), op == .eq || op == .ne { return .programIs(op, String(value.dropLast())) }
+            return .program(op, Needle(value))
         case "msg", "message": return .message(op, Needle(value))
         case "raw": return .raw(op, Needle(value))
+        case "word":
+            guard op == .eq || op == .ne else { return fieldOr(.never) }
+            let w = LogMatcher.wholeWord(WholeWord(value))
+            return fieldOr(op == .eq ? w : .not(w))
         case "pid": return .pid(op, value)
         case "port":
             // The syslog datagram's source port. `sport:` / `dport:` are the line's own fields
@@ -1539,6 +1715,11 @@ nonisolated indirect enum LogMatcher: Sendable {
             }
             return .fieldExists(keys: [KeyName(value)], negate: op == .ne)
         default:
+            // An IPv6 address that starts with a letter (`fe80::1`, `fd00::2`) reads as a key:
+            // it is the address, as a whole, like any other bare address.
+            if op == .eq || op == .ne, let a = AddressWord("\(key):\(value)") {
+                return op == .eq ? .address(a) : .not(.address(a))
+            }
             return fieldOr(op == .eq || op == .ne ? literal() : .never)
         }
     }
@@ -1558,6 +1739,10 @@ nonisolated indirect enum LogMatcher: Sendable {
         case .raw(let op, let n): return Self.text(e.raw, op, n)
         case .word(let n):
             return n.found(in: e.raw) || (e.transport == .trap && n.found(in: e.message))
+        case .address(let a):
+            return a.found(in: e.raw) || (e.transport == .trap && a.found(in: e.message))
+        case .wholeWord(let w):
+            return w.found(in: e.raw) || (e.transport == .trap && w.found(in: e.message))
         case .message(let op, let n): return Self.text(e.message, op, n)
         case .regex(let r): return r.matches(e.raw) || (e.transport == .trap && r.matches(e.message))
         case .hostExact(let op, let a):
@@ -1588,6 +1773,9 @@ nonisolated indirect enum LogMatcher: Sendable {
             default: return false
             }
         case .program(let op, let n): return Self.text(e.program, op, n)
+        case .programIs(let op, let v):
+            let hit = e.program.caseInsensitiveCompare(v) == .orderedSame
+            return op == .ne ? !hit : hit
         case .pid(let op, let v):
             guard let pid = e.pid else { return op == .ne }
             switch op {

@@ -73,15 +73,15 @@ final class Round15Tests: XCTestCase {
     func testRound15CorpusLinesAreRead() throws {
         let other = try Self.corpus("other"), forti = try Self.corpus("fortigate"), hw = try Self.corpus("huawei")
         let pa = try Self.corpus("paloalto"), cx = try Self.corpus("arubacx")
-        XCTAssertEqual([other.count, forti.count, hw.count, pa.count, cx.count], [63, 14, 13, 14, 14])
+        XCTAssertEqual([other.count, forti.count, hw.count, pa.count, cx.count], [73, 14, 16, 14, 17], "round 16 added other 64–73, huawei 14–16, arubacx 15–17 (Round16Tests)")
         func bgp(_ n: String, _ up: Bool) -> String { "routing(proto: \"BGP\", neighbor: \"\(n)\", up: \(up))" }
         func ospf(_ n: String, _ up: Bool) -> String { "routing(proto: \"OSPF\", neighbor: \"\(n)\", up: \(up))" }
         let table: [(String, [String])] = [
-            ("other 54–63", other[53...].map(Self.kind)),
+            ("other 54–63", other[53..<63].map(Self.kind)),
             ("fortigate 11–14", forti[10...].map(Self.kind)),
-            ("huawei 9–13", hw[8...].map(Self.kind)),
+            ("huawei 9–13", hw[8..<13].map(Self.kind)),
             ("paloalto 11–14", pa[10...].map(Self.kind)),
-            ("arubacx 11–14", cx[10...].map(Self.kind)),
+            ("arubacx 11–14", cx[10..<14].map(Self.kind)),
         ]
         let want: [[String]] = [
             ["routingNotice(proto: \"BGP\", neighbor: \"10.0.14.2\", reason: \"Cease/Administratively Reset\", sent: true)",
@@ -133,8 +133,8 @@ final class Round15Tests: XCTestCase {
             XCTAssertEqual(store.visible.map(\.id), [1], "`\(store.queryText)` for \(line)")
         }
         // Each vendor's own down and up, with what is between: nothing.
-        for (name, lines) in [("other", Array(other[53...])), ("fortigate", Array(forti[10...])), ("huawei", Array(hw[8...])),
-                              ("paloalto", Array(pa[10...])), ("arubacx", Array(cx[10...]))] {
+        for (name, lines) in [("other", Array(other[53..<63])), ("fortigate", Array(forti[10...])), ("huawei", Array(hw[8..<13])),
+                              ("paloalto", Array(pa[10...])), ("arubacx", Array(cx[10..<14]))] {
             let r = Round12Tests.analyze(Round12Tests.live(lines, hostless: "10.78.0.1"))
             XCTAssertTrue(r.findings.isEmpty, "\(name): \(r.findings.map(\.title))")
         }
@@ -204,8 +204,9 @@ final class Round15Tests: XCTestCase {
             ("<187>Sep 23 10:29:11 SW1 lldpd[99]: LLDP neighbor 10.1.0.9 removed on port 1/1/24", "nil"),
             ("<189>Sep 23 10:29:12 SW1 %CDP-4-NATIVE_VLAN_MISMATCH: Native VLAN mismatch discovered on Gi1/0/1 (10), with neighbor SW2 Gi0/1 (20).", "nil"),
             ("<28>Sep 23 10:29:13 host1 kernel: IPv6: eth0: IPv6 duplicate address fe80::1 used by 02:00:5e:00:00:01 detected! neighbor down", "nil"),
-            // "flap": a link-flap err-disable (no state word), a flapping BGP peer's down.
-            ("<187>Sep 23 10:29:14 SW1 %PM-4-ERR_DISABLE: link-flap error detected on Gi0/1, putting Gi0/1 in err-disable state", "nil"),
+            // "flap": a link-flap err-disable is the port shut by the switch (round 16: a down; it
+            // was nothing — "link-flap" alone is no state word), a flapping BGP peer's down.
+            ("<187>Sep 23 10:29:14 SW1 %PM-4-ERR_DISABLE: link-flap error detected on Gi0/1, putting Gi0/1 in err-disable state", "link(iface: \"Gi0/1\", up: false)"),
             ("<189>Sep 23 10:29:15 FLAP-RTR %BGP-5-ADJCHANGE: neighbor 10.0.0.2 Down Interface flap", "routing(proto: \"BGP\", neighbor: \"10.0.0.2\", up: false)"),
             // "peer" / "established": a TLS peer, an established SSH session, a daemon going down.
             ("<30>Sep 23 10:29:16 web01 nginx[5]: SSL_do_handshake() failed: peer closed connection in SSL handshake", "nil"),
@@ -864,7 +865,7 @@ final class RAMDisk {
     /// dot or no dot).
     static let system: Set<String> = [".fseventsd", ".Trashes", ".Spotlight-V100", ".TemporaryItems", ".DS_Store", ".DocumentRevisions-V100"]
 
-    private init(device: String, mount: URL) {
+    init(device: String, mount: URL) {
         self.device = device
         self.mount = mount
     }
