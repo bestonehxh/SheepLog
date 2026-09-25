@@ -116,7 +116,7 @@ final class TroubleshootModel: ObservableObject {
         input.entries = app.logs.entries
         // A paused Log pane holds new lines back from its table, not from the checks: while the
         // user read the Log, a port flapping now was invisible here until Resume.
-        if app.logs.paused { input.held = app.logs.heldEntries }
+        if app.logs.paused { input.held = app.logs.heldEntriesForAnalysis() }
         input.packets = app.packets.packets
         input.packetEpoch = app.packets.epoch
         input.snmp = snmpHistory
@@ -264,6 +264,14 @@ enum TroubleshootJump {
     /// showed an empty Log pane, or the device's newer lines as if they were the evidence.
     @discardableResult
     static func show(_ e: Evidence, epoch: Int? = nil) -> Outcome {
+        // Lines that arrived after Pause are held back from the table: the evidence Show on
+        // them opened a Log that said only "N newer lines are waiting". The engineer asked to
+        // see these lines — the table resumes (before counting what is present: the resume may
+        // push some of them out of a small buffer), and its footer says why.
+        let logs = AppModel.shared.logs
+        if e.kind == .logLines || e.kind == .traps, logs.paused, logs.holdsAny(ids: e.ids) {
+            logs.resume(note: "Resumed to show the finding’s lines (they arrived while the Log was paused)")
+        }
         let presence = present(e, epoch: epoch)
         if let p = presence, p.present == 0 { return .gone(goneText(e, total: p.total)) }
         switch e.kind {
@@ -544,7 +552,7 @@ struct TroubleshootView: View {
             }
         }
         FilterField(text: $filter.text, prompt: "Filter findings", mono: false,
-                    help: "Matches titles, details, devices and clients as you type. ⌘F to focus, Esc to clear", focus: $filterFocused)
+                    help: "Matches titles, details, devices and clients as you type — words are ANDed; OR, NOT / -word, \"phrase\", sev:problem, device:, rule: as in the Log filter. ⌘F to focus, Esc to clear", focus: $filterFocused)
             .frame(width: paneWidth > 0 && paneWidth < 900 ? 130 : 190)
     }
 

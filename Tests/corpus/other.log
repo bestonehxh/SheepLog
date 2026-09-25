@@ -71,3 +71,16 @@
 <28>Sep 23 10:37:10 MX204-EDGE /kernel: tcp_auth_ok: Packet from 10.0.14.6:179 missing MD5 digest
 <27>Sep 23 10:37:20 frr-edge1 bgpd[912]: [ZJVBN-MF2PQ] 10.0.15.10 [Error] MD5 authentication failed
 <4>Sep 23 10:37:21 frr-edge1 kernel: [812345.678901] MD5 Hash mismatch for (10.0.15.10, 179)->(10.0.15.9, 40312)
+<189>2026 Sep 23 10:40:00 N9K-LEAF-03 %ETHPORT-5-IF_DOWN_ERROR_DISABLED: Interface Ethernet1/12 is down (Error disabled. Reason:Too many link flaps)
+<189>2026 Sep 23 10:45:00 N9K-LEAF-03 %ETHPORT-5-IF_ERRDIS_RECOVERY: Interface Ethernet1/12 is being recovered from error disabled state (Last Reason:Too many link flaps)
+<189>2026 Sep 23 10:45:03 N9K-LEAF-03 %ETHPORT-5-IF_UP: Interface Ethernet1/12 is up in mode access
+<28>1 2026-09-23T10:41:00.123+07:00 QFX5120-SPINE1 mib2d 1850 SNMP_TRAP_LINK_DOWN [junos@2636.1.1.1.2.43 snmp-interface-index="612" admin-status="up(1)" operational-status="down(2)" interface-name="xe-0/0/3"] ifIndex 612, ifAdminStatus up(1), ifOperStatus down(2), ifName xe-0/0/3
+<30>1 2026-09-23T10:41:30.123+07:00 QFX5120-SPINE1 mib2d 1850 SNMP_TRAP_LINK_UP [junos@2636.1.1.1.2.43 snmp-interface-index="612" admin-status="up(1)" operational-status="up(1)" interface-name="xe-0/0/3"] ifIndex 612, ifAdminStatus up(1), ifOperStatus up(1), ifName xe-0/0/3
+<28>Sep 23 10:42:00 QFX5220-SPINE2 mib2d[1850]: SNMP_TRAP_LINK_DOWN: ifIndex 701, ifAdminStatus up(1), ifOperStatus down(2), ifName et-0/0/31
+<30>Sep 23 10:42:20 QFX5220-SPINE2 mib2d[1850]: SNMP_TRAP_LINK_UP: ifIndex 701, ifAdminStatus up(1), ifOperStatus up(1), ifName et-0/0/31
+<188>1310: CORE-RTR1: Sep 23 10:43:00.000: %OSPF-4-ERRRCV: Received invalid packet: Mismatched Authentication Key - Message Digest Key 1 from 10.0.12.6, GigabitEthernet0/2
+<189>1311: CORE-RTR1: Sep 23 10:44:00.000: %OSPF-5-ADJCHG: Process 1, Nbr 10.0.12.6 on GigabitEthernet0/2 from LOADING to FULL, Loading Done
+<28>Sep 23 10:43:10 frr-core1 ospfd[915]: interface eth1:10.0.15.5: auth-type mismatch, local MD5, rcvd Null, Router-ID 10.255.0.2
+<29>Sep 23 10:44:10 frr-core1 ospfd[915]: AdjChg: Nbr 10.255.0.2(default) on eth1:10.0.15.5: Loading -> Full (LoadingDone)
+<28>Sep 23 10:43:20 MX204-EDGE rpd[1811]: OSPF packet ignored: authentication failure (bad password) from 10.0.14.6 on intf ge-0/0/1.0 area 0.0.0.0
+<29>Sep 23 10:44:20 MX204-EDGE rpd[1811]: RPD_OSPF_NBRUP: OSPF neighbor 10.0.14.6 (realm ospf-v2 ge-0/0/1.0 area 0.0.0.0) state changed from Loading to Full due to LoadDone (event reason: OSPF loading completed)

@@ -294,14 +294,16 @@ final class CorpusTests: XCTestCase {
         await expect(s, "f:srcip=10.1. -f:dstport=53", ["fortigate:1", "fortigate:2", "fortigate:4", "fortigate:7"])
         await expect(s, "forti sev:<=warn type=utm", ["fortigate:4", "fortigate:5"])
         // Other
-        await expect(s, "host:CORE- NOT lldp", ["other:1", "other:2"])
+        // Round 17 added CORE-RTR1's OSPF authentication lines (other 81–82).
+        await expect(s, "host:CORE- NOT lldp", ["other:1", "other:2", "other:80", "other:81"])
         await expect(s, #"vendor:other sshd "Failed password""#, ["other:8"])
         await expect(s, "app:%ASA-4 OR app:%LINK", ["other:0", "other:6", "other:35", "other:36", "other:68"])
         // Traps
         await expect(s, "trap linkDown", ["trap:0"])
         await expect(s, "vendor:trap f:ifIndex=3", ["trap:0"])
         // "trap" is also a plain word: Huawei's LLDP/4/NBRCHGTRAP contains it.
-        await expect(s, "trap sev:<=warn", ["trap:0", "trap:1", "trap:2", "huawei:4"])
+        // A bare word is also a raw substring: Junos's SNMP_TRAP_LINK_DOWN lines (round 17) say "trap".
+        await expect(s, "trap sev:<=warn", ["trap:0", "trap:1", "trap:2", "huawei:4", "other:76", "other:78"])
         await expect(s, "vendor:trap -linkDown", ["trap:1", "trap:2"])
     }
 
@@ -339,7 +341,8 @@ final class CorpusTests: XCTestCase {
         await expect(s, "severity:high", ["checkpoint:3", "paloalto:10"])
         // …but a severity word that parses is the syslog severity (PAN-OS "critical" → error).
         await expect(s, "severity:informational vendor:palo",
-                     ["paloalto:0", "paloalto:2", "paloalto:6", "paloalto:7", "paloalto:8", "paloalto:9", "paloalto:11", "paloalto:13"])
+                     ["paloalto:0", "paloalto:2", "paloalto:6", "paloalto:7", "paloalto:8", "paloalto:9", "paloalto:11", "paloalto:13",
+                      "paloalto:15", "paloalto:17"])      // round 17: link-change / HA2 link up
         await expect(s, "proto:udp vendor:palo", ["paloalto:0"])
         // Numbers are whole: 44 is not 443/445; leading zeros do not matter.
         await expect(s, "f:dport=44", [])

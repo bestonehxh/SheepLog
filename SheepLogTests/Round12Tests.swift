@@ -795,12 +795,12 @@ final class Round12Tests: XCTestCase {
         // (The SNMP Test pane's results of other tests may add SNMP findings: the log's are these.)
         XCTAssertEqual(r.findings.filter { $0.source == .logs }.map(\.rule), ["link.flap"], r.findings.map(\.title).description)
         XCTAssertEqual(r.summary.lines, 6)
-        // "Show" puts the filter on the paused Log, which says the lines are waiting.
+        // "Show" puts the filter on the Log — and, since round 17, resumes it: the lines it
+        // points at were held back (it said only "Paused — 6 newer lines are waiting").
         let e = try XCTUnwrap(r.findings.first { $0.rule == "link.flap" }?.evidence.first)
         TroubleshootJump.show(e)
-        XCTAssertTrue(LogView.noMatchText(entries: logs.entries.count, query: true, source: nil, masked: false, held: logs.pausedCount)
-            .contains("Paused — 6 newer lines are waiting"))
-        logs.paused = false
+        XCTAssertFalse(logs.paused)
+        XCTAssertNotNil(logs.resumeNote)
         let filter = LogFilter(query: logs.query, source: nil, mask: logs.severityMask)
         await waitUntil { logs.visible.count == 6 }
         XCTAssertEqual(Set(logs.visible.map(\.id)), Set(e.ids))

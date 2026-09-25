@@ -14,3 +14,8 @@
 <188>Sep 23 2026 10:22:00 S5720-ACC-07 %%01ERRDOWN/4/ERRDOWN_DOWNNOTIFY(l)[26]:Notify interface to change status to error-down. (InterfaceName=GigabitEthernet0/0/5, Cause=link-flap)
 <188>Sep 23 2026 10:27:00 S5720-ACC-07 %%01ERRDOWN/4/ERRDOWN_DOWNRECOVER(l)[27]:Notify interface to recover state from error-down. (InterfaceName=GigabitEthernet0/0/5, Cause=link-flap, RecoverType=auto recovery)
 <188>Sep 23 2026 10:27:02 S5720-ACC-07 %%01IFNET/4/IF_STATE(l)[28]:Interface GigabitEthernet0/0/5 has turned into UP state.
+<188>Sep 23 2026 10:28:00 S5720-ACC-07 %%01ERRDOWN/4/ERRDOWN_DOWNNOTIFY(l)[29]:Notify interface to change status to error-down. (InterfaceName=GigabitEthernet0/0/7, Cause=crc-statistics)
+<188>Sep 23 2026 10:33:00 S5720-ACC-07 %%01ERRDOWN/4/ERRDOWN_DOWNRECOVER(l)[30]:Notify interface to recover state from error-down. (InterfaceName=GigabitEthernet0/0/7, Cause=crc-statistics, RecoverType=auto recovery)
+<188>Sep 23 2026 10:33:03 S5720-ACC-07 %%01IFNET/4/IF_STATE(l)[31]:Interface GigabitEthernet0/0/7 has turned into UP state.
+<188>Sep 23 2026 10:34:00 S5720-ACC-07 %%01ERRDOWN/4/ERRDOWN_DOWNNOTIFY(l)[32]:Notify interface to change status to error-down. (InterfaceName=GigabitEthernet0/0/8, Cause=mac-address-flapping)
+<188>Sep 23 2026 10:39:02 S5720-ACC-07 %%01IFNET/4/IF_STATE(l)[33]:Interface GigabitEthernet0/0/8 has turned into UP state.

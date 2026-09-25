@@ -50,8 +50,14 @@ final class LogStore: ObservableObject {
     }
     /// While paused, batches are still counted and buffered on disk but not appended to `entries`.
     @Published var paused: Bool = false {
-        didSet { if oldValue, !paused { resume() } }
+        didSet {
+            if oldValue, !paused { resume() }
+            if paused, resumeNote != nil { resumeNote = nil }
+        }
     }
+    /// Why the table was resumed by something other than the Resume button (a Troubleshoot
+    /// evidence "Show" whose lines were held back by Pause); the footer says it.
+    @Published private(set) var resumeNote: String?
     /// Sidebar source selection (address) — nil = all sources.
     @Published var selectedSource: String? {
         didSet { if selectedSource != oldValue { requestRescan() } }
@@ -128,6 +134,40 @@ final class LogStore: ObservableObject {
     /// Lines received while paused, held back from the table (Troubleshoot reads them too: a
     /// paused Log pane is about what the user is reading, not about what the network did).
     var heldEntries: [LogEntry] { pausedQueue }
+    /// The overrides the held lines were last re-parsed for (`heldEntriesForAnalysis`).
+    private var heldReparsedFor: [String: Int] = [:]
+
+    /// `heldEntries` as the vendor overrides of the moment read them: an override set while the
+    /// Log was paused re-parsed the ring at once but the held lines only at Resume, so
+    /// Troubleshoot analysed them as the old vendor (a FortiGate forced by its override read as
+    /// "Other": its interface-down was no finding until Resume). The re-parsed lines replace the
+    /// held ones (their source counters follow), so Resume finds them done.
+    func heldEntriesForAnalysis() -> [LogEntry] {
+        // Once per override change (the analysis runs every 2 s while paused; lines held after
+        // the change were parsed with it).
+        guard !pausedQueue.isEmpty, !overrideChangedAtID.isEmpty, heldReparsedFor != overrideChangedAtID else { return pausedQueue }
+        heldReparsedFor = overrideChangedAtID
+        let fresh = reparsedForOverrideChanges(pausedQueue, accounted: true)
+        var bytes = 0
+        for e in fresh { bytes += Self.cost(e) }
+        pausedQueue = fresh
+        pausedBytes = bytes
+        return fresh
+    }
+
+    /// Some of `ids` are held back by Pause (not in the table).
+    func holdsAny(ids: [Int]) -> Bool {
+        guard paused, !pausedQueue.isEmpty, !ids.isEmpty else { return false }
+        let want = Set(ids)
+        return pausedQueue.contains { want.contains($0.id) }
+    }
+
+    /// Resumes the table and says why (the footer shows `note` until the next Pause or Clear).
+    func resume(note: String) {
+        guard paused else { return }
+        paused = false
+        resumeNote = note
+    }
 
     /// How many of `ids` are still in memory (in the ring, or held back by Pause).
     func countPresent(ids: [Int]) -> Int {
@@ -329,6 +369,7 @@ final class LogStore: ObservableObject {
         // "Exported 1,204 lines to x.csv" stayed in the footer of the emptied table (an export
         // still writing sets it again when done: its file is what the note names).
         if exportNote != nil { exportNote = nil }
+        if resumeNote != nil { resumeNote = nil }
         evictedTotal += entries.count
         entries = []
         entryBytes = 0
@@ -1226,6 +1267,10 @@ nonisolated struct AddressWord: Sendable {
     /// Lower-cased spellings to look for: as typed and, for IPv6, inet_ntop's (what a device
     /// that prints addresses with inet_ntop writes: `2001:DB8:0:0::1` typed finds `2001:db8::1`).
     let forms: [[UInt8]]
+    /// IPv6: the longest group without its leading zeros (`db8` of 2001:db8::2 is shorter than
+    /// `2001`) — every spelling of the address holds it (`2001:0DB8:0:0:0:0:0:2`,
+    /// `2001:db8:0::2`), so only lines that do are parsed for an address of that value.
+    let anchor: [UInt8]?
 
     init?(_ s: String) {
         guard LogMatcher.isFullAddress(s), let b = CIDR.bytes(of: s) else { return nil }
@@ -1233,6 +1278,7 @@ nonisolated struct AddressWord: Sendable {
         bytes = b
         v6 = b.count == 16
         var f = [Array(s.lowercased().utf8)]
+        var anchor: [UInt8]?
         if v6 {
             var a = in6_addr()
             withUnsafeMutableBytes(of: &a) { raw in for i in 0..<16 { raw[i] = b[i] } }
@@ -1241,8 +1287,15 @@ nonisolated struct AddressWord: Sendable {
                 let canon = Array(String(cString: buf).lowercased().utf8)
                 if canon != f[0] { f.append(canon) }
             }
+            for g in 0..<8 {
+                let v = UInt16(b[2 * g]) << 8 | UInt16(b[2 * g + 1])
+                guard v != 0 else { continue }
+                let hex = Array(String(v, radix: 16).utf8)
+                if hex.count > (anchor?.count ?? 0) { anchor = hex }
+            }
         }
         forms = f
+        self.anchor = anchor
     }
 
     /// `s` is this address (IPv6 compared by value).
@@ -1252,10 +1305,102 @@ nonisolated struct AddressWord: Sendable {
         return CIDR.bytes(of: s) == bytes
     }
 
-    /// The address appears in `hay` as a whole address.
+    /// The address appears in `hay` as a whole address — IPv6 in any spelling (round 17: as
+    /// typed or in inet_ntop's form only, so `2001:db8::2` missed a device's
+    /// `2001:0db8:0000:0000:0000:0000:0000:0002` and `2001:DB8:0:0::2`).
     func found(in hay: String) -> Bool {
         var h = hay
-        return h.withUTF8 { buf in forms.contains { Self.find($0, in: buf, v6: v6) } }
+        return h.withUTF8 { buf in
+            if forms.contains(where: { Self.find($0, in: buf, v6: v6) }) { return true }
+            guard let anchor else { return false }
+            return Self.anyHit(anchor, in: buf) { at in byValue(buf, around: at, anchorLength: anchor.count) }
+        }
+    }
+
+    /// The IPv6 token around a hit of the anchor, parsed: this address as a whole. The token is
+    /// the run of hex digits, `:` and `.` around it; when it does not parse, the parts after a
+    /// single `:` are tried (ASA "outside:2001:db8::2", where "de:" glued "outside" on), and a
+    /// trailing `.` / `:` is dropped ("… from 2001:db8::2.").
+    private func byValue(_ h: UnsafeBufferPointer<UInt8>, around at: Int, anchorLength: Int) -> Bool {
+        @inline(__always) func tokenByte(_ c: UInt8) -> Bool { Self.isHex(c) || c == 0x3A || c == 0x2E }
+        var s = at, e = at + anchorLength
+        while s > 0, tokenByte(h[s - 1]) { s -= 1 }
+        while e < h.count, tokenByte(h[e]) { e += 1 }
+        guard e - s <= 128 else { return false }
+        var end = e
+        while end > s, h[end - 1] == 0x2E || (h[end - 1] == 0x3A && !(end - 2 >= s && h[end - 2] == 0x3A)) { end -= 1 }
+        // Every spelling ends with the address's last group ("…:2", "…:0002", "…::" for 0):
+        // a token that ends otherwise is another address — told without parsing it (most of a
+        // busy log's addresses share the /32 the anchor is from). A dotted IPv4 tail is parsed.
+        var j = end, last: UInt32 = 0, digits = 0
+        while j > s, Self.isHex(h[j - 1]) {
+            let c = h[j - 1] | 0x20
+            if digits < 8 { last |= UInt32(c <= 0x39 ? c - 0x30 : c - 0x61 + 10) << (4 * digits) }
+            digits += 1; j -= 1
+        }
+        if !(j > s && h[j - 1] == 0x2E), digits > 4 || last != UInt32(bytes[14]) << 8 | UInt32(bytes[15]) { return false }
+        // The token as it stands, then from after each single ':' before the anchor.
+        func tryAt(_ start: Int) -> Bool {
+            end - start >= 2 && end - start <= 45 && parses(h, start, end) && Self.whole(h, start, end, v6: true)
+        }
+        if tryAt(s) { return true }
+        var k = s
+        while k < at {
+            if h[k] == 0x3A, h[k + 1] != 0x3A, k == s || h[k - 1] != 0x3A, tryAt(k + 1) { return true }
+            k += 1
+        }
+        return false
+    }
+
+    /// `h[start..<end]` is an IPv6 address equal to this one. Parsed by hand (inet_pton and a
+    /// buffer per hit made a filter of one address over 100,000 lines full of addresses of
+    /// its /32 seven times slower than a word); a dotted IPv4 tail goes to inet_pton.
+    private func parses(_ h: UnsafeBufferPointer<UInt8>, _ start: Int, _ end: Int) -> Bool {
+        var groups = SIMD8<UInt16>(), n = 0, gap = -1
+        var i = start
+        if i + 1 < end, h[i] == 0x3A, h[i + 1] == 0x3A { gap = 0; i += 2 }
+        while i < end {
+            var v: UInt16 = 0, digits = 0
+            while i < end, Self.isHex(h[i]) {
+                guard digits < 4 else { return false }
+                let c = h[i] | 0x20
+                v = v << 4 | UInt16(c <= 0x39 ? c - 0x30 : c - 0x61 + 10)
+                digits += 1; i += 1
+            }
+            if i < end, h[i] == 0x2E { return parsesSlow(h, start, end) }
+            guard digits > 0, n < 8 else { return false }
+            groups[n] = v; n += 1
+            if i == end { break }
+            guard h[i] == 0x3A else { return false }
+            i += 1
+            if i < end, h[i] == 0x3A {
+                guard gap < 0 else { return false }
+                gap = n; i += 1
+                if i == end { break }
+            } else if i == end { return false }
+        }
+        var full = SIMD8<UInt16>()
+        if gap >= 0 {
+            guard n < 8 else { return false }
+            for k in 0..<gap { full[k] = groups[k] }
+            let tail = n - gap
+            for k in 0..<tail { full[8 - tail + k] = groups[gap + k] }
+        } else {
+            guard n == 8 else { return false }
+            full = groups
+        }
+        for k in 0..<8 where full[k] != UInt16(bytes[2 * k]) << 8 | UInt16(bytes[2 * k + 1]) { return false }
+        return true
+    }
+
+    private func parsesSlow(_ h: UnsafeBufferPointer<UInt8>, _ start: Int, _ end: Int) -> Bool {
+        withUnsafeTemporaryAllocation(of: CChar.self, capacity: 48) { buf -> Bool in
+            for i in start..<end { buf[i - start] = CChar(bitPattern: h[i]) }
+            buf[end - start] = 0
+            var a = in6_addr()
+            guard inet_pton(AF_INET6, buf.baseAddress!, &a) == 1 else { return false }
+            return withUnsafeBytes(of: &a) { raw in (0..<16).allSatisfy { raw[$0] == bytes[$0] } }
+        }
     }
 
     @inline(__always) static func isDigit(_ c: UInt8) -> Bool { c >= 0x30 && c <= 0x39 }

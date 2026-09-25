@@ -73,14 +73,14 @@ final class Round15Tests: XCTestCase {
     func testRound15CorpusLinesAreRead() throws {
         let other = try Self.corpus("other"), forti = try Self.corpus("fortigate"), hw = try Self.corpus("huawei")
         let pa = try Self.corpus("paloalto"), cx = try Self.corpus("arubacx")
-        XCTAssertEqual([other.count, forti.count, hw.count, pa.count, cx.count], [73, 14, 16, 14, 17], "round 16 added other 64–73, huawei 14–16, arubacx 15–17 (Round16Tests)")
+        XCTAssertEqual([other.count, forti.count, hw.count, pa.count, cx.count], [86, 18, 21, 18, 17], "round 16 added other 64–73, huawei 14–16, arubacx 15–17 (Round16Tests); round 17 other 74–86, fortigate 15–18, huawei 17–21, paloalto 15–18 (Round17Tests)")
         func bgp(_ n: String, _ up: Bool) -> String { "routing(proto: \"BGP\", neighbor: \"\(n)\", up: \(up))" }
         func ospf(_ n: String, _ up: Bool) -> String { "routing(proto: \"OSPF\", neighbor: \"\(n)\", up: \(up))" }
         let table: [(String, [String])] = [
             ("other 54–63", other[53..<63].map(Self.kind)),
-            ("fortigate 11–14", forti[10...].map(Self.kind)),
+            ("fortigate 11–14", forti[10..<14].map(Self.kind)),
             ("huawei 9–13", hw[8..<13].map(Self.kind)),
-            ("paloalto 11–14", pa[10...].map(Self.kind)),
+            ("paloalto 11–14", pa[10..<14].map(Self.kind)),
             ("arubacx 11–14", cx[10..<14].map(Self.kind)),
         ]
         let want: [[String]] = [
@@ -133,8 +133,8 @@ final class Round15Tests: XCTestCase {
             XCTAssertEqual(store.visible.map(\.id), [1], "`\(store.queryText)` for \(line)")
         }
         // Each vendor's own down and up, with what is between: nothing.
-        for (name, lines) in [("other", Array(other[53..<63])), ("fortigate", Array(forti[10...])), ("huawei", Array(hw[8..<13])),
-                              ("paloalto", Array(pa[10...])), ("arubacx", Array(cx[10..<14]))] {
+        for (name, lines) in [("other", Array(other[53..<63])), ("fortigate", Array(forti[10..<14])), ("huawei", Array(hw[8..<13])),
+                              ("paloalto", Array(pa[10..<14])), ("arubacx", Array(cx[10..<14]))] {
             let r = Round12Tests.analyze(Round12Tests.live(lines, hostless: "10.78.0.1"))
             XCTAssertTrue(r.findings.isEmpty, "\(name): \(r.findings.map(\.title))")
         }

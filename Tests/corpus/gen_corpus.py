@@ -163,6 +163,18 @@ corpus["huawei"] = [
      "warning", "S5720-ACC-07", "ERRDOWN/4/ERRDOWN_DOWNRECOVER", 7, "2026-09-23T10:27:00"),
     ('<188>Sep 23 2026 10:27:02 S5720-ACC-07 %%01IFNET/4/IF_STATE(l)[28]:Interface GigabitEthernet0/0/5 has turned into UP state.',
      "warning", "S5720-ACC-07", "IFNET/4/IF_STATE", 4, "2026-09-23T10:27:02"),
+    # Round 17: error-down for other causes — CRC errors over the threshold (with its recovery
+    # and the port back) and a MAC address flapping between ports (the port back up).
+    ('<188>Sep 23 2026 10:28:00 S5720-ACC-07 %%01ERRDOWN/4/ERRDOWN_DOWNNOTIFY(l)[29]:Notify interface to change status to error-down. (InterfaceName=GigabitEthernet0/0/7, Cause=crc-statistics)',
+     "warning", "S5720-ACC-07", "ERRDOWN/4/ERRDOWN_DOWNNOTIFY", 6, "2026-09-23T10:28:00"),
+    ('<188>Sep 23 2026 10:33:00 S5720-ACC-07 %%01ERRDOWN/4/ERRDOWN_DOWNRECOVER(l)[30]:Notify interface to recover state from error-down. (InterfaceName=GigabitEthernet0/0/7, Cause=crc-statistics, RecoverType=auto recovery)',
+     "warning", "S5720-ACC-07", "ERRDOWN/4/ERRDOWN_DOWNRECOVER", 7, "2026-09-23T10:33:00"),
+    ('<188>Sep 23 2026 10:33:03 S5720-ACC-07 %%01IFNET/4/IF_STATE(l)[31]:Interface GigabitEthernet0/0/7 has turned into UP state.',
+     "warning", "S5720-ACC-07", "IFNET/4/IF_STATE", 4, "2026-09-23T10:33:03"),
+    ('<188>Sep 23 2026 10:34:00 S5720-ACC-07 %%01ERRDOWN/4/ERRDOWN_DOWNNOTIFY(l)[32]:Notify interface to change status to error-down. (InterfaceName=GigabitEthernet0/0/8, Cause=mac-address-flapping)',
+     "warning", "S5720-ACC-07", "ERRDOWN/4/ERRDOWN_DOWNNOTIFY", 6, "2026-09-23T10:34:00"),
+    ('<188>Sep 23 2026 10:39:02 S5720-ACC-07 %%01IFNET/4/IF_STATE(l)[33]:Interface GigabitEthernet0/0/8 has turned into UP state.',
+     "warning", "S5720-ACC-07", "IFNET/4/IF_STATE", 4, "2026-09-23T10:39:02"),
 ]
 
 # ---------------------------------------------------------------- Check Point R81 (log_exporter)
@@ -270,6 +282,16 @@ corpus["paloalto"] = [
      "warning", "PA-3220", "SYSTEM/routing", 6, "2026-09-23T10:19:00"),
     ("<14>Sep 23 10:19:40 PA-3220 " + system("2026/09/23 10:19:40", "routed-ospf-neighbor-state-change", "routing", "informational", "OSPF neighbor 10.3.0.6 state changed from Loading to Full (VR default, interface ethernet1/5, event LoadingDone)", sub="routing"),
      "info", "PA-3220", "SYSTEM/routing", 6, "2026-09-23T10:19:40"),
+    # Round 17: SYSTEM link-change — a data port down and up (the state is in the description:
+    # "Port ethernet1/3: Down"), and the HA2 link down and up.
+    ("<10>Sep 23 10:20:00 PA-3220 " + system("2026/09/23 10:20:00", "link-change", "general", "critical", "Port ethernet1/3: Down", sub="general"),
+     "error", "PA-3220", "SYSTEM/general", 6, "2026-09-23T10:20:00"),
+    ("<14>Sep 23 10:20:30 PA-3220 " + system("2026/09/23 10:20:30", "link-change", "general", "informational", "Port ethernet1/3: Up 1Gb/s-full duplex", sub="general"),
+     "info", "PA-3220", "SYSTEM/general", 6, "2026-09-23T10:20:30"),
+    ("<10>Sep 23 10:21:00 PA-3220 " + system("2026/09/23 10:21:00", "ha2-link-change", "ha", "critical", "HA2 link down", sub="ha"),
+     "error", "PA-3220", "SYSTEM/ha", 6, "2026-09-23T10:21:00"),
+    ("<14>Sep 23 10:21:20 PA-3220 " + system("2026/09/23 10:21:20", "ha2-link-change", "ha", "informational", "HA2 link up", sub="ha"),
+     "info", "PA-3220", "SYSTEM/ha", 6, "2026-09-23T10:21:20"),
 ]
 
 # ---------------------------------------------------------------- FortiOS 7.x
@@ -311,6 +333,16 @@ corpus["fortigate"] = [
      "warning", "FGT-100F-HQ", "event/router", 13, "2026-09-23T10:32:00.123+07:00"),
     ('<189>date=2026-09-23 time=10:32:40 devname="FGT-100F-HQ" devid="FGT1HFTK21000000" eventtime=1790134360123456789 tz="+0700" logid="0103020302" type="event" subtype="router" level="notice" vd="root" logdesc="OSPF neighbor state changed" msg="OSPF: AdjChg: Nbr 10.9.0.2 on port5:10.9.0.1: Loading -> Full (LoadingDone)"',
      "notice", "FGT-100F-HQ", "event/router", 13, "2026-09-23T10:32:40.123+07:00"),
+    # Round 17: the interface state in `set format csv` (the same pairs comma-separated), and a
+    # link monitor that found the gateway beyond wan1 dead and alive again.
+    ('<188>date=2026-09-23,time=10:33:00,devname="FGT-100F-HQ",devid="FGT1HFTK21000000",eventtime=1790134380123456789,tz="+0700",logid="0100020022",type="event",subtype="system",level="warning",vd="root",logdesc="Interface status changed",action="interface-stat-change",status="DOWN",msg="Interface port6 changed status to DOWN."',
+     "warning", "FGT-100F-HQ", "event/system", 15, "2026-09-23T10:33:00.123+07:00"),
+    ('<189>date=2026-09-23,time=10:33:20,devname="FGT-100F-HQ",devid="FGT1HFTK21000000",eventtime=1790134400123456789,tz="+0700",logid="0100020022",type="event",subtype="system",level="notice",vd="root",logdesc="Interface status changed",action="interface-stat-change",status="UP",msg="Interface port6 changed status to UP."',
+     "notice", "FGT-100F-HQ", "event/system", 15, "2026-09-23T10:33:20.123+07:00"),
+    ('<188>date=2026-09-23 time=10:34:00 devname="FGT-60F-Branch" devid="FGT60FTK20000000" eventtime=1790134440123456789 tz="+0700" logid="0100022922" type="event" subtype="system" level="warning" vd="root" logdesc="Link monitor status" name="wan1-mon" interface="wan1" probeproto="ping" msg="Link Monitor changed state from alive to dead, protocol: ping."',
+     "warning", "FGT-60F-Branch", "event/system", 15, "2026-09-23T10:34:00.123+07:00"),
+    ('<189>date=2026-09-23 time=10:34:45 devname="FGT-60F-Branch" devid="FGT60FTK20000000" eventtime=1790134485123456789 tz="+0700" logid="0100022922" type="event" subtype="system" level="notice" vd="root" logdesc="Link monitor status" name="wan1-mon" interface="wan1" probeproto="ping" msg="Link Monitor changed state from dead to alive, protocol: ping."',
+     "notice", "FGT-60F-Branch", "event/system", 15, "2026-09-23T10:34:45.123+07:00"),
 ]
 
 # ---------------------------------------------------------------- Other (must stay .unknown)
@@ -487,6 +519,38 @@ corpus["other"] = [
      "error", "frr-edge1", "bgpd", 0, "2026-09-23T10:37:20"),
     ('<4>Sep 23 10:37:21 frr-edge1 kernel: [812345.678901] MD5 Hash mismatch for (10.0.15.10, 179)->(10.0.15.9, 40312)',
      "warning", "frr-edge1", "kernel", 0, "2026-09-23T10:37:21"),
+    # Round 17: NX-OS error-disabled (its message says "Error disabled", no "err-disable"), the
+    # recovery and the port back.
+    ('<189>2026 Sep 23 10:40:00 N9K-LEAF-03 %ETHPORT-5-IF_DOWN_ERROR_DISABLED: Interface Ethernet1/12 is down (Error disabled. Reason:Too many link flaps)',
+     "notice", "N9K-LEAF-03", "%ETHPORT-5-IF_DOWN_ERROR_DISABLED", 0, "2026-09-23T10:40:00"),
+    ('<189>2026 Sep 23 10:45:00 N9K-LEAF-03 %ETHPORT-5-IF_ERRDIS_RECOVERY: Interface Ethernet1/12 is being recovered from error disabled state (Last Reason:Too many link flaps)',
+     "notice", "N9K-LEAF-03", "%ETHPORT-5-IF_ERRDIS_RECOVERY", 0, "2026-09-23T10:45:00"),
+    ('<189>2026 Sep 23 10:45:03 N9K-LEAF-03 %ETHPORT-5-IF_UP: Interface Ethernet1/12 is up in mode access',
+     "notice", "N9K-LEAF-03", "%ETHPORT-5-IF_UP", 0, "2026-09-23T10:45:03"),
+    # Junos link traps as syslog: the structured form (MSGID + SD, the message only the var-binds)
+    # on a QFX 10G port, and the classic form on a 100G et- port.
+    ('<28>1 2026-09-23T10:41:00.123+07:00 QFX5120-SPINE1 mib2d 1850 SNMP_TRAP_LINK_DOWN [junos@2636.1.1.1.2.43 snmp-interface-index="612" admin-status="up(1)" operational-status="down(2)" interface-name="xe-0/0/3"] ifIndex 612, ifAdminStatus up(1), ifOperStatus down(2), ifName xe-0/0/3',
+     "warning", "QFX5120-SPINE1", "mib2d", 5, "2026-09-23T10:41:00.123+07:00"),
+    ('<30>1 2026-09-23T10:41:30.123+07:00 QFX5120-SPINE1 mib2d 1850 SNMP_TRAP_LINK_UP [junos@2636.1.1.1.2.43 snmp-interface-index="612" admin-status="up(1)" operational-status="up(1)" interface-name="xe-0/0/3"] ifIndex 612, ifAdminStatus up(1), ifOperStatus up(1), ifName xe-0/0/3',
+     "info", "QFX5120-SPINE1", "mib2d", 5, "2026-09-23T10:41:30.123+07:00"),
+    ('<28>Sep 23 10:42:00 QFX5220-SPINE2 mib2d[1850]: SNMP_TRAP_LINK_DOWN: ifIndex 701, ifAdminStatus up(1), ifOperStatus down(2), ifName et-0/0/31',
+     "warning", "QFX5220-SPINE2", "mib2d", 0, "2026-09-23T10:42:00"),
+    ('<30>Sep 23 10:42:20 QFX5220-SPINE2 mib2d[1850]: SNMP_TRAP_LINK_UP: ifIndex 701, ifAdminStatus up(1), ifOperStatus up(1), ifName et-0/0/31',
+     "info", "QFX5220-SPINE2", "mib2d", 0, "2026-09-23T10:42:20"),
+    # OSPF authentication mismatches, each followed by the adjacency coming up once the keys
+    # match: IOS ERRRCV (read as failed admin logins from the neighbor), FRR ospfd, Junos.
+    ('<188>1310: CORE-RTR1: Sep 23 10:43:00.000: %OSPF-4-ERRRCV: Received invalid packet: Mismatched Authentication Key - Message Digest Key 1 from 10.0.12.6, GigabitEthernet0/2',
+     "warning", "CORE-RTR1", "%OSPF-4-ERRRCV", 0, "2026-09-23T10:43:00.000"),
+    ('<189>1311: CORE-RTR1: Sep 23 10:44:00.000: %OSPF-5-ADJCHG: Process 1, Nbr 10.0.12.6 on GigabitEthernet0/2 from LOADING to FULL, Loading Done',
+     "notice", "CORE-RTR1", "%OSPF-5-ADJCHG", 0, "2026-09-23T10:44:00.000"),
+    ('<28>Sep 23 10:43:10 frr-core1 ospfd[915]: interface eth1:10.0.15.5: auth-type mismatch, local MD5, rcvd Null, Router-ID 10.255.0.2',
+     "warning", "frr-core1", "ospfd", 0, "2026-09-23T10:43:10"),
+    ('<29>Sep 23 10:44:10 frr-core1 ospfd[915]: AdjChg: Nbr 10.255.0.2(default) on eth1:10.0.15.5: Loading -> Full (LoadingDone)',
+     "notice", "frr-core1", "ospfd", 0, "2026-09-23T10:44:10"),
+    ('<28>Sep 23 10:43:20 MX204-EDGE rpd[1811]: OSPF packet ignored: authentication failure (bad password) from 10.0.14.6 on intf ge-0/0/1.0 area 0.0.0.0',
+     "warning", "MX204-EDGE", "rpd", 0, "2026-09-23T10:43:20"),
+    ('<29>Sep 23 10:44:20 MX204-EDGE rpd[1811]: RPD_OSPF_NBRUP: OSPF neighbor 10.0.14.6 (realm ospf-v2 ge-0/0/1.0 area 0.0.0.0) state changed from Loading to Full due to LoadDone (event reason: OSPF loading completed)',
+     "notice", "MX204-EDGE", "rpd", 0, "2026-09-23T10:44:20"),
 ]
 
 total = 0

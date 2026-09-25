@@ -113,7 +113,8 @@ final class Round16Tests: XCTestCase {
         XCTAssertEqual(try Self.shown("-10.0.0.2", entries).filter { $0 <= 8 }, [2, 3, 7])
         XCTAssertEqual(try Self.shown("10.0.0.", entries), [1, 2, 3, 4, 5, 6, 7, 8], "a prefix stays a substring")
         XCTAssertEqual(try Self.shown("raw:10.0.0.2", entries), [1, 2, 3, 4, 5, 6, 7, 8], "raw: is the substring")
-        XCTAssertEqual(try Self.shown("2001:db8::2", entries), [9, 12])
+        // Round 17: by value in any spelling (13 was found only when typed in its own spelling).
+        XCTAssertEqual(try Self.shown("2001:db8::2", entries), [9, 12, 13])
         // Typed in a longer spelling: that spelling and inet_ntop's (the one devices print).
         XCTAssertEqual(try Self.shown("2001:DB8:0:0::2", entries), [9, 12, 13])
         XCTAssertEqual(try Self.shown("fe80::1", entries), [14], "an address that starts with a letter (lexed as key:value)")
@@ -350,15 +351,15 @@ final class Round16Tests: XCTestCase {
     /// The round-16 corpus lines, each read into what it says.
     func testRound16CorpusLinesAreRead() throws {
         let other = try Round15Tests.corpus("other"), hw = try Round15Tests.corpus("huawei"), cx = try Round15Tests.corpus("arubacx")
-        XCTAssertEqual([other.count, hw.count, cx.count], [73, 16, 17])
+        XCTAssertGreaterThanOrEqual(other.count, 73); XCTAssertGreaterThanOrEqual(hw.count, 16); XCTAssertEqual(cx.count, 17)
         func link(_ i: String, _ up: Bool) -> String { "link(iface: \"\(i)\", up: \(up))" }
         func auth(_ n: String) -> String { "routingAuth(proto: \"BGP\", neighbor: \"\(n)\")" }
-        XCTAssertEqual(other[63...].map(Round15Tests.kind), [
+        XCTAssertEqual(other[63..<73].map(Round15Tests.kind), [
             link("eth1", false), link("eth1", true), "nil",                   // docker0: nothing
             link("Gi1/0/5", false), "nil", link("GigabitEthernet1/0/5", true), // ERR_RECOVER: nothing
             auth("10.0.16.2"), auth("10.0.14.6"), auth("10.0.15.10"), auth("10.0.15.10"),
         ])
-        XCTAssertEqual(hw[13...].map(Round15Tests.kind), [link("GigabitEthernet0/0/5", false), "nil", link("GigabitEthernet0/0/5", true)])
+        XCTAssertEqual(hw[13..<16].map(Round15Tests.kind), [link("GigabitEthernet0/0/5", false), "nil", link("GigabitEthernet0/0/5", true)])
         XCTAssertEqual(cx[14...].map(Round15Tests.kind), [link("1/1/7", false), "nil", link("1/1/7", true)])
         // Each vendor's err-disable alone: the port is down and has not come back, the detail says
         // the switch shut it; its recovery and link-up: nothing.

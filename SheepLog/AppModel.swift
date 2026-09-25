@@ -473,13 +473,20 @@ final class AppModel: ObservableObject {
             && (syslog.udpPort != settings.syslogUDPPort || syslog.tcpPort != settings.syslogTCPPort)
         let moveTraps = traps.isRunning && traps.port != settings.trapPort
         let oldUDP = syslog.udpPort, oldTCP = syslog.tcpPort, oldTrap = traps.port
+        // Only the UDP port changes (TCP open and staying): the UDP socket alone is swapped —
+        // restarting the listener disconnected every TCP device (and lost their lines in flight).
+        let udpOnly = moveSyslog && oldTCP > 0 && oldTCP == settings.syslogTCPPort && oldUDP > 0 && settings.syslogUDPPort > 0
         // Both moving listeners let go of their ports first: syslog may take the trap
         // receiver's old port in the same Apply (or the two trade ports), which failed as
         // "SheepLog's own trap receiver is listening there" when syslog moved first.
-        if moveSyslog { syslog.stop() }
+        if moveSyslog, !udpOnly { syslog.stop() }
         if moveTraps { traps.stop() }
         var syslogError: String?, trapError: String?
-        if moveSyslog {
+        if udpOnly, let e = syslog.moveUDP(to: settings.syslogUDPPort) {
+            report("Syslog could not move to UDP \(settings.syslogUDPPort), so it stays on UDP \(oldUDP) (TCP \(oldTCP) and its clients were not touched).",
+                   detail: moveFailureDetail(e, traps: false))
+        }
+        if moveSyslog, !udpOnly {
             syslog.start(udpPort: settings.syslogUDPPort, tcpPort: settings.syslogTCPPort)
             if let e = syslog.lastError { syslogError = e; syslog.stop() }
         }

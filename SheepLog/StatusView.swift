@@ -10,7 +10,7 @@ struct StatusView: View {
     @ObservedObject private var traps = AppModel.shared.traps
     @ObservedObject private var capture = AppModel.shared.capture
     @ObservedObject private var packets = AppModel.shared.packets
-    @State private var addresses: [(interface: String, address: String)] = HostAddresses.ipv4()
+    @State private var addresses: [(interface: String, address: String)] = HostAddresses.forDevices()
 
     private var primary: String { addresses.first?.address ?? "this Mac" }
 
@@ -54,7 +54,7 @@ struct StatusView: View {
             defer { LeakProbe.remove("Status.addressLoop") }
             while !Task.isCancelled {
                 PaneProbe.ran("status.addressLoop")
-                let fresh = HostAddresses.ipv4()
+                let fresh = HostAddresses.forDevices()
                 if !HostAddresses.same(fresh, addresses) { addresses = fresh }
                 try? await Task.sleep(for: .seconds(HostAddresses.cacheSeconds))
             }
@@ -69,7 +69,7 @@ struct StatusView: View {
             Self.serviceCell("Capture", running: capture.isRunning, error: capture.lastError, runningWord: "Capturing",
                              detail: "\(capture.interfaceName) · \(Format.count(packets.packets.count)) packets"),
             StatCell(caption: "This Mac", value: primary, mono: true,
-                     detail: addresses.first.map { $0.interface } ?? "no IPv4 address"),
+                     detail: addresses.first.map { $0.address.contains(":") ? "\($0.interface) · IPv6 only" : $0.interface } ?? "no IPv4 address"),
         ])
     }
 
@@ -81,8 +81,9 @@ struct StatusView: View {
                                        mirror: mirrorText), id: \.key) { r in
                     FactRow(key: r.key, value: r.value, copyable: r.copy != nil, keyWidth: 190, copyValue: r.copy)
                 }
+                let v6Primary = addresses.first?.address.contains(":") ?? false
                 let others = addresses.dropFirst().map { "\($0.address) (\($0.interface))" }
-                    + HostAddresses.ipv6Global().map { "\($0.address) (\($0.interface))" }
+                    + (v6Primary ? [] : HostAddresses.ipv6Global().map { "\($0.address) (\($0.interface))" })
                 if !others.isEmpty {
                     NoteRow(text: "Other addresses: " + others.joined(separator: " · "))
                 }
@@ -203,7 +204,7 @@ struct StatusView: View {
             PointRow(key: "Syslog server", value: address == nil && anySyslog ? syslogValue + " — no IPv4 address" : syslogValue,
                      copy: anySyslog ? address : nil),
             PointRow(key: "SNMP trap receiver",
-                     value: trapPort == 0 ? "no trap port is set" : address == nil ? "udp \(trapPort) — no IPv4 address" : "\(host):\(trapPort)",
+                     value: trapPort == 0 ? "no trap port is set" : address == nil ? "udp \(trapPort) — no IPv4 address" : HostAddresses.hostPort(host, trapPort),
                      copy: trapPort == 0 ? nil : address),
             PointRow(key: "Mirror / SPAN port", value: mirror, copy: nil),
         ]
@@ -247,10 +248,10 @@ struct StatusView: View {
     private var trapPort: UInt16 { traps.isRunning ? traps.port : model.settings.trapPort }
 
     static func syslogTarget(_ host: String, udp: UInt16, tcp: UInt16) -> String {
-        if udp == tcp, udp > 0 { return "\(host):\(udp)  (udp or tcp)" }
+        if udp == tcp, udp > 0 { return "\(HostAddresses.hostPort(host, udp))  (udp or tcp)" }
         var parts: [String] = []
-        if udp > 0 { parts.append("udp \(host):\(udp)") }
-        if tcp > 0 { parts.append("tcp \(host):\(tcp)") }
+        if udp > 0 { parts.append("udp \(HostAddresses.hostPort(host, udp))") }
+        if tcp > 0 { parts.append("tcp \(HostAddresses.hostPort(host, tcp))") }
         return parts.isEmpty ? "no syslog port is open" : parts.joined(separator: "  ·  ")
     }
 
