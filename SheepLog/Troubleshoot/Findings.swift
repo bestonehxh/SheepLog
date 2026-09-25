@@ -626,7 +626,7 @@ nonisolated enum LogScan {
             if let kind {
                 out.facts.append(LineFact(id: e.id, address: e.sourceAddress, hostname: e.hostname, isTrap: isTrap,
                                           received: e.received, deviceTime: e.deviceTime, severity: e.severity,
-                                          kind: kind, message: e.message))
+                                          kind: kind, message: isTrap ? RoutingTrap.summary(e, kind) ?? e.message : e.message))
             }
         }
         flush()
@@ -1274,12 +1274,31 @@ nonisolated enum LineClassifier {
     static let trapOIDs: [String: String] = [
         "1.3.6.1.6.3.1.1.5.1": "coldStart", "1.3.6.1.6.3.1.1.5.2": "warmStart", "1.3.6.1.6.3.1.1.5.3": "linkDown",
         "1.3.6.1.6.3.1.1.5.4": "linkUp", "1.3.6.1.2.1.17.0.1": "newRoot", "1.3.6.1.2.1.17.0.2": "topologyChange",
+        // OSPF-TRAP-MIB (RFC 4750; not bundled: without it the name is "mib-2.14.16.2.6").
+        "1.3.6.1.2.1.14.16.2.2": "ospfNbrStateChange", "1.3.6.1.2.1.14.16.2.3": "ospfVirtNbrStateChange",
+        "1.3.6.1.2.1.14.16.2.4": "ospfIfConfigError", "1.3.6.1.2.1.14.16.2.5": "ospfVirtIfConfigError",
+        "1.3.6.1.2.1.14.16.2.6": "ospfIfAuthFailure", "1.3.6.1.2.1.14.16.2.7": "ospfVirtIfAuthFailure",
+        // BGP4-MIB: RFC 4273's notifications and RFC 1657's traps (bgp.7.n, still sent by many).
+        "1.3.6.1.2.1.15.0.1": "bgpEstablished", "1.3.6.1.2.1.15.0.2": "bgpBackwardTransition",
+        "1.3.6.1.2.1.15.7.1": "bgpEstablished", "1.3.6.1.2.1.15.7.2": "bgpBackwardTransition",
     ]
+
+    static let trapNames = Set(trapOIDs.values)
 
     static func trap(_ e: LogEntry) -> FactKind? {
         var name = e.program
-        if name.first?.isNumber ?? false, let n = trapOIDs[e.field("trap_oid") ?? name] { name = n }
+        // A name this reads is kept; otherwise the trap's OID says: with only the bundled MIBs
+        // an OSPF trap is named "mib-2.14.16.2.6" (RFC1213-MIB names mib-2), no dotted OID.
+        if !trapNames.contains(name), let n = trapOIDs[e.field("trap_oid") ?? name] { name = n }
         switch name {
+        case "ospfIfAuthFailure", "ospfVirtIfAuthFailure", "ospfIfConfigError", "ospfVirtIfConfigError":
+            return RoutingTrap.ospfAuth(e.raw, configError: name.hasSuffix("ConfigError"))
+        case "ospfNbrStateChange", "ospfVirtNbrStateChange":
+            return RoutingTrap.ospfNeighbor(e.raw)
+        case "bgpEstablished", "bgpEstablishedNotification":
+            return RoutingTrap.bgp(e.raw, established: true)
+        case "bgpBackwardTransition", "bgpBackwardTransNotification":
+            return RoutingTrap.bgp(e.raw, established: false)
         case "linkDown", "linkUp":
             var iface: String?
             var index: String?
@@ -1304,6 +1323,115 @@ nonisolated enum LineClassifier {
                 return .hardware(kind, recovered: ok)
             }
         }
+    }
+}
+
+/// OSPF-TRAP-MIB and BGP4-MIB notifications, read from the trap's raw text (numeric OIDs and
+/// values whatever MIBs are loaded): routing neighbors and their authentication, when a router
+/// reports them by trap instead of (or as well as) syslog. They were no finding at all: an
+/// OSPF key mismatch or a BGP session going down reported by trap only was silent.
+nonisolated enum RoutingTrap {
+    /// `oid=value` pairs of a trap's raw text ("SNMPv2c trap <oid> <oid>=<value> …"; a value
+    /// may hold spaces: "02 05").
+    static func varBinds(_ raw: String) -> [(oid: String, value: String)] {
+        var out: [(oid: String, value: String)] = []
+        for token in raw.split(separator: " ").dropFirst(3) {
+            if let eq = token.firstIndex(of: "="), eq != token.startIndex,
+               token[..<eq].allSatisfy({ $0.isNumber || $0 == "." }), token[..<eq].contains(".") {
+                out.append((String(token[..<eq]), String(token[token.index(after: eq)...])))
+            } else if !out.isEmpty {
+                out[out.count - 1].value += " " + token
+            }
+        }
+        return out
+    }
+
+    /// The value of the first var-bind whose OID starts with `prefix` (a column: "….14.10.1.3.").
+    static func value(_ vbs: [(oid: String, value: String)], _ prefix: String) -> String? {
+        vbs.first { $0.oid.hasPrefix(prefix) }.map(\.value)
+    }
+
+    /// An enumerated value as a number: "6", "authFailure(6)" or a name from `names` (index + 1).
+    static func number(_ v: String?, names: [String] = []) -> Int? {
+        guard let v else { return nil }
+        if let n = Int(v) { return n }
+        if let open = v.lastIndex(of: "("), let n = Int(v[v.index(after: open)...].prefix { $0.isNumber }) { return n }
+        return names.firstIndex { $0.caseInsensitiveCompare(v) == .orderedSame }.map { $0 + 1 }
+    }
+
+    static let ospfPrefix = "1.3.6.1.2.1.14."
+
+    /// ospfIfAuthFailure / ospfVirtIfAuthFailure, and the config-error traps whose
+    /// ospfConfigErrorType is authTypeMismatch (5) or authFailure (6): the packet's source.
+    static func ospfAuth(_ raw: String, configError: Bool) -> FactKind? {
+        let vbs = varBinds(raw)
+        let type = number(value(vbs, ospfPrefix + "16.1.2."))
+        if configError, type != 5, type != 6 { return nil }
+        let neighbor = value(vbs, ospfPrefix + "16.1.4.")               // ospfPacketSrc
+            ?? value(vbs, ospfPrefix + "9.1.2.")                         // ospfVirtIfNeighbor
+            ?? value(vbs, ospfPrefix + "7.1.1.").map { "interface " + $0 } // ospfIfIpAddress: this router's side
+        guard let neighbor, !neighbor.isEmpty else { return nil }
+        return .routingAuth(proto: "OSPF", neighbor: neighbor)
+    }
+
+    static let ospfStates = ["down", "attempt", "init", "twoWay", "exchangeStart", "exchange", "loading", "full"]
+
+    /// ospfNbrStateChange (sent when a neighbor regresses or reaches 2-Way / Full): Full is up;
+    /// 2-Way is where two DROthers stay (nothing); any other state is the adjacency lost.
+    static func ospfNeighbor(_ raw: String) -> FactKind? {
+        let vbs = varBinds(raw)
+        let state = number(value(vbs, ospfPrefix + "10.1.6.") ?? value(vbs, ospfPrefix + "11.1.5."), names: ospfStates)
+        // The router ID, as IOS / NX-OS / FRR name the neighbor in their adjacency lines.
+        let neighbor = value(vbs, ospfPrefix + "10.1.3.") ?? value(vbs, ospfPrefix + "11.1.2.")
+            ?? value(vbs, ospfPrefix + "10.1.1.") ?? value(vbs, ospfPrefix + "11.1.3.")
+        guard let state, (1...8).contains(state), state != 4, let neighbor, !neighbor.isEmpty else { return nil }
+        return .routing(proto: "OSPF", neighbor: neighbor, up: state == 8)
+    }
+
+    static let bgpPeerPrefix = "1.3.6.1.2.1.15.3.1."
+
+    /// bgpEstablished / bgpBackwardTransition: the peer is the bgpPeerTable instance (its
+    /// address). A backward transition whose bgpPeerLastError is OPEN Message Error /
+    /// Authentication Failure (2/5, RFC 1771) is the session's authentication.
+    static func bgp(_ raw: String, established: Bool) -> FactKind? {
+        let vbs = varBinds(raw)
+        let peer = value(vbs, bgpPeerPrefix + "7.")                      // bgpPeerRemoteAddr
+            ?? vbs.first { $0.oid.hasPrefix(bgpPeerPrefix) }.flatMap { vb -> String? in
+                let arcs = vb.oid.split(separator: ".")
+                return arcs.count >= bgpPeerPrefix.split(separator: ".").count + 5 ? arcs.suffix(4).joined(separator: ".") : nil
+            }
+        guard let peer, !peer.isEmpty else { return nil }
+        if established { return .routing(proto: "BGP", neighbor: peer, up: true) }
+        let error = value(vbs, bgpPeerPrefix + "14.").map { v in
+            v.split(separator: " ").compactMap { UInt8($0, radix: 16) }
+        } ?? []
+        if error.count >= 2, error[0] == 2, error[1] == 5 { return .routingAuth(proto: "BGP", neighbor: peer) }
+        return .routing(proto: "BGP", neighbor: peer, up: false)
+    }
+
+    /// What a routing trap says, in words, for the finding's quote (its message is dotted
+    /// names without the MIB); nil for other traps.
+    static func summary(_ e: LogEntry, _ kind: FactKind) -> String? {
+        switch kind {
+        case .routingAuth(let proto, let nb) where proto == "OSPF":
+            let type = number(value(varBinds(e.raw), ospfPrefix + "16.1.2."))
+            return "OSPF packet from \(nb) failed authentication"
+                + (type == 5 ? " (authentication type mismatch)" : type == 6 ? " (authentication key mismatch)" : "")
+                + " — trap \(e.program)"
+        case .routingAuth(_, let nb):
+            return "BGP session with \(nb) fell back with OPEN Message Error / Authentication Failure — trap \(e.program)"
+        case .routing(let proto, let nb, let up):
+            return "\(proto) neighbor \(nb) \(up ? "up" : "down") — trap \(e.program)"
+        default:
+            return nil
+        }
+    }
+
+    /// The trap filter's term for a neighbor: an OSPF neighbor is a var-bind value (a whole
+    /// address), a BGP peer only the table instance in the numeric OIDs ("….15.3.1.14.10.0.0.2=").
+    static func neighborTerm(proto: String, _ nb: String) -> String {
+        let address = nb.hasPrefix("interface ") ? String(nb.dropFirst(10)) : nb
+        return proto == "BGP" ? "raw:" + FText.quote(".\(address)=") : FText.quote(address)
     }
 }
 
@@ -1558,17 +1686,18 @@ nonisolated extension FindingRules {
                     + (n.reason.lowercased().contains("administrative") ? " An administrative reset or shutdown is somebody's command, not a fault." : "")
                     + " "
             } ?? ""
+            let facts = items.map(\.f) + (notices[key] ?? []).map(\.f)
             let f = Finding(id: "routing|\(key.device)|\(key.proto)|\(key.neighbor)", rule: "routing.neighbor",
-                            severity: stillDown ? .bad : .warn, category: .routing, source: .logs,
+                            severity: stillDown ? .bad : .warn, category: .routing, source: facts.allSatisfy(\.isTrap) ? .traps : .logs,
                             title: stillDown
                                 ? "\(key.proto) neighbor \(nb) on \(key.device) went down at \(FText.clock(downs.last!.t)) and has not come back."
                                 : "\(key.proto) neighbor \(nb) on \(key.device) went down \(downs.count) times (\(FText.clock(downs[0].t))–\(FText.clock(downs.last!.t))).",
                             detail: whyText + "Routes learned from \(nb) are withdrawn while the adjacency is down, so traffic takes another path or none. "
                                 + (flapping ? "A flapping adjacency usually follows a flapping link, MTU or timer mismatch, or a CPU-starved peer." : "Check the link to the neighbor and its \(key.proto) process."),
-                            evidence: logEvidence(ids: (items.map(\.f.id) + (notices[key] ?? []).map(\.f.id)).sorted(), trapIDs: [],
+                            evidence: logEvidence(ids: facts.filter { !$0.isTrap }.map(\.id).sorted(), trapIDs: facts.filter(\.isTrap).map(\.id).sorted(),
                                                   query: ctx.hostTerm(address: address, name: key.device) + " " + key.proto.lowercased()
                                                     + (key.neighbor == "?" ? "" : " " + FText.quote(key.neighbor)),
-                                                  trapQuery: ""),
+                                                  trapQuery: routingTrapQuery(facts, key.proto, key.neighbor)),
                             firstSeen: items[0].t, lastSeen: items.last!.t, count: downs.count,
                             device: key.device, deviceAddress: address,
                             nextSteps: ["Check the \(key.proto) neighbor table on \(key.device) (show ip \(key.proto.lowercased()) neighbor).",
@@ -1588,6 +1717,25 @@ nonisolated extension FindingRules {
             let span = last.t.timeIntervalSince(first.t)
             if key.proto == "OSPF" {
                 out.append(ospfAuthFinding(key.device, nb, items.map { ($0.t, $0.f) }, hostTerm: ctx.hostTerm(address: first.f.address, name: key.device)))
+                continue
+            }
+            // Reported by trap (bgpBackwardTransition, last error OPEN / Authentication Failure):
+            // session attempts, not TCP segments.
+            if items.allSatisfy(\.f.isTrap) {
+                out.append(Finding(id: "routing.auth|\(key.device)|\(key.proto)|\(nb)", rule: "routing.authFail", severity: .bad,
+                                   category: .routing, source: .traps,
+                                   title: "\(key.proto) session with \(nb) on \(key.device) fails authentication: \(items.count) attempt\(items.count == 1 ? "" : "s") ended with an authentication failure"
+                                    + (items.count == 1 ? " at \(FText.clock(first.t))." : " (\(FText.clock(first.t))–\(FText.clock(last.t)))."),
+                                   detail: "\(key.device) reported the session with \(nb) falling back (bgpBackwardTransition) with the last error "
+                                    + "OPEN Message Error / Authentication Failure: the two sides' authentication does not match, so the session "
+                                    + "cannot be established" + (span >= 60 ? "; this went on for \(FText.duration(span))." : ".")
+                                    + " This is the routing session's password, not an administrator's login.",
+                                   evidence: logEvidence(ids: [], trapIDs: items.map(\.f.id), query: "",
+                                                         trapQuery: routingTrapQuery(items.map(\.f), key.proto, nb)),
+                                   firstSeen: first.t, lastSeen: last.t, count: items.count,
+                                   device: key.device, deviceAddress: first.f.address,
+                                   nextSteps: ["Set the same \(key.proto) neighbor password on \(key.device) and on \(nb) (e.g. neighbor \(nb) password …), or remove it on both.",
+                                               "Check \(nb) is the peer you expect: a session signed with an old password may come from a device that was replaced."]))
                 continue
             }
             out.append(Finding(id: "routing.auth|\(key.device)|\(key.proto)|\(nb)", rule: "routing.authFail", severity: .bad,
@@ -1633,6 +1781,12 @@ nonisolated extension FindingRules {
         return out
     }
 
+    /// The Log filter for the routing traps among `facts`: their sender's traps naming `neighbor`.
+    static func routingTrapQuery(_ facts: [LineFact], _ proto: String, _ neighbor: String) -> String {
+        guard let t = facts.first(where: \.isTrap) else { return "" }
+        return "host:\(t.address) vendor:trap" + (neighbor == "?" ? "" : " " + RoutingTrap.neighborTerm(proto: proto, neighbor))
+    }
+
     /// OSPF packets whose authentication (type or key) does not match: the adjacency cannot
     /// form, or drops when its dead timer runs out. `neighbor` is an address, or "interface
     /// eth1" when the line names none.
@@ -1646,16 +1800,17 @@ nonisolated extension FindingRules {
         }
         let span = last.t.timeIntervalSince(first.t)
         let term = neighbor.hasPrefix("interface ") ? FText.wordTerm(String(neighbor.dropFirst(10))) : FText.quote(neighbor)
+        let facts = items.map(\.f)
         return Finding(id: "routing.auth|\(device)|OSPF|\(neighbor)", rule: "routing.authFail", severity: .bad,
-                       category: .routing, source: .logs,
+                       category: .routing, source: facts.allSatisfy(\.isTrap) ? .traps : .logs,
                        title: "OSPF packets \(fromText) on \(device) fail authentication: \(items.count) rejected"
                         + (items.count == 1 ? " at \(FText.clock(first.t))." : " (\(FText.clock(first.t))–\(FText.clock(last.t)))."),
                        detail: "\(device) dropped OSPF packets \(fromText) because \(what): “\(FText.excerpt(last.f.message))”. "
                         + "No adjacency forms while they differ — or, if one was up, it goes down when the dead timer runs out"
                         + (span >= 60 ? "; this went on for \(FText.duration(span))." : ".")
                         + " This is the routing protocol's key, not an administrator's login.",
-                       evidence: logEvidence(ids: items.map(\.f.id), trapIDs: [],
-                                             query: hostTerm + " ospf " + term, trapQuery: ""),
+                       evidence: logEvidence(ids: facts.filter { !$0.isTrap }.map(\.id), trapIDs: facts.filter(\.isTrap).map(\.id),
+                                             query: hostTerm + " ospf " + term, trapQuery: routingTrapQuery(facts, "OSPF", neighbor)),
                        firstSeen: first.t, lastSeen: last.t, count: items.count,
                        device: device, deviceAddress: first.f.address,
                        nextSteps: ["Set the same OSPF authentication (type, key ID and key) on the interface or area of \(device) and of the neighbor \(neighbor.hasPrefix("interface ") ? "on \(neighbor.dropFirst(10))" : neighbor).",

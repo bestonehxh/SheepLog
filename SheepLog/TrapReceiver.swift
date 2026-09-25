@@ -373,6 +373,9 @@ nonisolated final class TrapListener: @unchecked Sendable {
         var rest: [ReceivedTrap] = []
         let step: Step = queue.sync {
             guard !cancelled else { return .none }      // a second cancel must not close twice
+            // Traps the socket still holds are read first: closed unread they were gone without
+            // a trace (Stop, Apply ports, ⌘Q with the disk log on).
+            drainSocket()
             cancelled = true
             flushScheduled = false
             rest = pending
@@ -404,8 +407,51 @@ nonisolated final class TrapListener: @unchecked Sendable {
     private func readAvailable() {
         // At most a few thousand datagrams per event (the source fires again), so a trap storm
         // cannot keep this loop — and the undelivered `pending` — growing forever.
+        read(limit: 2_000)
+        if pending.count >= 2_000 {
+            flush()
+        } else if !pending.isEmpty, !flushScheduled {
+            flushScheduled = true
+            queue.asyncAfter(deadline: .now() + 0.1) { [weak self] in self?.flush() }
+        }
+    }
+
+    /// The most traps / time one stop reads from the socket (a storm must not keep it from
+    /// stopping: the main thread waits).
+    static let drainLimit = 200_000
+    static let drainSeconds = 0.5
+
+    /// queue-confined: every datagram the socket holds, and those still arriving within a few
+    /// ms (a sender that has just stopped still has its last ones in the network stack), into
+    /// `pending`.
+    private func drainSocket() {
+        // What the socket held when the drain began is read however long it takes (its buffer:
+        // a few MB); what arrives after, for `drainSeconds` only.
+        var owed = SocketFactory.pendingBytes(fd)
+        var total = 0, quiet = 0
+        let deadline = Monotonic.now() + Self.drainSeconds
+        while quiet < 2, total < Self.drainLimit, owed > 0 || Monotonic.now() < deadline {
+            var bytes = 0
+            let n = read(limit: min(2_000, Self.drainLimit - total), bytes: &bytes)
+            owed = n > 0 ? owed - bytes : 0
+            total += n
+            if n > 0 { quiet = 0; continue }
+            quiet += 1
+            if quiet < 2 { usleep(2_000) }
+        }
+    }
+
+    /// queue-confined: up to `limit` datagrams into `pending`; how many were read.
+    @discardableResult
+    private func read(limit: Int) -> Int {
+        var bytes = 0
+        return read(limit: limit, bytes: &bytes)
+    }
+
+    /// `read(limit:)`, adding the datagrams' sizes to `bytes`.
+    private func read(limit: Int, bytes: inout Int) -> Int {
         var reads = 0
-        while reads < 2_000 {
+        while reads < limit {
             var from = sockaddr_storage()
             var len = socklen_t(MemoryLayout<sockaddr_storage>.size)
             let n = withUnsafeMutablePointer(to: &from) { sp in
@@ -415,16 +461,12 @@ nonisolated final class TrapListener: @unchecked Sendable {
             }
             if n < 0 { break }   // EAGAIN: drained
             reads += 1
+            bytes += n
             let (host, port) = SocketFactory.describe(&from)
             let item = handle(Array(buf[0..<n]), host: host, port: port, from: &from, fromLen: len)
             pending.append(item)
         }
-        if pending.count >= 2_000 {
-            flush()
-        } else if !pending.isEmpty, !flushScheduled {
-            flushScheduled = true
-            queue.asyncAfter(deadline: .now() + 0.1) { [weak self] in self?.flush() }
-        }
+        return reads
     }
 
     private func flush() {

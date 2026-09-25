@@ -130,18 +130,40 @@ final class SyslogServer: ObservableObject {
         return l
     }
 
-    /// Moves only the UDP socket to `port` while the listener keeps running (TCP clients stay
-    /// connected). The new port is bound before the old one is let go; on failure the old one
-    /// stays and the error is returned.
-    func moveUDP(to port: UInt16) -> String? {
-        guard isRunning, let listener, port > 0, port != udpPort else { return nil }
+    /// Settings → Apply ports on the running listener: each transport whose port changes gets
+    /// its new socket (bound before the old one is let go; port 0 closes it) while the listener
+    /// keeps running — TCP clients stay connected and nothing in the sockets is lost (a restart
+    /// disconnected every TCP device, lost what was in flight, and left UDP closed for a moment).
+    /// A transport that failed at start (its port 0 now) is opened beside the other. When a new
+    /// port cannot be bound nothing changes and the error is returned.
+    func move(udpPort newUDP: UInt16, tcpPort newTCP: UInt16) -> String? {
+        guard isRunning, let listener else { return nil }
+        guard newUDP != udpPort || newTCP != tcpPort else { return nil }
+        guard newUDP > 0 || newTCP > 0 else { return "Both syslog ports are 0, so nothing was opened." }
         var errors: [String] = []
-        let fd = Self.open(SOCK_DGRAM, port: port, errors: &errors)
-        guard fd >= 0 else { return errors.joined(separator: " ") }
-        listener.replaceUDP(fd)
-        udpPort = port
-        // A UDP failure from the start is over; a TCP one (or the client limit) stays.
-        if let e = lastError, e.contains("UDP"), !e.contains("TCP") { lastError = nil }
+        let udpFD = newUDP != udpPort ? Self.open(SOCK_DGRAM, port: newUDP, errors: &errors) : -1
+        let tcpFD = newTCP != tcpPort ? Self.open(SOCK_STREAM, port: newTCP, errors: &errors) : -1
+        guard errors.isEmpty else {
+            if udpFD >= 0 { close(udpFD) }
+            if tcpFD >= 0 { close(tcpFD) }
+            return errors.joined(separator: " ")
+        }
+        if newUDP != udpPort {
+            listener.replaceUDP(udpFD >= 0 ? udpFD : nil)
+            udpPort = newUDP
+        }
+        if newTCP != tcpPort {
+            listener.replaceTCP(tcpFD >= 0 ? tcpFD : nil)
+            tcpPort = newTCP
+            // TCP off: no clients, and no limit to report any more.
+            if newTCP == 0 {
+                if tcpClients != 0 { tcpClients = 0 }
+                clientLimitReported = nil
+            }
+        }
+        // Every port asked for is open: a failure from the start is over (the client-limit
+        // note stays until the clients drop below it).
+        if let e = lastError, e != clientLimitReported.map(Self.clientLimitText) { lastError = nil }
         return nil
     }
 
@@ -187,6 +209,14 @@ nonisolated struct SocketError: Error {
 }
 
 nonisolated enum SocketFactory {
+    /// Bytes the kernel holds for `fd` right now (every queued datagram, for UDP): FIONREAD,
+    /// `_IOR('f', 127, int)` (a macro Swift does not import).
+    static func pendingBytes(_ fd: Int32) -> Int {
+        var n: Int32 = 0
+        let rc = withUnsafeMutablePointer(to: &n) { ioctl(fd, UInt(0x4004_667F), $0) }
+        return rc == 0 ? Int(max(0, n)) : 0
+    }
+
     /// Raises the soft RLIMIT_NOFILE towards the hard limit (at most `wanted`, and macOS's
     /// OPEN_MAX for setrlimit). Returns the soft limit in force afterwards.
     @discardableResult
@@ -622,8 +652,8 @@ nonisolated final class SyslogListener: @unchecked Sendable {
 
     // queue-confined
     private var sources: [DispatchSourceProtocol] = []
-    private var listenSource: DispatchSourceProtocol?
-    private var udpSource: (source: DispatchSourceProtocol, closed: DispatchSemaphore)?
+    private var listenSource: (source: DispatchSourceProtocol, fd: Int32, closed: DispatchSemaphore)?
+    private var udpSource: (source: DispatchSourceProtocol, fd: Int32, closed: DispatchSemaphore)?
     private var idleTimer: DispatchSourceTimer?
     private var acceptPaused = false
     private var clients: [Int32: Client] = [:]
@@ -676,37 +706,51 @@ nonisolated final class SyslogListener: @unchecked Sendable {
 
     func start(udpFD: Int32, tcpFD: Int32) {
         queue.sync {
-            if tcpFD >= 0, idleTimeout > 0 {
-                let t = DispatchSource.makeTimerSource(queue: queue)
-                let every = max(0.05, min(idleTimeout / 4, 30))
-                t.schedule(deadline: .now() + every, repeating: every, leeway: .milliseconds(Int(every * 100)))
-                t.setEventHandler { [weak self] in self?.closeIdleClients() }
-                idleTimer = t
-                t.activate()
-            }
             if udpFD >= 0 { addUDP(udpFD); udpSource?.source.activate() }
-            if tcpFD >= 0 {
-                let s = DispatchSource.makeReadSource(fileDescriptor: tcpFD, queue: queue)
-                s.setEventHandler { [weak self] in self?.accept(tcpFD) }
-                addCancelHandler(s, fd: tcpFD)
-                sources.append(s)
-                listenSource = s
-                s.activate()
-            }
+            if tcpFD >= 0 { addListen(tcpFD) }
         }
+    }
+
+    /// queue-confined: the stalled / silent client check, while there is a TCP socket.
+    private func ensureIdleTimer() {
+        guard idleTimer == nil, idleTimeout > 0 else { return }
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        let every = max(0.05, min(idleTimeout / 4, 30))
+        t.schedule(deadline: .now() + every, repeating: every, leeway: .milliseconds(Int(every * 100)))
+        t.setEventHandler { [weak self] in self?.closeIdleClients() }
+        idleTimer = t
+        t.activate()
+    }
+
+    /// queue-confined: accept connections on `fd` (a bound, listening TCP socket).
+    private func addListen(_ fd: Int32) {
+        ensureIdleTimer()
+        let s = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
+        s.setEventHandler { [weak self] in _ = self?.accept(fd) }
+        let closed = DispatchSemaphore(value: 0)
+        addCancelHandler(s, fd: fd, closed: closed)
+        sources.append(s)
+        listenSource = (s, fd, closed)
+        s.activate()
     }
 
     /// Cancels every source (each cancel handler closes its fd) and waits for the handlers,
     /// so the ports are free again when this returns. Delivers what was still batched.
+    ///
+    /// What the kernel already holds for this listener is read first: datagrams in the UDP
+    /// socket, connections in the accept queue and bytes in each client's socket. Closed
+    /// unread they were gone without a trace (Stop, Apply ports, ⌘Q with the disk log on) —
+    /// and a TCP socket closed with unread data resets the device's connection.
     func stop() {
         queue.sync {
             guard !stopped else { return }
+            drainEverything()
             stopped = true
             idleTimer?.cancel()
             idleTimer = nil
             for s in sources { s.cancel() }
             // A suspended source never runs its cancel handler (the fd would leak).
-            if acceptPaused, let s = listenSource { acceptPaused = false; s.resume() }
+            if acceptPaused, let s = listenSource?.source { acceptPaused = false; s.resume() }
             listenSource = nil
             sources.removeAll()
             // A line still being received (no newline yet) is delivered as it stands: at ⌘Q a
@@ -727,13 +771,96 @@ nonisolated final class SyslogListener: @unchecked Sendable {
     }
 
     private func pauseAccepting() {
-        guard !acceptPaused, !stopped, let s = listenSource else { return }
+        guard !acceptPaused, !stopped, let s = listenSource?.source else { return }
         acceptPaused = true
         s.suspend()
         queue.asyncAfter(deadline: .now() + .milliseconds(250)) { [weak self] in
-            guard let self, self.acceptPaused, let s = self.listenSource else { return }
+            guard let self, self.acceptPaused, let s = self.listenSource?.source else { return }
             self.acceptPaused = false
             s.resume()
+        }
+    }
+
+    // MARK: Reading what the sockets hold (stop, a replaced socket)
+
+    /// A drain always reads what a socket held when it began (the kernel's buffer: at most a
+    /// few MB each, `drainOwedCap` in all) however long parsing it takes — a time limit alone
+    /// lost a burst on a slow Mac (under TSan, 12,000 of 15,000 lines per client). What arrives
+    /// after that is read only for `drainSeconds`: devices that keep flooding would be read
+    /// for as long as they send, and the main thread waits for a stop (45 s under an 8-client
+    /// flood before this bound).
+    static let drainSeconds = 0.5
+    static let drainOwedCap = 256 * 1024 * 1024
+    static let drainPasses = 64
+    /// queue-confined: when the drain under way stops reading what arrived after it began.
+    private var drainDeadline = 0.0
+
+    private var drainTimeLeft: Bool { Monotonic.now() < drainDeadline }
+
+    private static func pending(_ fd: Int32) -> Int { SocketFactory.pendingBytes(fd) }
+
+    /// queue-confined: everything the sockets hold now.
+    private func drainEverything() {
+        drainDeadline = Monotonic.now() + Self.drainSeconds
+        if let u = udpSource { drainUDP(u.fd, fresh: false) }
+        if let l = listenSource, !acceptPaused { drainAccept(l.fd) }
+        drainClients(fresh: false)
+    }
+
+    /// queue-confined: the datagrams `fd` holds, and those still arriving within a few ms (a
+    /// sender's last datagrams are still on their way through the network stack when it has
+    /// just stopped — closing now sends them to a port nobody holds).
+    private func drainUDP(_ fd: Int32, fresh: Bool = true) {
+        if fresh { drainDeadline = Monotonic.now() + Self.drainSeconds }
+        var owed = min(Self.pending(fd), Self.drainOwedCap)
+        var quiet = 0
+        while quiet < 2, owed > 0 || drainTimeLeft {
+            var bytes = 0
+            let n = readUDP(fd, limit: 5_000, bytes: &bytes)
+            owed -= bytes
+            if n > 0 { quiet = 0; continue }
+            owed = 0                                   // nothing left of it
+            quiet += 1
+            if quiet < 2 { usleep(2_000) }
+        }
+    }
+
+    /// queue-confined: connections the kernel completed on `fd` but not yet handed over (the
+    /// accept queue: at most the listen backlog per round).
+    private func drainAccept(_ fd: Int32) {
+        for _ in 0..<Self.drainPasses {
+            guard accept(fd) > 0 else { break }
+        }
+    }
+
+    /// queue-confined: every client's bytes, pass after pass while any arrive (reading opens
+    /// the sender's window, and its next segments follow), then once more after a short wait.
+    private func drainClients(fresh: Bool = true) {
+        if fresh { drainDeadline = Monotonic.now() + Self.drainSeconds }
+        var owed: [Int32: Int] = [:]
+        var budget = Self.drainOwedCap
+        for fd in clients.keys {
+            let n = min(Self.pending(fd), budget)
+            budget -= n
+            if n > 0 { owed[fd] = n }
+        }
+        var quiet = 0
+        while !clients.isEmpty {
+            let late = !drainTimeLeft
+            var got = 0
+            for fd in Array(clients.keys) {
+                let due = owed[fd] ?? 0
+                guard due > 0 || !late else { continue }
+                let n = readTCP(fd, maxReads: 2)
+                got += n
+                if due > 0 { owed[fd] = n > 0 && clients[fd] != nil ? max(0, due - n) : 0 }
+            }
+            owed = owed.filter { $0.value > 0 }
+            if late && owed.isEmpty { break }
+            if got > 0 { quiet = 0; continue }
+            quiet += 1
+            if quiet >= 2 { break }
+            usleep(2_000)
         }
     }
 
@@ -750,34 +877,83 @@ nonisolated final class SyslogListener: @unchecked Sendable {
     /// queue-confined
     private func addUDP(_ fd: Int32) {
         let s = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
-        s.setEventHandler { [weak self] in self?.readUDP(fd) }
+        s.setEventHandler { [weak self] in _ = self?.readUDP(fd) }
         let closed = DispatchSemaphore(value: 0)
         addCancelHandler(s, fd: fd, closed: closed)
         sources.append(s)
-        udpSource = (s, closed)
+        udpSource = (s, fd, closed)
     }
 
-    /// Settings → Apply ports with only the UDP port changed: the UDP socket is swapped (`fd`,
-    /// already bound) and the TCP listener and its clients stay — stopping the whole listener
-    /// disconnected every TCP device mid-stream (their lines in flight lost). Returns once the
-    /// old UDP socket is closed (its port is free for the trap receiver).
-    func replaceUDP(_ fd: Int32) {
-        let old: (source: DispatchSourceProtocol, closed: DispatchSemaphore)? = queue.sync {
-            guard !stopped else { close(fd); return nil }
+    /// Settings → Apply ports: the UDP socket is swapped (`fd`, already bound; nil = UDP off)
+    /// while the TCP listener and its clients stay — stopping the whole listener disconnected
+    /// every TCP device mid-stream (their lines in flight lost). The old socket's datagrams
+    /// are read first. Returns once it is closed (its port is free for the trap receiver).
+    func replaceUDP(_ fd: Int32?) {
+        let closed: DispatchSemaphore? = queue.sync {
+            guard !stopped else { if let fd { close(fd) }; return nil }
             let old = udpSource
             if let old { sources.removeAll { $0 === old.source } }
             udpSource = nil
-            addUDP(fd)
-            udpSource?.source.activate()
-            old?.source.cancel()
-            return old
+            if let fd { addUDP(fd); udpSource?.source.activate() }
+            guard let old else { return nil }
+            drainUDP(old.fd)
+            old.source.cancel()
+            return old.closed
         }
-        if let old { _ = old.closed.wait(timeout: .now() + 2) }
+        if let closed { _ = closed.wait(timeout: .now() + 2) }
+    }
+
+    /// Settings → Apply ports: the listening TCP socket is swapped (`fd`, bound and listening;
+    /// nil = TCP off). Connected clients stay connected — a connection does not depend on the
+    /// socket that accepted it (restarting the listener disconnected them all and lost what they
+    /// had in flight); connections the old socket completed but had not handed over yet are
+    /// taken in first. With TCP off the clients' lines are read, then they are disconnected.
+    func replaceTCP(_ fd: Int32?) {
+        let closed: DispatchSemaphore? = queue.sync {
+            guard !stopped else { if let fd { close(fd) }; return nil }
+            let old = listenSource
+            if let old {
+                if !acceptPaused { drainAccept(old.fd) }
+                sources.removeAll { $0 === old.source }
+                // A suspended source never runs its cancel handler.
+                if acceptPaused { acceptPaused = false; old.source.resume() }
+                old.source.cancel()
+            }
+            listenSource = nil
+            if let fd {
+                addListen(fd)
+            } else {
+                drainClients()
+                let now = Date()
+                for c in clients.values {
+                    for f in c.framer.finish() {
+                        add(RawSyslog(received: now, sourceAddress: c.address, sourcePort: c.port,
+                                      transport: .tcp, text: SyslogFraming.decode(f)), bytes: f.count)
+                    }
+                    c.source?.cancel()
+                }
+                clients.removeAll()
+                partialBytes = 0
+                clientsChanged(0)
+                idleTimer?.cancel()
+                idleTimer = nil
+            }
+            return old?.closed
+        }
+        if let closed { _ = closed.wait(timeout: .now() + 2) }
     }
 
     // MARK: UDP
 
-    private func readUDP(_ fd: Int32) {
+    /// Reads up to `limit` datagrams (the source fires again for the rest); how many it read.
+    @discardableResult
+    private func readUDP(_ fd: Int32, limit: Int = 20_000) -> Int {
+        var bytes = 0
+        return readUDP(fd, limit: limit, bytes: &bytes)
+    }
+
+    /// `readUDP`, adding the datagrams' sizes to `bytes`.
+    private func readUDP(_ fd: Int32, limit: Int, bytes: inout Int) -> Int {
         var storage = sockaddr_storage()
         var got = 0
         var now = Date()
@@ -791,6 +967,7 @@ nonisolated final class SyslogListener: @unchecked Sendable {
             }
             if n < 0 { break }                    // EAGAIN (drained) or an error
             got += 1
+            bytes += n
             var count = n
             let bytes = recvBuffer.assumingMemoryBound(to: UInt8.self)
             while count > 0, bytes[count - 1] == 0x0A || bytes[count - 1] == 0x0D || bytes[count - 1] == 0x00 { count -= 1 }
@@ -798,8 +975,9 @@ nonisolated final class SyslogListener: @unchecked Sendable {
             let (address, port) = peer(&storage)
             let text = SyslogFraming.decode(UnsafeBufferPointer(start: bytes, count: count))
             add(RawSyslog(received: now, sourceAddress: address, sourcePort: port, transport: .udp, text: text), bytes: count)
-            if got >= 20_000 { break }            // let TCP and flushes breathe; the source fires again
+            if got >= limit { break }             // let TCP and flushes breathe; the source fires again
         }
+        return got
     }
 
     private func peer(_ storage: inout sockaddr_storage) -> (String, UInt16) {
@@ -834,7 +1012,9 @@ nonisolated final class SyslogListener: @unchecked Sendable {
 
     // MARK: TCP
 
-    private func accept(_ listenFD: Int32) {
+    /// How many connections it took (accepted, or refused at `maxClients`).
+    @discardableResult
+    private func accept(_ listenFD: Int32) -> Int {
         // A bounded number per event: a connection flood must not keep this serial queue from
         // reading UDP (the source fires again while the backlog is non-empty).
         var accepted = 0
@@ -868,19 +1048,23 @@ nonisolated final class SyslogListener: @unchecked Sendable {
             let (address, port) = peer(&storage)
             let client = Client(fd: fd, address: address, port: port, now: Self.now())
             let s = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
-            s.setEventHandler { [weak self] in self?.readTCP(fd) }
+            s.setEventHandler { [weak self] in _ = self?.readTCP(fd) }
             addCancelHandler(s, fd: fd)
             client.source = s
             clients[fd] = client
             s.activate()
             clientsChanged(clients.count)
         }
+        return accepted
     }
 
-    private func readTCP(_ fd: Int32) {
-        guard let client = clients[fd] else { return }
+    /// Up to `maxReads` reads of one client (the source fires again for the rest); the bytes read.
+    @discardableResult
+    private func readTCP(_ fd: Int32, maxReads: Int = 64) -> Int {
+        guard let client = clients[fd] else { return 0 }
         var closed = false
         var reads = 0
+        var bytes = 0
         var frames: [Data] = []
         let heldBefore = client.framer.bufferedBytes
         let droppedBefore = client.framer.droppedLines
@@ -888,9 +1072,10 @@ nonisolated final class SyslogListener: @unchecked Sendable {
             let lost = client.framer.droppedLines - droppedBefore
             if lost > 0 { onLinesLost?(lost) }
         }
-        while reads < 64 {
+        while reads < maxReads {
             let n = recv(fd, recvBuffer, Self.recvSize, 0)
             if n > 0 {
+                bytes += n
                 // Frame each read as it comes, so a peer without newlines is capped at ~1 MB
                 // instead of piling up 64 reads first.
                 frames += client.framer.append(UnsafeRawBufferPointer(start: recvBuffer, count: n))
@@ -922,12 +1107,17 @@ nonisolated final class SyslogListener: @unchecked Sendable {
                           transport: .tcp, text: SyslogFraming.decode(f)), bytes: f.count)
         }
         if closed { drop(client) }
+        return bytes
     }
 
     private func drop(_ client: Client) {
         client.source?.cancel()               // the cancel handler closes the fd
         client.source = nil
         clients.removeValue(forKey: client.fd)
+        // Below the limit again: the next refusal is reported again (the server clears its
+        // note when the count drops; waiting for the idle check, up to 30 s, left refusals
+        // in that time unreported).
+        if clients.count < maxClients { limitReported = false }
         clientsChanged(clients.count)
     }
 
