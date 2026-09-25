@@ -16,7 +16,7 @@ struct LogView: View {
     /// The detail panel shows only while a line is selected, unless it is kept open.
     @AppStorage("SheepLog.logDetailPinned") private var detailPinned = false
     @State private var paneWidth: CGFloat = 0
-    @State private var thisMac: String = HostAddresses.primaryIPv4() ?? "this Mac’s address"
+    @State private var thisMac: String = HostAddresses.primaryForDevices() ?? "this Mac’s address"
     @FocusState private var filterFocused: Bool
 
     var body: some View {
@@ -45,7 +45,7 @@ struct LogView: View {
             defer { LeakProbe.remove("Log.addressLoop") }
             while !Task.isCancelled {
                 PaneProbe.ran("log.addressLoop")
-                let a = HostAddresses.primaryIPv4() ?? "this Mac’s address"
+                let a = HostAddresses.primaryForDevices() ?? "this Mac’s address"
                 if a != thisMac { thisMac = a }
                 try? await Task.sleep(for: .seconds(HostAddresses.cacheSeconds))
             }
@@ -292,6 +292,7 @@ struct LogView: View {
         var s = "\(Format.count(store.visible.count)) shown of \(Format.count(n)) · \(LogView.rateText(store.rate)) · buffer \(Format.count(limit)) (\(Int((Double(n) / Double(limit) * 100).rounded())) %)"
         s += Self.dropText(dropped: store.dropped, lost: store.lost)
         if let note = store.exportNote { s += " · \(note)" }
+        if let note = store.resumeNote, !store.paused { s += " · \(note)" }
         if diskLogging, let logger = store.diskLogger {
             s += " · Saving to \(Self.abbreviate((logger.currentFile ?? logger.todaysFile).path))"
         }

@@ -17,18 +17,108 @@ nonisolated struct TroubleshootFilter: Equatable, Sendable {
         return !(f.lastSeen < r.lowerBound || f.firstSeen > r.upperBound)
     }
 
-    func matchesText(_ f: Finding) -> Bool {
-        let n = needle
-        guard !n.isEmpty else { return true }
-        return f.title.lowercased().contains(n) || f.detail.lowercased().contains(n)
-            || (f.device?.lowercased().contains(n) ?? false) || (f.client?.lowercased().contains(n) ?? false)
-            || f.category.label.lowercased().contains(n)
+    func matchesText(_ f: Finding) -> Bool { TextMatcher(text).matches(f) }
+
+    /// The text filter in the grammar of the Log and Packets panes (round 17: it was one
+    /// substring, so "core down" matched nothing and "-dns" everything): words are ANDed,
+    /// `OR` / `NOT` / `-` / `( )` / `"phrase"` / `/regex/` work, a complete IP address is whole,
+    /// and a few keys name a finding's parts — `sev:` / `severity:` (problem, warning, note, or
+    /// `sev:>=warning`), `device:` / `host:`, `client:`, `rule:`, `category:` / `cat:`,
+    /// `source:`. Any other `key:value` is the text `key:value`. Text that does not parse yet
+    /// (an open quote, a trailing `OR`) is matched as one substring, as before — the list does
+    /// not blank while a word is being typed.
+    struct TextMatcher {
+        let query: Query?
+        let plain: String
+
+        init(_ text: String) {
+            let t = text.trimmingCharacters(in: .whitespaces)
+            plain = t.lowercased()
+            query = t.isEmpty ? nil : try? Query.parse(t)
+        }
+
+        var isEmpty: Bool { plain.isEmpty }
+
+        func matches(_ f: Finding) -> Bool {
+            guard !plain.isEmpty else { return true }
+            let hay = [f.title, f.detail, f.device ?? "", f.deviceAddress ?? "", f.client ?? "", f.category.label, f.category.title]
+                .joined(separator: "\n")
+            guard let query else { return hay.lowercased().contains(plain) }
+            return query.matches { leaf in Self.leaf(leaf, f, hay) }
+        }
+
+        static func leaf(_ n: QueryNode, _ f: Finding, _ hay: String) -> Bool {
+            switch n {
+            case .text(let w):
+                if let a = AddressWord(w) { return a.found(in: hay) }
+                return QueryMatch.contains(hay, w)
+            case .regex(let p):
+                return GuardedRegex(p).matches(hay)
+            case .field(let key, let op, let value):
+                let v = value.lowercased()
+                switch key.lowercased() {
+                case "sev", "severity", "level":
+                    guard let want = severity(v) else { break }
+                    return compare(f.severity.rawValue, op, want.rawValue)
+                case "device", "host", "hostname":
+                    let names = [f.device ?? "", f.deviceAddress ?? ""]
+                    let hit = names.contains { name in
+                        if let a = AddressWord(value) { return a.equals(name) }
+                        return name.lowercased().hasPrefix(v)
+                    }
+                    return op == .ne ? !hit : hit
+                case "client":
+                    let c = f.client ?? ""
+                    let hit = AddressWord(value).map { $0.equals(c) } ?? c.lowercased().contains(v)
+                    return op == .ne ? !hit : hit
+                case "rule":
+                    let hit = f.rule.lowercased().hasPrefix(v)
+                    return op == .ne ? !hit : hit
+                case "category", "cat":
+                    let hit = f.category.rawValue.lowercased().hasPrefix(v) || f.category.label.lowercased().hasPrefix(v)
+                        || f.category.title.lowercased().hasPrefix(v)
+                    return op == .ne ? !hit : hit
+                case "source":
+                    let hit = f.source.rawValue.hasPrefix(v)
+                    return op == .ne ? !hit : hit
+                default:
+                    break
+                }
+                let text = key + ":" + (op == .eq ? "" : op.rawValue) + value
+                if let a = AddressWord(text) { return a.found(in: hay) }
+                return QueryMatch.contains(hay, text)
+            default:
+                return false
+            }
+        }
+
+        /// "problem" / "bad" / "warning" / "warn" / "note" / "info" (or 2 / 1 / 0).
+        static func severity(_ s: String) -> FindingSeverity? {
+            switch s {
+            case "problem", "problems", "bad", "2": .bad
+            case "warning", "warnings", "warn", "1": .warn
+            case "note", "notes", "info", "0": .info
+            default: nil
+            }
+        }
+
+        static func compare(_ a: Int, _ op: QueryOp, _ b: Int) -> Bool {
+            switch op {
+            case .eq: a == b
+            case .ne: a != b
+            case .lt: a < b
+            case .le: a <= b
+            case .gt: a > b
+            case .ge: a >= b
+            }
+        }
     }
 
     /// Every filter but the category chip: what the chips count. (They counted the whole
     /// analysis: "Link 5" over a range that held one link finding, and a click showed one.)
     func unchipped(_ findings: [Finding]) -> [Finding] {
-        findings.filter { (!problemsOnly || $0.severity >= .warn) && inRange($0) && matchesText($0) }
+        let text = TextMatcher(self.text)
+        return findings.filter { (!problemsOnly || $0.severity >= .warn) && inRange($0) && text.matches($0) }
     }
 
     /// A timeline click on `f`: each filter that hides it is lifted, the others stay.

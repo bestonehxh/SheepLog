@@ -130,6 +130,21 @@ final class SyslogServer: ObservableObject {
         return l
     }
 
+    /// Moves only the UDP socket to `port` while the listener keeps running (TCP clients stay
+    /// connected). The new port is bound before the old one is let go; on failure the old one
+    /// stays and the error is returned.
+    func moveUDP(to port: UInt16) -> String? {
+        guard isRunning, let listener, port > 0, port != udpPort else { return nil }
+        var errors: [String] = []
+        let fd = Self.open(SOCK_DGRAM, port: port, errors: &errors)
+        guard fd >= 0 else { return errors.joined(separator: " ") }
+        listener.replaceUDP(fd)
+        udpPort = port
+        // A UDP failure from the start is over; a TCP one (or the client limit) stays.
+        if let e = lastError, e.contains("UDP"), !e.contains("TCP") { lastError = nil }
+        return nil
+    }
+
     func stop() {
         listener?.stop()
         listener = nil
@@ -385,6 +400,22 @@ nonisolated enum HostAddresses {
     /// The first non-loopback en* IPv4 (else any).
     static func primaryIPv4() -> String? { ipv4().first?.address }
 
+    /// The addresses to point devices at: the IPv4 ones, or — on a Mac with none (an IPv6-only
+    /// network, NAT64) — the global IPv6 ones; the listeners are dual-stack. (Status said "no
+    /// IPv4 address" with nothing to copy, and the Log's empty table "this Mac’s address".)
+    static func forDevices() -> [(interface: String, address: String)] { choose(v4: ipv4(), v6: ipv6Global()) }
+
+    static func choose(v4: [(interface: String, address: String)], v6: [(interface: String, address: String)]) -> [(interface: String, address: String)] {
+        v4.isEmpty ? v6 : v4
+    }
+
+    static func primaryForDevices() -> String? { forDevices().first?.address }
+
+    /// `host:port`, an IPv6 address in brackets (`[2001:db8::5]:514`, as devices take it).
+    static func hostPort(_ host: String, _ port: UInt16) -> String {
+        host.contains(":") ? "[\(host)]:\(port)" : "\(host):\(port)"
+    }
+
     /// Global IPv6 addresses (2000::/3) on up, non-loopback interfaces — the listeners are
     /// dual-stack, so a device can be pointed at one of these too. Not cached (rarely drawn).
     static func ipv6Global() -> [(interface: String, address: String)] {
@@ -592,6 +623,7 @@ nonisolated final class SyslogListener: @unchecked Sendable {
     // queue-confined
     private var sources: [DispatchSourceProtocol] = []
     private var listenSource: DispatchSourceProtocol?
+    private var udpSource: (source: DispatchSourceProtocol, closed: DispatchSemaphore)?
     private var idleTimer: DispatchSourceTimer?
     private var acceptPaused = false
     private var clients: [Int32: Client] = [:]
@@ -652,13 +684,7 @@ nonisolated final class SyslogListener: @unchecked Sendable {
                 idleTimer = t
                 t.activate()
             }
-            if udpFD >= 0 {
-                let s = DispatchSource.makeReadSource(fileDescriptor: udpFD, queue: queue)
-                s.setEventHandler { [weak self] in self?.readUDP(udpFD) }
-                addCancelHandler(s, fd: udpFD)
-                sources.append(s)
-                s.activate()
-            }
+            if udpFD >= 0 { addUDP(udpFD); udpSource?.source.activate() }
             if tcpFD >= 0 {
                 let s = DispatchSource.makeReadSource(fileDescriptor: tcpFD, queue: queue)
                 s.setEventHandler { [weak self] in self?.accept(tcpFD) }
@@ -711,13 +737,42 @@ nonisolated final class SyslogListener: @unchecked Sendable {
         }
     }
 
-    private func addCancelHandler(_ s: DispatchSourceProtocol, fd: Int32) {
+    private func addCancelHandler(_ s: DispatchSourceProtocol, fd: Int32, closed: DispatchSemaphore? = nil) {
         group.enter()
         let g = group
         s.setCancelHandler {
             close(fd)
             g.leave()
+            closed?.signal()
         }
+    }
+
+    /// queue-confined
+    private func addUDP(_ fd: Int32) {
+        let s = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
+        s.setEventHandler { [weak self] in self?.readUDP(fd) }
+        let closed = DispatchSemaphore(value: 0)
+        addCancelHandler(s, fd: fd, closed: closed)
+        sources.append(s)
+        udpSource = (s, closed)
+    }
+
+    /// Settings → Apply ports with only the UDP port changed: the UDP socket is swapped (`fd`,
+    /// already bound) and the TCP listener and its clients stay — stopping the whole listener
+    /// disconnected every TCP device mid-stream (their lines in flight lost). Returns once the
+    /// old UDP socket is closed (its port is free for the trap receiver).
+    func replaceUDP(_ fd: Int32) {
+        let old: (source: DispatchSourceProtocol, closed: DispatchSemaphore)? = queue.sync {
+            guard !stopped else { close(fd); return nil }
+            let old = udpSource
+            if let old { sources.removeAll { $0 === old.source } }
+            udpSource = nil
+            addUDP(fd)
+            udpSource?.source.activate()
+            old?.source.cancel()
+            return old
+        }
+        if let old { _ = old.closed.wait(timeout: .now() + 2) }
     }
 
     // MARK: UDP

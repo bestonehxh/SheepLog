@@ -128,6 +128,9 @@ nonisolated struct InterfaceRow: Identifiable, Sendable {
     /// sysUpTime − ifLastChange, in ticks: how long ago the port last changed state (nil when
     /// sysUpTime was not read).
     var sinceChange: UInt32?
+    /// sysUpTime is below ifLastChange: the uptime counter passed 2^32 ticks (497.1 days) since
+    /// the change, so `sinceChange` is the age modulo 497.1 days — the least it can be.
+    var sinceChangeWrapped = false
     /// Sorts on the age (unknown last).
     var sinceChangeSort: UInt32 { sinceChange ?? .max }
 
@@ -1028,8 +1031,12 @@ final class SNMPTestModel: ObservableObject {
             // port — not to round 748.8 Mb/s down to 748.
             if let h = high[idx], h > 0, h &* 1_000_000 >= r.speedBits &+ 1_000_000 { r.speedBits = h &* 1_000_000 }
             // ifLastChange is sysUpTime at the change (0 = before the agent started): the age
-            // is the difference. Unknown when the uptime wrapped past it (497 days).
-            if let up = sysUpTime, up >= r.lastChange { r.sinceChange = up - r.lastChange }
+            // is the difference — modulo 2^32 ticks when the uptime wrapped past it (497.1 days;
+            // it was left blank, and the tooltip said sysUpTime had not been read).
+            if let up = sysUpTime {
+                r.sinceChange = up &- r.lastChange
+                r.sinceChangeWrapped = up < r.lastChange
+            }
             rows[idx] = r
         }
         return rows.values.sorted { $0.index < $1.index }
@@ -1559,13 +1566,17 @@ struct SNMPTestView: View {
     /// the uptime at the change, marked as such ("at 00:00:35") — never an uptime that reads
     /// like an age.
     static func changeText(_ r: InterfaceRow) -> String {
-        if let age = r.sinceChange { return shortAge(ticks: age) }
+        if let age = r.sinceChange { return (r.sinceChangeWrapped ? "≥ " : "") + shortAge(ticks: age) }
         return "at " + shortAge(ticks: r.lastChange)
     }
 
     static func changeHelp(_ r: InterfaceRow) -> String {
         let at = "ifLastChange: sysUpTime \(Format.uptime(ticks: UInt64(r.lastChange)))"
         guard let age = r.sinceChange else { return "Last state change at \(at) (sysUpTime not read, so no age)" }
+        if r.sinceChangeWrapped {
+            return "Last state change at least \(Format.uptime(ticks: UInt64(age))) ago (\(at)): sysUpTime has passed 497 days "
+                + "and started again since then, so the age is this or 497 days (or a multiple) more — SNMP cannot tell which"
+        }
         return "Last state change \(Format.uptime(ticks: UInt64(age))) ago (\(at))"
             + (r.lastChange == 0 ? " — 0: no change since the agent started" : "")
     }

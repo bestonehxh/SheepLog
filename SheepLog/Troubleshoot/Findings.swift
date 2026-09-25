@@ -528,7 +528,9 @@ nonisolated final class Needles: @unchecked Sendable {
              // Linux `ip monitor link`: "3: eth1: <NO-CARRIER,BROADCAST,MULTICAST,UP> … state DOWN";
              // a port the switch shut for an error (IOS `%PM-4-ERR_DISABLE`, Huawei error-down,
              // AOS-CX "err-disabled").
-             "no-carrier", ",up>", "err-disable", "errdisable", "err_disable", "error-down"],
+             "no-carrier", ",up>", "err-disable", "errdisable", "err_disable", "error-down",
+             // NX-OS `%ETHPORT-5-IF_DOWN_ERROR_DISABLED: … is down (Error disabled. Reason:…)`.
+             "error disabled", "error_disabled"],
             ["power", "psu", "fan", "temperat", "thermal", "poe", "overheat", "pem"],
             ["stp", "topology", "bpdu", "loop", "storm", "spanning", "root bridge"],
             // "peer" / "bgp" / "ospf": Huawei `BGP/3/STATE_CHG_UPDOWN` ("The status of the peer …
@@ -672,11 +674,17 @@ nonisolated enum LineClassifier {
             // `%BGP-5-ADJCHANGE`) and leaves "Interface Gi0/1, changed state to down" /
             // "neighbor 203.0.113.1 Up" as the message: the program is screened too (those lines
             // were never read — a BGP peer that came back stayed "down and has not come back").
+            // Junos's structured form (RFC 5424) puts `SNMP_TRAP_LINK_DOWN` in the MSGID and
+            // leaves the message "ifIndex 526, … ifName ge-0/0/12" (or nothing but its SD): the
+            // MSGID (the parser's first field) is screened too.
+            let msgid = e.fields.first.flatMap { $0.key == "msgid" ? $0.value : nil } ?? ""
             e.program.withCString { pc in
-                for g in Needles.shared.groups {
-                    for n in g.needles where strcasestr(c, n) != nil || strcasestr(pc, n) != nil {
-                        bits |= 1 << UInt8(g.group)
-                        break
+                msgid.withCString { mc in
+                    for g in Needles.shared.groups {
+                        for n in g.needles where strcasestr(c, n) != nil || strcasestr(pc, n) != nil || strcasestr(mc, n) != nil {
+                            bits |= 1 << UInt8(g.group)
+                            break
+                        }
                     }
                 }
             }
@@ -713,8 +721,32 @@ nonisolated enum LineClassifier {
             guard let iface else { return nil }
             return .link(iface: iface, up: status.hasPrefix("up"))
         }
+        // FortiOS link monitor (`logdesc="Link monitor status"`, msg "Link Monitor changed state
+        // from alive to dead"): the gateway beyond the interface stopped answering — FortiOS
+        // takes the link as down (its routes are withdrawn) until it is alive again.
+        if e.vendor == .fortigate, e.field("logdesc")?.lowercased().contains("link monitor") ?? false,
+           let msg = e.field("msg")?.lowercased(), let iface = e.field("interface") ?? e.field("name"), !iface.isEmpty {
+            if msg.contains("to dead") || msg.contains("to die") { return .link(iface: iface, up: false) }
+            if msg.contains("to alive") { return .link(iface: iface, up: true) }
+            return nil
+        }
+        // PAN-OS SYSTEM `link-change`: "Port ethernet1/3: Down 1Gb/s-full duplex" / "Port
+        // ethernet1/3: Up …"; `ha1-link-change` / `ha2-link-change`: "HA2 link down". The state
+        // is in the description column, which never says "link down" (never read).
+        if e.vendor == .paloAlto, let ev = e.field("eventid"), ev.hasSuffix("link-change"), let d = e.field("description") {
+            return paloLinkChange(d)
+        }
+        // Junos structured: MSGID SNMP_TRAP_LINK_DOWN / _UP, the port and statuses in the SD
+        // (`interface-name`, `admin-status`, `operational-status`).
+        if let msgid = e.fields.first, msgid.key == "msgid", msgid.value.hasPrefix("SNMP_TRAP_LINK_") {
+            func sd(_ name: String) -> String? { e.fields.first { $0.key.hasSuffix("." + name) }?.value }
+            if sd("admin-status")?.lowercased().hasPrefix("down") ?? false { return nil }
+            if CText.has(c, "ifadminstatus down") { return nil }
+            guard let iface = sd("interface-name") ?? FText.token(after: "ifName ", in: e.message), !iface.isEmpty else { return nil }
+            return .link(iface: iface, up: msgid.value.hasPrefix("SNMP_TRAP_LINK_UP"))
+        }
         if let k = kernelFlagsLink(e, c) { return k.up.map { .link(iface: k.iface, up: $0) } }
-        if CText.hasAny(c, ["err-disable", "errdisable", "err_disable", "error-down"]) { return errDisabled(e, c) }
+        if CText.hasAny(c, errDisableWords) { return errDisabled(e, c) }
         var up: Bool?
         if let s = e.field("OperStatus") { up = s.uppercased().hasPrefix("UP") }
         // Ruckus ICX: "Interface ethernet 1/1/5, state down"; Meraki MS: "port 3 status changed
@@ -757,6 +789,63 @@ nonisolated enum LineClassifier {
         return (iface, !flags.contains("NO-CARRIER") && (flags.contains("RUNNING") || flags.contains("LOWER_UP")))
     }
 
+    /// PAN-OS `link-change` descriptions: "Port ethernet1/3: Down 1Gb/s-full duplex", "Port
+    /// ae1: Up …", "HA2 link down" / "HA1 link up (primary)".
+    static func paloLinkChange(_ d: String) -> FactKind? {
+        let lower = d.lowercased()
+        if lower.hasPrefix("port "), let colon = d.firstIndex(of: ":") {
+            let name = d[d.index(d.startIndex, offsetBy: 5)..<colon].trimmingCharacters(in: .whitespaces)
+            let state = d[d.index(after: colon)...].trimmingCharacters(in: .whitespaces).lowercased()
+            guard !name.isEmpty else { return nil }
+            if state.hasPrefix("down") { return .link(iface: name, up: false) }
+            if state.hasPrefix("up") { return .link(iface: name, up: true) }
+            return nil
+        }
+        if let r = lower.range(of: " link ") {
+            let name = String(d[..<r.lowerBound]).trimmingCharacters(in: .whitespaces)
+            let rest = lower[r.upperBound...]
+            guard !name.isEmpty, !name.contains(" ") else { return nil }
+            if rest.hasPrefix("down") || rest.hasPrefix("is down") { return .link(iface: name, up: false) }
+            if rest.hasPrefix("up") || rest.hasPrefix("is up") { return .link(iface: name, up: true) }
+        }
+        return nil
+    }
+
+    /// The words of a port shut by the switch for an error (IOS / AOS-CX err-disable, Huawei
+    /// error-down, NX-OS "Error disabled").
+    static let errDisableWords = ["err-disable", "errdisable", "err_disable", "error-down", "error disabled", "error_disabled"]
+    static let recoverWords = ["recover", "re-enabl", "reenabl", "timer expired"]
+
+    /// Why the switch shut the port, in words an engineer acts on (nil: no cause it can read).
+    static func errDisableCause(_ m: String) -> String? {
+        let l = m.lowercased()
+        let causes: [([String], String)] = [
+            (["link-flap", "link flap"], "the link went up and down too often (link-flap)"),
+            (["crc"], "too many CRC errors — a bad cable, optic or port"),
+            (["mac-address-flap", "mac-flap", "macflap", "mac flap"], "a MAC address kept moving between ports — usually a loop, or a host attached twice"),
+            (["transceiver", "sfp", "gbic", "power-low", "optic"], "the optic is out of range — dirty, failing, or a fibre too long"),
+            (["psecure", "port-security", "portsec", "port security"], "port security — more MAC addresses than allowed, or one it does not know"),
+            (["udld"], "UDLD found a one-way link — a fibre pair crossed or one strand broken"),
+            (["arp-inspection", "arp inspection"], "dynamic ARP inspection — ARP over the rate limit"),
+            (["dhcp-rate-limit", "dhcp rate", "dhcp snooping"], "DHCP snooping — DHCP packets over the rate limit"),
+            (["no-lacpdu", "lacp"], "LACP — no LACPDUs from the other end (the member is not in the partner's bundle)"),
+            (["dual-active"], "a stack split (dual-active)"),
+            (["auto-defend"], "attack defence — a flood of packets to the CPU from the port"),
+        ]
+        for (words, text) in causes where words.contains(where: { l.contains($0) }) { return text }
+        for marker in ["cause=", "reason:", "reason="] {
+            if let r = l.range(of: marker) {
+                let v = l[r.upperBound...].prefix { $0 != "," && $0 != ")" }.trimmingCharacters(in: .whitespaces)
+                if !v.isEmpty { return v }
+            }
+        }
+        if let r = l.range(of: " error detected") {
+            let v = l[..<r.lowerBound].split(separator: " ").last.map(String.init) ?? ""
+            if !v.isEmpty, !v.contains(":") { return v }
+        }
+        return nil
+    }
+
     static let virtualInterfacePrefixes = ["docker", "veth", "br-", "virbr", "cni", "flannel", "cali", "vnet", "lxc", "podman"]
 
     /// Linux `ip monitor link` / `ip link` output relayed to syslog: "3: eth1: <NO-CARRIER,…>
@@ -777,7 +866,7 @@ nonisolated enum LineClassifier {
     /// (`%PM-4-ERR_RECOVER`, `ERRDOWN_DOWNRECOVER`) is not the link back — the link-up line
     /// that follows is. A BPDU-guard / loop / storm cause is spanning tree's finding.
     static func errDisabled(_ e: LogEntry, _ c: UnsafePointer<CChar>) -> FactKind? {
-        if CText.hasAny(c, ["recover", "re-enabl", "reenabl", "timer expired"]) { return nil }
+        if CText.hasAny(c, recoverWords) { return nil }
         if CText.hasAny(c, ["bpdu", "loop", "storm"]) { return nil }
         let m = e.message
         let port = e.field("InterfaceName") ?? e.field("ifName")
@@ -876,9 +965,21 @@ nonisolated enum LineClassifier {
            !CText.contains(e.program, "STP"), !CText.contains(e.program, "SPANTREE") {
             return nil
         }
-        let port = FText.token(after: "port ", in: e.message) ?? FText.token(after: "interface ", in: e.message)
-            ?? FText.token(after: "putting ", in: e.message) ?? e.field("InterfaceName")
+        // An error-down / err-disable recovery ("Attempting to recover from bpduguard
+        // err-disable state", Huawei ERRDOWN_DOWNRECOVER … Cause=bpdu-protection) is the port
+        // coming back, not another BPDU guard action (each was counted twice).
+        if CText.hasAny(c, errDisableWords), CText.hasAny(c, recoverWords) { return nil }
+        // Huawei names the port in a field and says "Notify interface to change status to
+        // error-down" ("interface to" made the port "to"): the field first, and a port has a digit.
+        let port = [e.field("InterfaceName"), FText.token(after: "port ", in: e.message),
+                    FText.token(after: "interface ", in: e.message), FText.token(after: "putting ", in: e.message)]
+            .lazy.compactMap { $0 }.first { $0.contains { $0.isNumber } }
         if CText.hasWord(c, "loop") && CText.hasAny(c, ["detect", "protect", "found", "block", "disabl", "loop-protect"]) {
+            return .stp(.loop, port: port)
+        }
+        // Huawei `Cause=loopback-detect` (an error-down by loop detection), IOS's `loopback error
+        // detected` (a keepalive that came back): a loop — "loopback" is no whole word "loop".
+        if CText.hasAny(c, ["loopback-detect", "loopback detect", "loopback error", "loop-detect", "loopdetect"]) {
             return .stp(.loop, port: port)
         }
         if CText.has(c, "storm") && CText.hasAny(c, ["detect", "exceed", "control", "block", "threshold", "drop", "storm-control"]) {
@@ -907,6 +1008,9 @@ nonisolated enum LineClassifier {
     // Routing neighbours
 
     static func routing(_ e: LogEntry, _ c: UnsafePointer<CChar>) -> FactKind? {
+        // OSPF's own forms first: FRR's "auth-type mismatch, local MD5, … Router-ID x" says MD5
+        // and names this router's address first (the TCP MD5 reading took that as the peer).
+        if let k = ospfAuthFailure(e, c) { return k }
         if let k = sessionAuthFailure(e, c) { return k }
         let proto: String
         let p = e.program
@@ -973,6 +1077,29 @@ nonisolated enum LineClassifier {
         else if CText.hasAny(c, ["(639)", ":639", ", 639)", "msdp"]) { proto = "MSDP" }
         else { proto = "BGP" }
         return .routingAuth(proto: proto, neighbor: peer)
+    }
+
+    /// OSPF packets dropped for their authentication: IOS `%OSPF-4-ERRRCV: Received invalid
+    /// packet: Mismatched Authentication type / Key … from 10.0.12.2, Gi0/1`, FRR ospfd
+    /// "interface eth1:10.0.15.5: auth-type mismatch, local MD5, rcvd Null, Router-ID 10.255.0.2",
+    /// Junos "OSPF packet ignored: authentication failure (bad password) from 10.0.14.6". They
+    /// read as failed admin logins from the neighbor ("invalid" + "authentication"), or not at
+    /// all. The neighbor is the sender (FRR names its router ID; the address in "eth1:10.0.15.5"
+    /// is this router's own) — else the interface it came in on.
+    static func ospfAuthFailure(_ e: LogEntry, _ c: UnsafePointer<CChar>) -> FactKind? {
+        guard CText.has(c, "ospf") || CText.contains(e.program, "OSPF") || CText.contains(e.program, "ospfd") else { return nil }
+        guard CText.hasAny(c, ["mismatched authentication", "mismatch authentication", "auth-type mismatch", "authentication type mismatch",
+                               "authentication failure", "authentication failed", "auth failed", "authentication key", "key-id",
+                               "bad password", "authentication error", "auth type mismatch"]) else { return nil }
+        let m = e.message
+        if let peer = FText.firstIPv4(after: "router-id", in: m) ?? FText.firstIPv4(after: "from", in: m)
+            ?? FText.firstIPv4(after: "neighbor", in: m) ?? FText.firstIPv4(after: "nbr", in: m)
+            ?? FText.firstIPv6(after: "from", in: m) {
+            return .routingAuth(proto: "OSPF", neighbor: peer)
+        }
+        guard var iface = FText.token(after: "interface ", in: m) else { return nil }
+        if let colon = iface.firstIndex(of: ":") { iface = String(iface[..<colon]) }
+        return iface.isEmpty ? nil : .routingAuth(proto: "OSPF", neighbor: "interface " + iface)
     }
 
     /// The neighbor a routing line names: the first IPv4 after "neighbor" / "nbr" / "peer", else
@@ -1095,6 +1222,9 @@ nonisolated enum LineClassifier {
     static func login(_ e: LogEntry, _ c: UnsafePointer<CChar>) -> FactKind? {
         // 802.1X / MAC auth of clients is the Authentication pane's, not an admin login.
         if e.vendor == .clearPass || CText.hasAny(c, ["802.1x", "dot1x", "mac-auth", "mac auth", "radius", "wpa", "captive"]) { return nil }
+        // A routing protocol's packets or neighbors failing their authentication are the
+        // routing rules' (an OSPF key mismatch read as failed logins from the neighbor).
+        if isRoutingProtocolLine(e, c), CText.hasAny(c, ["packet", "neighbor", "neighbour", "nbr", "adjacen", "peer", "router-id"]) { return nil }
         let failed = CText.hasAny(c, ["fail", "invalid", "denied", "incorrect", "wrong", "reject", "unsuccessful", "bad password",
                                   "result=failure", "not allowed", "authentication error"])
         let ok = !failed && CText.hasAny(c, ["success", "succeeded", "accepted", "logged in", "session opened", "result=success"])
@@ -1240,8 +1370,9 @@ nonisolated extension FindingRules {
                                 source: lastDown.f.isTrap ? .traps : .logs,
                                 title: "Port \(key.iface) on \(key.device) went down at \(FText.clock(lastDown.t)) and has not come back.",
                                 detail: "No link-up for \(key.iface) was seen in the \(FText.duration(ctx.input.now.timeIntervalSince(lastDown.t))) since. "
-                                    + (lastDown.f.message.withCString { CText.hasAny($0, ["err-disable", "errdisable", "err_disable", "error-down"]) }
+                                    + (lastDown.f.message.withCString { CText.hasAny($0, LineClassifier.errDisableWords) }
                                        ? "The switch shut it itself (err-disabled: “\(FText.excerpt(lastDown.f.message))”): it stays down until error-disable recovery brings it back or someone enters shutdown / no shutdown, and it goes down again if the cause is still there. "
+                                        + (LineClassifier.errDisableCause(lastDown.f.message).map { "The cause: \($0). " } ?? "")
                                        : "")
                                     + "If something should be connected there (an uplink, an AP, a server) it is unreachable through this port.",
                                 evidence: evidence, firstSeen: lastDown.t, lastSeen: lastDown.t, count: downs.count,
@@ -1450,8 +1581,15 @@ nonisolated extension FindingRules {
         for (key, raw) in auth {
             let items = raw.sorted { $0.t < $1.t }
             guard let first = items.first, let last = items.last else { continue }
+            // The session / adjacency came up after the last rejected packet: the keys were
+            // put right (a mismatch fixed during a change window is no finding).
+            if groups[key]?.contains(where: { $0.up && $0.t >= last.t }) ?? false { continue }
             let nb = key.neighbor
             let span = last.t.timeIntervalSince(first.t)
+            if key.proto == "OSPF" {
+                out.append(ospfAuthFinding(key.device, nb, items.map { ($0.t, $0.f) }, hostTerm: ctx.hostTerm(address: first.f.address, name: key.device)))
+                continue
+            }
             out.append(Finding(id: "routing.auth|\(key.device)|\(key.proto)|\(nb)", rule: "routing.authFail", severity: .bad,
                                category: .routing, source: .logs,
                                title: "\(key.proto) session with \(nb) on \(key.device) fails its MD5 authentication: \(items.count) segment\(items.count == 1 ? "" : "s") rejected"
@@ -1493,6 +1631,35 @@ nonisolated extension FindingRules {
                                            "Compare the neighbor configuration on both sides (\(key.proto == "OSPF" ? "area, MTU, timers, authentication" : "addresses, AS numbers, authentication"))."]))
         }
         return out
+    }
+
+    /// OSPF packets whose authentication (type or key) does not match: the adjacency cannot
+    /// form, or drops when its dead timer runs out. `neighbor` is an address, or "interface
+    /// eth1" when the line names none.
+    static func ospfAuthFinding(_ device: String, _ neighbor: String, _ items: [(t: Date, f: LineFact)], hostTerm: String) -> Finding {
+        let first = items[0], last = items[items.count - 1]
+        let fromText = neighbor.hasPrefix("interface ") ? "received on \(neighbor)" : "from \(neighbor)"
+        let what = last.f.message.withCString { c -> String in
+            if CText.hasAny(c, ["type mismatch", "auth-type", "authentication type"]) { return "the two ends use different authentication types (none, plain text, MD5 / SHA)" }
+            if CText.hasAny(c, ["key-id", "key id", "authentication key", "bad password", "md5", "digest"]) { return "the two ends have different keys (or key IDs)" }
+            return "the authentication does not match"
+        }
+        let span = last.t.timeIntervalSince(first.t)
+        let term = neighbor.hasPrefix("interface ") ? FText.wordTerm(String(neighbor.dropFirst(10))) : FText.quote(neighbor)
+        return Finding(id: "routing.auth|\(device)|OSPF|\(neighbor)", rule: "routing.authFail", severity: .bad,
+                       category: .routing, source: .logs,
+                       title: "OSPF packets \(fromText) on \(device) fail authentication: \(items.count) rejected"
+                        + (items.count == 1 ? " at \(FText.clock(first.t))." : " (\(FText.clock(first.t))–\(FText.clock(last.t)))."),
+                       detail: "\(device) dropped OSPF packets \(fromText) because \(what): “\(FText.excerpt(last.f.message))”. "
+                        + "No adjacency forms while they differ — or, if one was up, it goes down when the dead timer runs out"
+                        + (span >= 60 ? "; this went on for \(FText.duration(span))." : ".")
+                        + " This is the routing protocol's key, not an administrator's login.",
+                       evidence: logEvidence(ids: items.map(\.f.id), trapIDs: [],
+                                             query: hostTerm + " ospf " + term, trapQuery: ""),
+                       firstSeen: first.t, lastSeen: last.t, count: items.count,
+                       device: device, deviceAddress: first.f.address,
+                       nextSteps: ["Set the same OSPF authentication (type, key ID and key) on the interface or area of \(device) and of the neighbor \(neighbor.hasPrefix("interface ") ? "on \(neighbor.dropFirst(10))" : neighbor).",
+                                   "Check the neighbor comes up (show ip ospf neighbor) once both sides match."])
     }
 
     static func adminRules(_ ctx: inout RuleContext) -> [Finding] {
