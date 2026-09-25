@@ -252,13 +252,20 @@ final class AppModel: ObservableObject {
         if logs.newestFirst != settings.newestFirst { logs.newestFirst = settings.newestFirst }
         packets.limit = Self.clampPacketLimit(settings.packetLimit)
         if settings.diskLogging {
-            if logs.diskLogger?.directory != settings.logDirectoryURL {
+            // By path: the URL of a folder that did not exist yet when the logger was made has no
+            // trailing "/", the same folder's URL once it exists has one — every later settings
+            // change (a buffer size, an auto-start switch) replaced the logger, and under traffic
+            // the old one's backlog and the new one's lines interleaved in the file.
+            if !(logs.diskLogger?.sameFolder(as: settings.logDirectoryURL) ?? false) {
                 // The new logger first, then the old one retired: a listener thread's batch
                 // handed to the old one before the switch is queued ahead of its retirement
                 // (and written). Retired first, a batch in between — for as long as the old
                 // logger took to write its backlog — was thrown away.
                 let old = logs.diskLogger
-                logs.diskLogger = DiskLogger(directory: settings.logDirectoryURL) { message in
+                let dir = settings.logDirectoryURL
+                // One still writing the same folder's backlog goes first (lines in order).
+                let before = retiredLoggers.last { $0.sameFolder(as: dir) }
+                logs.diskLogger = DiskLogger(directory: dir, after: before) { message in
                     DispatchQueue.main.async {
                         MainActor.assumeIsolated {
                             AppModel.shared.report("Log lines are not being written to disk.", detail: message)
@@ -473,11 +480,23 @@ final class AppModel: ObservableObject {
             && (syslog.udpPort != settings.syslogUDPPort || syslog.tcpPort != settings.syslogTCPPort)
         let moveTraps = traps.isRunning && traps.port != settings.trapPort
         let oldUDP = syslog.udpPort, oldTCP = syslog.tcpPort, oldTrap = traps.port
-        // The trap receiver lets go of its port first: syslog may take it in the same Apply
-        // (or the two trade ports), which failed as "SheepLog's own trap receiver is listening
-        // there" when syslog moved first.
-        if moveTraps { traps.stop() }
+        let newTrap = settings.trapPort
+        // Both listeners move in place: each new port is bound before its old one is let go and
+        // what the old sockets hold is read (the trap receiver stopped and started: nothing was
+        // bound in between, and a failed move closed the old port and bound it again). The order
+        // lets one take the port the other is leaving: traps onto syslog's old UDP port move
+        // after syslog, otherwise first (syslog may be taking theirs). Only when the two trade
+        // ports can neither be bound first — then the trap receiver lets go of its port first.
+        let trade = moveTraps && moveSyslog && newTrap == oldUDP && settings.syslogUDPPort == oldTrap
+        let trapsAfterSyslog = moveTraps && moveSyslog && newTrap == oldUDP
         var trapError: String?
+        var trapsStopped = false
+        if trade {
+            traps.stop()
+            trapsStopped = true
+        } else if moveTraps, !trapsAfterSyslog {
+            trapError = traps.move(to: newTrap)
+        }
         // Syslog moves in place: each new port is bound before its old one is let go, the TCP
         // clients stay connected and what the old sockets hold is read. Restarting the listener
         // disconnected every TCP device (lost their lines in flight) — for a TCP move, a retry
@@ -495,14 +514,19 @@ final class AppModel: ObservableObject {
                                    : "Syslog could not move to the new ports, so it stays on \(old).",
                    detail: moveFailureDetail(e, traps: false))
         }
-        if moveTraps {
-            traps.start(port: settings.trapPort)
-            if let e = traps.lastError { trapError = e; traps.stop() }
+        if trapsStopped {
+            traps.start(port: newTrap)
+            if let e = traps.lastError {
+                trapError = e
+                traps.stop()
+                traps.start(port: oldTrap)
+            }
+        } else if trapsAfterSyslog {
+            trapError = traps.move(to: newTrap)
         }
         if let e = trapError {
-            traps.start(port: oldTrap)
-            report(traps.isRunning ? "The trap receiver could not move to UDP \(settings.trapPort), so it stays on UDP \(oldTrap)."
-                                   : "The trap receiver could not move to UDP \(settings.trapPort), nor go back to UDP \(oldTrap), so it is off.",
+            report(traps.isRunning ? "The trap receiver could not move to UDP \(newTrap), so it stays on UDP \(oldTrap)."
+                                   : "The trap receiver could not move to UDP \(newTrap), nor go back to UDP \(oldTrap), so it is off.",
                    detail: moveFailureDetail(e, traps: true))
         }
     }

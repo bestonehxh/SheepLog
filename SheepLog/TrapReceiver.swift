@@ -81,6 +81,27 @@ final class TrapReceiver: ObservableObject {
         }
     }
 
+    /// Settings → Apply ports: the socket is swapped in place — the new port is bound before the
+    /// old one is let go, and the old socket's traps are read first. Nothing changes when the new
+    /// port cannot be bound (the error is returned). It stopped and started the receiver: nothing
+    /// was bound in between, and when the new port was taken the old one was closed and bound
+    /// again — every trap sent meanwhile went to a port nobody held (~270 per failed Apply under
+    /// a 3,000/s storm), and a program taking the old port in that moment left the receiver off.
+    func move(to newPort: UInt16) -> String? {
+        guard isRunning, let listener, newPort != port else { return nil }
+        do {
+            let fd = try TrapListener.bind(port: newPort)
+            listener.replaceSocket(fd)
+            port = newPort
+            lastError = nil
+            return nil
+        } catch let e as TrapListener.BindError {
+            return e.message
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
     /// Stops listening. Traps still waiting in the listener's 100 ms batch are written to the
     /// disk log and added to the store before this returns: ⌘Q calls it and then closes the
     /// disk log, so a batch left for `DispatchQueue.main.async` would never be logged.
@@ -315,13 +336,15 @@ nonisolated enum ReceivedTrap: Sendable {
 nonisolated final class TrapListener: @unchecked Sendable {
     struct BindError: Error { let message: String }
 
-    private let fd: Int32
+    /// The bound socket (queue-confined once `resume()` has run; `replaceSocket` swaps it).
+    private var fd: Int32
     private let queue = DispatchQueue(label: "SheepLog.traps", qos: .utility)
     private var source: DispatchSourceRead?
     private var pending: [ReceivedTrap] = []
     private var flushScheduled = false
     private var cancelled = false
-    private let closed = DispatchSemaphore(value: 0)
+    /// Signalled by the current source's cancel handler once it has closed `fd`.
+    private var closed = DispatchSemaphore(value: 0)
     private var buf = [UInt8](repeating: 0, count: 65_536)     // queue-confined, reused per read
     private let deliver: @Sendable ([ReceivedTrap]) -> Void
     private let gate: BacklogGate?
@@ -346,16 +369,37 @@ nonisolated final class TrapListener: @unchecked Sendable {
     }
 
     func resume() {
+        queue.sync { if !cancelled, source == nil { install(fd) } }
+    }
+
+    /// queue-confined: a read source for `fd` (its cancel handler closes that socket).
+    private func install(_ fd: Int32) {
         let src = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
-        let fd = self.fd
-        let closed = self.closed
-        src.setEventHandler { [weak self] in self?.readAvailable() }
+        let closed = DispatchSemaphore(value: 0)
+        src.setEventHandler { [weak self] in self?.readAvailable(fd) }
         src.setCancelHandler {
             Darwin.close(fd)
             closed.signal()
         }
+        self.fd = fd
+        self.closed = closed
         source = src
         src.resume()
+    }
+
+    /// Apply ports: `newFD` (bound) takes over at once, then what the old socket holds is read
+    /// and it is closed. Returns once the old port is free again.
+    func replaceSocket(_ newFD: Int32) {
+        let wait: DispatchSemaphore? = queue.sync {
+            guard !cancelled else { Darwin.close(newFD); return nil }
+            let oldFD = fd, oldSource = source, oldClosed = closed
+            install(newFD)
+            drainSocket(oldFD)
+            guard let oldSource else { Darwin.close(oldFD); return nil }   // bound, never resumed
+            oldSource.cancel()
+            return oldClosed
+        }
+        if let wait { _ = wait.wait(timeout: .now() + 2) }
     }
 
     /// Cancels the source and waits until its handler has closed the socket, so the port can
@@ -369,27 +413,27 @@ nonisolated final class TrapListener: @unchecked Sendable {
     /// `cancel()`, but the traps still batched are returned (already given to `rawSink`)
     /// instead of delivered, so a caller on the main actor can take them in synchronously.
     func cancelAndDrain() -> [ReceivedTrap] {
-        enum Step { case none, wait, close }
+        enum Step { case none, wait(DispatchSemaphore), close(Int32) }
         var rest: [ReceivedTrap] = []
         let step: Step = queue.sync {
             guard !cancelled else { return .none }      // a second cancel must not close twice
             // Traps the socket still holds are read first: closed unread they were gone without
             // a trace (Stop, Apply ports, ⌘Q with the disk log on).
-            drainSocket()
+            drainSocket(fd)
             cancelled = true
             flushScheduled = false
             rest = pending
             pending = []
             if !rest.isEmpty { rawSink?(rest.compactMap(\.diskLine)) }
-            guard let s = source else { return .close }  // bound but never resumed
+            guard let s = source else { return .close(fd) }  // bound but never resumed
             s.cancel()
             source = nil
-            return .wait
+            return .wait(closed)
         }
         switch step {
         case .none: break
-        case .wait: _ = closed.wait(timeout: .now() + 2)
-        case .close: Darwin.close(fd)
+        case .wait(let closed): _ = closed.wait(timeout: .now() + 2)
+        case .close(let fd): Darwin.close(fd)
         }
         return rest
     }
@@ -404,10 +448,10 @@ nonisolated final class TrapListener: @unchecked Sendable {
         }
     }
 
-    private func readAvailable() {
+    private func readAvailable(_ fd: Int32) {
         // At most a few thousand datagrams per event (the source fires again), so a trap storm
         // cannot keep this loop — and the undelivered `pending` — growing forever.
-        read(limit: 2_000)
+        read(fd, limit: 2_000)
         if pending.count >= 2_000 {
             flush()
         } else if !pending.isEmpty, !flushScheduled {
@@ -424,7 +468,7 @@ nonisolated final class TrapListener: @unchecked Sendable {
     /// queue-confined: every datagram the socket holds, and those still arriving within a few
     /// ms (a sender that has just stopped still has its last ones in the network stack), into
     /// `pending`.
-    private func drainSocket() {
+    private func drainSocket(_ fd: Int32) {
         // What the socket held when the drain began is read however long it takes (its buffer:
         // a few MB); what arrives after, for `drainSeconds` only.
         var owed = SocketFactory.pendingBytes(fd)
@@ -432,7 +476,7 @@ nonisolated final class TrapListener: @unchecked Sendable {
         let deadline = Monotonic.now() + Self.drainSeconds
         while quiet < 2, total < Self.drainLimit, owed > 0 || Monotonic.now() < deadline {
             var bytes = 0
-            let n = read(limit: min(2_000, Self.drainLimit - total), bytes: &bytes)
+            let n = read(fd, limit: min(2_000, Self.drainLimit - total), bytes: &bytes)
             owed = n > 0 ? owed - bytes : 0
             total += n
             if n > 0 { quiet = 0; continue }
@@ -443,13 +487,13 @@ nonisolated final class TrapListener: @unchecked Sendable {
 
     /// queue-confined: up to `limit` datagrams into `pending`; how many were read.
     @discardableResult
-    private func read(limit: Int) -> Int {
+    private func read(_ fd: Int32, limit: Int) -> Int {
         var bytes = 0
-        return read(limit: limit, bytes: &bytes)
+        return read(fd, limit: limit, bytes: &bytes)
     }
 
     /// `read(limit:)`, adding the datagrams' sizes to `bytes`.
-    private func read(limit: Int, bytes: inout Int) -> Int {
+    private func read(_ fd: Int32, limit: Int, bytes: inout Int) -> Int {
         var reads = 0
         while reads < limit {
             var from = sockaddr_storage()
@@ -463,7 +507,7 @@ nonisolated final class TrapListener: @unchecked Sendable {
             reads += 1
             bytes += n
             let (host, port) = SocketFactory.describe(&from)
-            let item = handle(Array(buf[0..<n]), host: host, port: port, from: &from, fromLen: len)
+            let item = handle(Array(buf[0..<n]), fd: fd, host: host, port: port, from: &from, fromLen: len)
             pending.append(item)
         }
         return reads
@@ -482,7 +526,7 @@ nonisolated final class TrapListener: @unchecked Sendable {
     }
 
     /// Decodes one datagram (and acknowledges an inform).
-    private func handle(_ bytes: [UInt8], host: String, port: UInt16, from: inout sockaddr_storage,
+    private func handle(_ bytes: [UInt8], fd: Int32, host: String, port: UInt16, from: inout sockaddr_storage,
                         fromLen: socklen_t) -> ReceivedTrap {
         let decoded = Self.decode(bytes, host: host, port: port, received: Date())
         if case .trap = decoded.item, let ack = decoded.informResponse {

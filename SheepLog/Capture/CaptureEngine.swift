@@ -250,6 +250,16 @@ final class CaptureEngine: ObservableObject {
                 self.kernelDropped = drops
                 self.store.addKernelDrops(delta)
             }
+        }, finalStats: { [weak self] drops in
+            // The run's last reading, taken after Stop (its regular readings are ignored once
+            // Stop has moved `runID` on): drops since the last one that counted. Nothing once
+            // another run, a file or a restart has replaced this capture's packets.
+            DispatchQueue.main.async {
+                guard let self, session == self.store.liveSession, self.store.fileURL == nil else { return }
+                let delta = Self.dropIncrease(from: self.kernelDropped, to: drops)
+                self.kernelDropped = drops
+                self.store.addKernelDrops(delta)
+            }
         }, failed: { [weak self] message in
             DispatchQueue.main.async {
                 guard let self, self.runID == run else { return }
@@ -345,15 +355,26 @@ nonisolated final class CaptureReader: Sendable {
     private let linkType: Int32
     private let deliver: @Sendable ([Packet]) -> Void
     private let stats: @Sendable (Int) -> Void
+    /// The drops once more after the loop has ended (the regular reading comes once a second:
+    /// the drops of a run's last second were never counted).
+    private let finalStats: (@Sendable (Int) -> Void)?
     private let failed: @Sendable (String) -> Void
     private let gate: BacklogGate?
     private let done = DispatchSemaphore(value: 0)
     private let stopping = Atomic(false)
+    /// When Stop was asked for, in µs since 1970 (the clock BPF stamps packets with).
+    private let stopMicros = Atomic(Int.max)
     /// The loop's clock (tests pass one they move by hand).
     private let clock: @Sendable () -> Double
 
     static let maxBatch = 2_000
     static let flushInterval: Double = 0.1
+    /// After Stop the packets the kernel had already captured are read: those stamped up to
+    /// `drainPast` after the moment of Stop (per-CPU stamps may be a little out of order), for
+    /// at most `drainSeconds` of the thread's time (a 48 MB backlog of small packets under a
+    /// sanitizer). `stop()` waits 2 s for it; what is read later still lands in the table.
+    static let drainPast: Double = 0.05
+    static let drainSeconds: Double = 10
     /// Batches that may wait for the main actor at once (100k packets/s while the main thread
     /// is busy for a few seconds would queue hundreds of MB of batches).
     static let backlogSlots = 32
@@ -365,6 +386,7 @@ nonisolated final class CaptureReader: Sendable {
     init(handle: PcapHandle, linkType: Int32,
          deliver: @escaping @Sendable ([Packet]) -> Void,
          stats: @escaping @Sendable (Int) -> Void,
+         finalStats: (@Sendable (Int) -> Void)? = nil,
          failed: @escaping @Sendable (String) -> Void,
          gate: BacklogGate? = nil,
          clock: @escaping @Sendable () -> Double = Monotonic.now) {
@@ -372,6 +394,7 @@ nonisolated final class CaptureReader: Sendable {
         self.linkType = linkType
         self.deliver = deliver
         self.stats = stats
+        self.finalStats = finalStats
         self.failed = failed
         self.gate = gate
         self.clock = clock
@@ -395,6 +418,10 @@ nonisolated final class CaptureReader: Sendable {
     }
 
     func requestStop() {
+        var tv = timeval()
+        gettimeofday(&tv, nil)
+        _ = stopMicros.compareExchange(expected: Int.max, desired: Int(tv.tv_sec) * 1_000_000 + Int(tv.tv_usec),
+                                       ordering: .sequentiallyConsistent)
         stopping.store(true, ordering: .sequentiallyConsistent)
     }
 
@@ -423,19 +450,22 @@ nonisolated final class CaptureReader: Sendable {
         var hdr: UnsafeMutablePointer<pcap_pkthdr>?
         var bytes: UnsafePointer<UInt8>?
         var failure: String?
+        let linkType = self.linkType
+        /// The packet `pcap_next_ex` just returned, into `batch`.
+        func take(_ h: pcap_pkthdr, _ bytes: UnsafePointer<UInt8>) {
+            id += 1
+            let ts = Double(h.ts.tv_sec) + Double(h.ts.tv_usec) / 1_000_000
+            if first == nil { first = ts }
+            let caplen = Int(h.caplen)
+            let raw = UnsafeRawBufferPointer(start: bytes, count: caplen)
+            batch.append(Packet(id: id, timestamp: Date(timeIntervalSince1970: ts), relative: ts - (first ?? ts),
+                                length: Int(h.len), captured: caplen, data: Data(raw),
+                                decoded: PacketDecoder.decode(raw, linkType: linkType)))
+        }
         loop: while !isStopping {
             let r = autoreleasepool { () -> Int32 in
                 let r = pcap_next_ex(p, &hdr, &bytes)
-                if r == 1, let h = hdr?.pointee, let bytes {
-                    id += 1
-                    let ts = Double(h.ts.tv_sec) + Double(h.ts.tv_usec) / 1_000_000
-                    if first == nil { first = ts }
-                    let caplen = Int(h.caplen)
-                    let raw = UnsafeRawBufferPointer(start: bytes, count: caplen)
-                    batch.append(Packet(id: id, timestamp: Date(timeIntervalSince1970: ts), relative: ts - (first ?? ts),
-                                        length: Int(h.len), captured: caplen, data: Data(raw),
-                                        decoded: PacketDecoder.decode(raw, linkType: linkType)))
-                }
+                if r == 1, let h = hdr?.pointee, let bytes { take(h, bytes) }
                 return r
             }
             if r == -2 { break }
@@ -459,7 +489,45 @@ nonisolated final class CaptureReader: Sendable {
                 if pcap_stats(p, &st) == 0 { stats(Int(st.ps_drop) + Int(st.ps_ifdrop)) }
             }
         }
+        // Stopped: the packets the kernel captured before Stop are still in BPF's buffers (and
+        // libpcap's). Left there they were gone without a trace — neither shown nor counted as
+        // dropped (393 of a lo0 flood's last 266,000 in one run). Read without blocking up to
+        // the first packet clearly stamped after the Stop.
+        if failure == nil, isStopping {
+            var errbuf = [CChar](repeating: 0, count: Int(PCAP_ERRBUF_SIZE))
+            let stopAt = Double(stopMicros.load(ordering: .sequentiallyConsistent)) / 1_000_000
+            let until = clock() + Self.drainSeconds
+            var breaks = 0
+            if pcap_setnonblock(p, 1, &errbuf) == 0 {
+                drain: while clock() < until {
+                    let r = autoreleasepool { () -> Int32 in
+                        let r = pcap_next_ex(p, &hdr, &bytes)
+                        guard r == 1, let h = hdr?.pointee, let bytes else { return r }
+                        let ts = Double(h.ts.tv_sec) + Double(h.ts.tv_usec) / 1_000_000
+                        if ts > stopAt + Self.drainPast { return 2 }
+                        take(h, bytes)
+                        return r
+                    }
+                    switch r {
+                    case 1:
+                        if batch.count >= Self.maxBatch {
+                            send(batch)
+                            batch = []
+                            batch.reserveCapacity(Self.maxBatch)
+                        }
+                    case -2 where breaks == 0:
+                        breaks += 1              // the break Stop asked for, still pending
+                    default:
+                        break drain              // empty (0), past the Stop (2), an error
+                    }
+                }
+            }
+        }
         if !batch.isEmpty { send(batch) }
+        if let finalStats {
+            var st = pcap_stat()
+            if pcap_stats(p, &st) == 0 { finalStats(Int(st.ps_drop) + Int(st.ps_ifdrop)) }
+        }
         if let failure, !isStopping { failed(failure) }
     }
 }
