@@ -267,7 +267,7 @@ enum TroubleshootJump {
         let presence = present(e, epoch: epoch)
         if let p = presence, p.present == 0 { return .gone(goneText(e, total: p.total)) }
         switch e.kind {
-        case .logLines, .traps: log(e.query)
+        case .logLines, .traps: log(e.query, ids: e.ids)
         case .packets: packets(e.query)
         case .flows: if let f = e.flows.first(where: { flowPresent($0, epoch: epoch) }) ?? e.flows.first { flow(f) }
         }
@@ -328,10 +328,20 @@ enum TroubleshootJump {
         }
     }
 
-    /// The Log pane on this filter (all sources: the filter names the host).
-    static func log(_ query: String) {
+    /// The Log pane on this filter (all sources: the filter names the host). The filter is
+    /// written in the plain grammar: with the Syslog pane's `.*` toggle on, its words were
+    /// regular expressions (`10.0.0.2` matched 10.0.0.20 and 10a0b0c2, a phrase's dots any
+    /// character), so the toggle goes off; a severity the mask hides that `ids` (the evidence's
+    /// lines) have is shown again — the table hid the evidence it was opened for.
+    static func log(_ query: String, ids: [Int] = []) {
         let logs = AppModel.shared.logs
         if logs.selectedSource != nil { logs.selectedSource = nil }
+        if logs.regexMode { logs.regexMode = false }
+        if logs.severityMask.count < Severity.allCases.count, !ids.isEmpty {
+            var needed = Set<Severity>()
+            for id in ids.prefix(2_000) { if let e = logs.entry(id: id) { needed.insert(e.severity) } }
+            if !needed.isSubset(of: logs.severityMask) { logs.severityMask.formUnion(needed) }
+        }
         logs.queryText = query
         logs.applyQueryText()
         AppModel.shared.mainPane = .log

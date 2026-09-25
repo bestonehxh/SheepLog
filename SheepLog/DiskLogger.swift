@@ -160,6 +160,15 @@ nonisolated final class DiskLogger: @unchecked Sendable {
         guard fd >= 0 else { return }
         let ok = Self.writeWhole(fd, data)
         if ok != 0 {
+            // The disk was ejected (or unplugged) with the file open: the write fails with EIO /
+            // ENXIO, which said "Input/output error" — and that report was the only one, so the
+            // spell never said the disk was gone nor that writing resumes when it is back. The
+            // descriptor is dead: closed, so the next batch reopens the file once it is back.
+            if let disk = Self.missingVolume(directory) {
+                closeFile()
+                report(Self.notConnected(disk))
+                return
+            }
             report("SheepLog: writing \(currentFile?.path ?? "the log file") failed: \(String(cString: strerror(ok)))"
                    + (ok == ENOSPC ? " (the disk is full)" : "") + ". Lines are kept in memory only until this is fixed.")
         } else {
@@ -243,8 +252,7 @@ nonisolated final class DiskLogger: @unchecked Sendable {
         }
         if let disk = Self.missingVolume(directory) {
             // Not "permission denied" (creating /Volumes/<name> is refused): the disk is gone.
-            report("SheepLog: the disk “\(disk)” that holds the log folder is not connected. "
-                   + "Lines are written again as soon as it is back; meanwhile they are kept in memory only.")
+            report(Self.notConnected(disk))
             return
         }
         do {
@@ -278,6 +286,11 @@ nonisolated final class DiskLogger: @unchecked Sendable {
         lastIdentityCheck = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         fd = f
         lock.lock(); file = url; lock.unlock()
+    }
+
+    static func notConnected(_ disk: String) -> String {
+        "SheepLog: the disk “\(disk)” that holds the log folder is not connected. "
+            + "Lines are written again as soon as it is back; meanwhile they are kept in memory only."
     }
 
     private func report(_ message: String) {

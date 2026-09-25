@@ -68,6 +68,18 @@ enum Theme {
         }
     }
 
+    /// The selected-row tint as an `NSColor`, for the AppKit tables (Log, Packets): the same
+    /// soft plum the SwiftUI rows use — the system's full-strength accent bar was too heavy.
+    static let nsSelectedAccent = nsDynamicAlpha(light: (0xB8407E, 0.13), dark: (0xE87AAD, 0.18))
+
+    static func nsDynamicAlpha(light: (UInt32, CGFloat), dark: (UInt32, CGFloat)) -> NSColor {
+        NSColor(name: nil) { appearance in
+            let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            let pick = isDark ? dark : light
+            return nsColor(pick.0).withAlphaComponent(pick.1)
+        }
+    }
+
     static func dynamicAlpha(light: (UInt32, CGFloat), dark: (UInt32, CGFloat)) -> Color {
         Color(nsColor: NSColor(name: nil) { appearance in
             let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua

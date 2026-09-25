@@ -491,8 +491,15 @@ final class AppModel: ObservableObject {
         if let e = syslogError {
             syslog.start(udpPort: oldUDP, tcpPort: oldTCP)
             let old = Self.portsText(udp: oldUDP, tcp: oldTCP)
-            report(syslog.isRunning ? "Syslog could not move to the new ports, so it stays on \(old)."
-                                    : "Syslog could not move to the new ports, nor go back to \(old), so it is off.",
+            // A listener running on one of its two ports (the other was taken at start) retried
+            // with the same Settings: no port was new, so "could not move to the new ports" was
+            // not what happened.
+            let retry = (oldUDP == 0 || oldUDP == settings.syslogUDPPort) && (oldTCP == 0 || oldTCP == settings.syslogTCPPort)
+            let wanted = Self.portsText(udp: oldUDP == 0 ? settings.syslogUDPPort : 0, tcp: oldTCP == 0 ? settings.syslogTCPPort : 0)
+            report(retry ? (syslog.isRunning ? "Syslog still cannot open \(wanted), so it stays on \(old) only."
+                                             : "Syslog still cannot open \(wanted), nor go back to \(old), so it is off.")
+                         : (syslog.isRunning ? "Syslog could not move to the new ports, so it stays on \(old)."
+                                             : "Syslog could not move to the new ports, nor go back to \(old), so it is off."),
                    detail: moveFailureDetail(e, traps: false))
         }
         if let e = trapError {

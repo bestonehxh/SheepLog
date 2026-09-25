@@ -12,6 +12,16 @@ import UniformTypeIdentifiers
 nonisolated enum KeychainStore {
     static let service = "Bestchaan.SheepLog"
 
+    /// Tests and demo/screenshot runs never touch the real Keychain: every Debug build is signed
+    /// differently, so each one would raise a "SheepLog wants to use your confidential
+    /// information" prompt for the items an earlier build saved — the owner once found a stack
+    /// of them on screen. Those runs keep credentials in memory for the process's lifetime.
+    static var isolated: Bool { AppSettings.isRunningTests || ephemeral }
+    /// Same rule as `LastPane.isEphemeralRun`, computed here without the main actor.
+    private static let ephemeral: Bool = CommandLine.value(after: "-demoShot") != nil
+        || CommandLine.value(after: "-demoSettings") != nil || CommandLine.value(after: "-demoPane") != nil
+    private static let memory = Mutex<[String: Data]>([:])
+
     private static func query(_ account: String) -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,
          kSecAttrService as String: service,
@@ -20,6 +30,7 @@ nonisolated enum KeychainStore {
 
     @discardableResult
     static func save(_ data: Data, account: String) -> Bool {
+        if isolated { memory.withLock { $0[account] = data }; return true }
         let q = query(account)
         let update: [String: Any] = [kSecValueData as String: data]
         let status = SecItemUpdate(q as CFDictionary, update as CFDictionary)
@@ -33,6 +44,7 @@ nonisolated enum KeychainStore {
     }
 
     static func load(account: String) -> Data? {
+        if isolated { return memory.withLock { $0[account] } }
         var q = query(account)
         q[kSecReturnData as String] = true
         q[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -42,6 +54,7 @@ nonisolated enum KeychainStore {
     }
 
     static func delete(account: String) {
+        if isolated { memory.withLock { _ = $0.removeValue(forKey: account) }; return }
         SecItemDelete(query(account) as CFDictionary)
     }
 

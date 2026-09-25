@@ -1325,9 +1325,7 @@ extension PacketTableController: NSMenuDelegate {
     }
 
     static func conversationFilter(_ d: Decoded) -> String {
-        var s = "ip:\(d.source) ip:\(d.destination)"
-        if let sp = d.sourcePort, let dp = d.destinationPort { s += " port:\(sp) port:\(dp)" }
-        return s
+        ConversationFilter.text(d.source, d.sourcePort, d.destination, d.destinationPort)
     }
 
     @objc func followStream(_ sender: Any?) {
@@ -1371,7 +1369,7 @@ final class PacketNSTableView: NSTableView {
 }
 
 /// A row view that is never transparent (see `tableView(_:rowViewForRow:)`).
-final class PacketRowView: NSTableRowView {
+final class PacketRowView: SoftSelectionRowView {
     static let identifier = NSUserInterfaceItemIdentifier("packetRow")
 
     override init(frame: NSRect) {

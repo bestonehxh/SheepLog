@@ -561,6 +561,9 @@ nonisolated struct PacketMatcher: Sendable {
 
     enum Leaf: Sendable {
         case text([UInt8])
+        /// A bare complete IPv4 / IPv6 address: the packet's source or destination, or that
+        /// address as a whole in Info (ARP "Who has 10.0.0.2?") — not 10.0.0.20 for `10.0.0.2`.
+        case addressWord(AddressWord)
         /// Bounded per string and given up on when it keeps being slow: `(a+)+$` against a
         /// 30-character Info is enough to hang a re-scan.
         case regex(GuardedRegex)
@@ -638,7 +641,9 @@ nonisolated struct PacketMatcher: Sendable {
         case .and: return compileAnd(n)
         case .or: return compileOr(n)
         case .not(let a): return .not(compile(a))
-        case .text(let t): return .leaf(.text(folded(t)))
+        case .text(let t):
+            if let a = AddressWord(t) { return .leaf(.addressWord(a)) }
+            return .leaf(.text(folded(t)))
         case .regex(let r): return .leaf(.regex(GuardedRegex(r)))
         case .field(let key, let op, let value): return field(key, op, value)
         }
@@ -715,7 +720,9 @@ nonisolated struct PacketMatcher: Sendable {
         case "info":
             return .leaf(.info(folded(v)))
         default:
-            // Not a packet key ("http://…", "Seq:…"): search the words as typed.
+            // Not a packet key ("http://…", "Seq:…"): search the words as typed — an IPv6
+            // address starting with a letter (`fe80::1`) as the address.
+            if op == .eq, let a = AddressWord("\(key):\(value)") { return .leaf(.addressWord(a)) }
             let opText = op == .eq ? "" : op.rawValue
             return .leaf(.text(folded("\(key):\(opText)\(value)")))
         }
@@ -809,6 +816,8 @@ nonisolated struct PacketMatcher: Sendable {
         case .text(let n):
             return contains(d.info, n) || contains(d.source, n) || contains(d.destination, n)
                 || contains(d.protocolName, n)
+        case .addressWord(let a):
+            return a.equals(d.source) || a.equals(d.destination) || a.found(in: d.info)
         case .regex(let r):
             return r.matches(d.info) || r.matches(d.source) || r.matches(d.destination) || r.matches(d.protocolName)
         case .address(let side, let a):
@@ -910,5 +919,16 @@ nonisolated struct PacketMatcher: Sendable {
             for j in 0..<needle.count where fold(h[j]) != needle[j] { return false }
             return true
         }
+    }
+}
+
+/// The Packets filter for one conversation, both directions: each side's address **with its
+/// own port**. `ip:A ip:B port:pA port:pB` also took A:pB ⇄ B:pA (another conversation with
+/// the ports swapped) and, for a host talking to itself (A = B), every packet of that host
+/// with either port.
+nonisolated enum ConversationFilter {
+    static func text(_ a: String, _ pa: UInt16?, _ b: String, _ pb: UInt16?) -> String {
+        guard let pa, let pb else { return "ip:\(a) ip:\(b)" }
+        return "((src:\(a) sport:\(pa) dst:\(b) dport:\(pb)) OR (src:\(b) sport:\(pb) dst:\(a) dport:\(pa)))"
     }
 }

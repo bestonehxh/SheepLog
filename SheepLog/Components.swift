@@ -804,3 +804,19 @@ extension Calendar {
         return c
     }()
 }
+
+
+/// An `NSTableRowView` whose selection is the family's soft accent tint instead of the
+/// system's full-strength bar, with the cells keeping their own text colours (no white-on-plum).
+class SoftSelectionRowView: NSTableRowView {
+    override var isEmphasized: Bool {
+        get { false }
+        set { }
+    }
+
+    override func drawSelection(in dirtyRect: NSRect) {
+        guard selectionHighlightStyle != .none, isSelected else { return }
+        Theme.nsSelectedAccent.setFill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 4, dy: 0), xRadius: Metrics.row, yRadius: Metrics.row).fill()
+    }
+}
