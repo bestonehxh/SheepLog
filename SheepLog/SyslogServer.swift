@@ -629,6 +629,29 @@ nonisolated final class SyslogListener: @unchecked Sendable {
     /// Batches that may wait for the main actor at once (see `BacklogGate`).
     static let backlogSlots = 32
 
+    /// Parsing runs here, not on `queue`: Stop, Apply ports and ⌘Q wait for `queue` (`sync`),
+    /// and with the parse on it they waited behind every read event already queued — each up
+    /// to 64 reads per client, parsed — and then behind the parse of what the drain read: 1.2 s
+    /// of backlog + 1.9 s of drain under an 8-client flood (Debug, Low Power). One serial queue
+    /// for every listener, so batches reach the store in the order they were read (an off / on
+    /// hands the old listener's last batches over before the new one's first).
+    private static let parseQueue = DispatchQueue(label: "sheeplog.syslog.parse", qos: .userInitiated)
+    /// Batches a listener may have waiting for the parser before its reads wait: the reader
+    /// must not outrun the parser without bound — a TCP device is slowed down by its own
+    /// window then, as when the parse ran on `queue`, instead of its lines being dropped at the
+    /// backlog gate.
+    static let parseAhead = 4
+    private let parseSlots = DispatchSemaphore(value: SyslogListener.parseAhead)
+    /// Stop / Apply ports is waiting for `queue`: read events already queued return at once
+    /// (the socket still holds their data — the drain reads it, or the source fires again), and
+    /// a flush does not wait for a parse slot.
+    private let urgent = Atomic<Int>(0)
+    private var isUrgent: Bool { urgent.load(ordering: .relaxed) > 0 }
+
+    /// Waits until every batch handed to the parser so far has been parsed and delivered
+    /// (tests: `stop()` returns once every line is on the disk sink and handed to the parser).
+    static func waitForParser() { parseQueue.sync {} }
+
     // Limits against hostile or broken peers. Set before `start`.
     /// The most TCP clients at once; further connections are accepted and closed at once.
     var maxClients = 512
@@ -726,7 +749,10 @@ nonisolated final class SyslogListener: @unchecked Sendable {
     private func addListen(_ fd: Int32) {
         ensureIdleTimer()
         let s = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
-        s.setEventHandler { [weak self] in _ = self?.accept(fd) }
+        s.setEventHandler { [weak self] in
+            guard let self, !self.isUrgent else { return }
+            _ = self.accept(fd)
+        }
         let closed = DispatchSemaphore(value: 0)
         addCancelHandler(s, fd: fd, closed: closed)
         sources.append(s)
@@ -742,6 +768,8 @@ nonisolated final class SyslogListener: @unchecked Sendable {
     /// unread they were gone without a trace (Stop, Apply ports, ⌘Q with the disk log on) —
     /// and a TCP socket closed with unread data resets the device's connection.
     func stop() {
+        urgent.add(1, ordering: .sequentiallyConsistent)
+        defer { urgent.subtract(1, ordering: .sequentiallyConsistent) }
         queue.sync {
             guard !stopped else { return }
             drainEverything()
@@ -877,7 +905,10 @@ nonisolated final class SyslogListener: @unchecked Sendable {
     /// queue-confined
     private func addUDP(_ fd: Int32) {
         let s = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
-        s.setEventHandler { [weak self] in _ = self?.readUDP(fd) }
+        s.setEventHandler { [weak self] in
+            guard let self, !self.isUrgent else { return }
+            _ = self.readUDP(fd)
+        }
         let closed = DispatchSemaphore(value: 0)
         addCancelHandler(s, fd: fd, closed: closed)
         sources.append(s)
@@ -889,6 +920,8 @@ nonisolated final class SyslogListener: @unchecked Sendable {
     /// every TCP device mid-stream (their lines in flight lost). The old socket's datagrams
     /// are read first. Returns once it is closed (its port is free for the trap receiver).
     func replaceUDP(_ fd: Int32?) {
+        urgent.add(1, ordering: .sequentiallyConsistent)
+        defer { urgent.subtract(1, ordering: .sequentiallyConsistent) }
         let closed: DispatchSemaphore? = queue.sync {
             guard !stopped else { if let fd { close(fd) }; return nil }
             let old = udpSource
@@ -909,6 +942,8 @@ nonisolated final class SyslogListener: @unchecked Sendable {
     /// had in flight); connections the old socket completed but had not handed over yet are
     /// taken in first. With TCP off the clients' lines are read, then they are disconnected.
     func replaceTCP(_ fd: Int32?) {
+        urgent.add(1, ordering: .sequentiallyConsistent)
+        defer { urgent.subtract(1, ordering: .sequentiallyConsistent) }
         let closed: DispatchSemaphore? = queue.sync {
             guard !stopped else { if let fd { close(fd) }; return nil }
             let old = listenSource
@@ -1048,7 +1083,10 @@ nonisolated final class SyslogListener: @unchecked Sendable {
             let (address, port) = peer(&storage)
             let client = Client(fd: fd, address: address, port: port, now: Self.now())
             let s = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
-            s.setEventHandler { [weak self] in _ = self?.readTCP(fd) }
+            s.setEventHandler { [weak self] in
+                guard let self, !self.isUrgent else { return }
+                _ = self.readTCP(fd)
+            }
             addCancelHandler(s, fd: fd)
             client.source = s
             clients[fd] = client
@@ -1167,7 +1205,18 @@ nonisolated final class SyslogListener: @unchecked Sendable {
         // The main actor is this many batches behind: drop (counted by the gate) before
         // spending the parse on lines nobody can take in.
         if let gate, !gate.tryEnter(count: b.count) { return }
-        deliver(Self.parseBatch(b, overrides: overrides.snapshot()))
+        // The parser is `parseAhead` batches behind: wait for it (reads pause, TCP senders are
+        // held back by their windows) — unless Stop / Apply is waiting for this queue.
+        var slot = false
+        while !slot {
+            slot = parseSlots.wait(timeout: .now() + .milliseconds(5)) == .success
+            if !slot, isUrgent || stopped { break }
+        }
+        let overrides = self.overrides, deliver = self.deliver, slots = parseSlots
+        Self.parseQueue.async {
+            deliver(Self.parseBatch(b, overrides: overrides.snapshot()))
+            if slot { slots.signal() }
+        }
     }
 
     /// Parse a batch in arrival order with consecutive ids; chunks of 512 lines run in parallel.

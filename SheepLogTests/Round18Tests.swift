@@ -120,7 +120,7 @@ final class Round18Tests: XCTestCase {
         /// Every byte written has left this socket's send buffer (SO_NWRITE = 0).
         func waitAcknowledged(timeout: Double = 5) -> Bool {
             let end = Date().addingTimeInterval(timeout)
-            while Date() < end {
+            while Date() < end, !failed.load(ordering: .relaxed) {     // (a reset peer never acknowledges)
                 var n: Int32 = 0
                 var len = socklen_t(4)
                 if getsockopt(fd, SOL_SOCKET, SO_NWRITE, &n, &len) != 0 { return false }
@@ -679,6 +679,7 @@ final class Round18Tests: XCTestCase {
         usleep(100_000)                             // stop waits for the queue
         release.signal()
         XCTAssertEqual(stopped.wait(timeout: .now() + 10), .success)
+        SyslogListener.waitForParser()              // (round 19: parsed off the listener queue)
         let k = UDPStats.now().since(before)
         let hosts = got.value
         XCTAssertEqual(hosts.filter { $0 == "kt" }.count, 2_000, "a client still in the accept queue at stop")

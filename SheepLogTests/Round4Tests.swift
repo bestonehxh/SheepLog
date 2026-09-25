@@ -250,6 +250,7 @@ final class Round4Tests: XCTestCase {
             usleep(200_000)
         }
         l.stop()                          // flushes what is batched (⌘Q does the same)
+        SyslogListener.waitForParser()    // (round 19: parsed off the listener queue)
         logger.sync()
         XCTAssertGreaterThan(gate.droppedTotal, 0, "batches were dropped on the way to the main thread")
         XCTAssertEqual(delivered.value + gate.droppedTotal, 1_000)

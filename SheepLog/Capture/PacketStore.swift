@@ -88,6 +88,9 @@ final class PacketStore: ObservableObject {
     /// Packets held back while paused (received, not in the table yet).
     var pausedCount: Int { pausedBuffer.count }
     private var rescanToken = 0
+    /// A filter change is being applied off the main actor: `visible` is still the previous
+    /// filter's rows (plus new packets through the new one) until it finishes.
+    private var rescanInFlight = false
     private var loadToken = 0
     private var loadCancel: LoadCancel?
     private var saveToken = 0
@@ -249,6 +252,7 @@ final class PacketStore: ObservableObject {
         packets = []
         visible = []
         pausedBuffer = []
+        rescanInFlight = false
         generation += 1
         totalReceived = 0
         totalBytes = 0
@@ -329,24 +333,35 @@ final class PacketStore: ObservableObject {
     /// What `save` writes: `visible`, or every packet when the filter is empty.
     var packetsToSave: [Packet] { query.isEmpty ? packets : visible }
 
+    /// What a Save writes, as of now: `packetsToSave`, or — while a filter change is still being
+    /// applied — the packets and the filter in force, to be filtered by the writer. (Mid-rescan
+    /// `visible` still held the previous filter's rows: a Save right after a filter change wrote
+    /// 106,000 packets of every conversation while the filter shown matched none.)
+    private var saveSnapshot: (packets: [Packet], filter: PacketMatcher?) {
+        rescanInFlight && !query.isEmpty ? (packets, matcher) : (packetsToSave, nil)
+    }
+
     /// Write `visible` (or all, when the filter is empty) as a classic pcap file, on the
     /// calling thread (tests, small captures). The pane uses `save(to:completion:)`.
     func save(to url: URL) throws {
-        try PcapFile.write(packetsToSave, linkType: linkType, to: url, snapLength: fileSnapLength)
+        let s = saveSnapshot
+        try PcapFile.write(Self.filter(s.packets, with: s.filter), linkType: linkType, to: url, snapLength: fileSnapLength)
     }
 
     /// Write off the main actor (200k packets are ~100 MB of `fwrite`); `isSaving` is true
     /// meanwhile. `completion` gets nil or the error text, on the main actor.
     func save(to url: URL, completion: @escaping @MainActor (String?) -> Void) {
-        let snapshot = packetsToSave, lt = linkType, snap = fileSnapLength
+        let (snapshot, filter) = saveSnapshot
+        let lt = linkType, snap = fileSnapLength
         saveToken += 1
         let token = saveToken
-        savingCount = snapshot.count
+        savingCount = filter == nil ? snapshot.count : visible.count
         isSaving = true
         PendingWrites.begin()          // ⌘Q waits for the write
         Task.detached(priority: .userInitiated) { [weak self] in
             var failure: String?
-            do { try PcapFile.write(snapshot, linkType: lt, to: url, snapLength: snap) } catch { failure = error.localizedDescription }
+            let rows = PacketStore.filter(snapshot, with: filter)
+            do { try PcapFile.write(rows, linkType: lt, to: url, snapLength: snap) } catch { failure = error.localizedDescription }
             PendingWrites.end()
             let message = failure
             await MainActor.run {
@@ -393,6 +408,7 @@ final class PacketStore: ObservableObject {
     private func rescan(synchronous: Bool) {
         rescanToken += 1
         let token = rescanToken
+        rescanInFlight = false
         guard let m = matcher else {
             objectWillChange.send()
             visible = packets
@@ -405,6 +421,7 @@ final class PacketStore: ObservableObject {
             finishRescan(token: token, result: Self.filter(snapshot, with: m), lastID: lastID, matcher: m)
             return
         }
+        rescanInFlight = true
         Task.detached(priority: .userInitiated) { [weak self] in
             let result = PacketStore.filter(snapshot, with: m)
             await self?.finishRescan(token: token, result: result, lastID: lastID, matcher: m)
@@ -413,6 +430,7 @@ final class PacketStore: ObservableObject {
 
     private func finishRescan(token: Int, result: [Packet], lastID: Int?, matcher m: PacketMatcher) {
         guard token == rescanToken else { return }
+        rescanInFlight = false
         var v = result
         if let first = packets.first?.id {
             let cut = Self.lowerBound(v, id: first)

@@ -33,10 +33,30 @@ nonisolated final class DiskLogger: @unchecked Sendable {
     /// The wall clock that says which day it is (tests step it over midnight).
     private let clock: @Sendable () -> Date
 
-    init(directory: URL, onError: (@Sendable (String) -> Void)? = nil, clock: @escaping @Sendable () -> Date = { Date() }) {
+    /// `after`: a logger of the same folder that was just retired (disk logging off and on
+    /// again, or a folder changed away and back) and may still be writing its backlog. This one
+    /// writes nothing before that one has finished: both append to the same day file, and their
+    /// batches interleaved — a device's older lines after its newer ones (up to 4 steps back per
+    /// client in 20 off / on switches under a flood).
+    init(directory: URL, after predecessor: DiskLogger? = nil, onError: (@Sendable (String) -> Void)? = nil,
+         clock: @escaping @Sendable () -> Date = { Date() }) {
         self.directory = directory
         self.clock = clock
         self.onError = onError
+        if let predecessor { queue.async { predecessor.sync() } }
+    }
+
+    /// Whether this logger writes to the folder `other` names. Compared as paths without a
+    /// trailing slash: `URL(fileURLWithPath:)` ends a folder's URL with "/" only once the folder
+    /// exists, so the settings' URL of a folder this logger created was a different URL.
+    func sameFolder(as other: URL) -> Bool {
+        Self.folderPath(directory) == Self.folderPath(other)
+    }
+
+    static func folderPath(_ url: URL) -> String {
+        var p = url.standardizedFileURL.path(percentEncoded: false)
+        while p.count > 1, p.hasSuffix("/") { p.removeLast() }
+        return p
     }
 
     /// Every queued write holds a reference, so by now the queue is idle: close the file a

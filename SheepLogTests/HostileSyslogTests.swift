@@ -418,6 +418,7 @@ extension HostileSyslogTests {
         usleep(200_000)
         XCTAssertTrue(got.value.isEmpty, "not delivered while the line is still open")
         l.stop()
+        SyslogListener.waitForParser()        // (round 19: stop hands the last batch to the parser)
         XCTAssertTrue(got.value.contains { $0.contains("the last words before quit") },
                       "stop() delivers the unterminated line: \(got.value)")
     }
