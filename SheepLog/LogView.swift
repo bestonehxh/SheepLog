@@ -324,7 +324,7 @@ struct LogView: View {
         panel.allowsOtherFileTypes = true
         panel.canCreateDirectories = true
         panel.nameFieldStringValue = Self.exportName(source: store.selectedSource, date: Date())
-        panel.message = "Save the \(Format.count(store.visibleCount)) lines shown. Name it .csv for a spreadsheet, .log for raw lines."
+        panel.message = LogStore.exportPanelMessage(shown: store.visibleCount, held: store.paused ? store.pausedCount : 0)
         guard panel.runModal() == .OK, let url = panel.url else { return }
         // The store waits for a re-parse / re-scan in flight, snapshots on the main actor and
         // writes off it; the flag lives on the store (a pane switch mid-export made a new

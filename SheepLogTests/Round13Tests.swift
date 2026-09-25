@@ -288,6 +288,21 @@ final class Round13Tests: XCTestCase {
                                   l.add(0, "R1", "%OSPF-4-ERRRCV: Received invalid packet: Mismatched Authentication type. Input packet specified type 0, we use type 2 from 10.0.0.2, GigabitEthernet0/1", sev: 4)
                                   l.add(60, "R1", "%OSPF-5-ADJCHG: Process 1, Nbr 10.0.0.2 on GigabitEthernet0/1 from LOADING to FULL, Loading Done", sev: 5)
                               }))
+        // Round 18: the same, reported by trap (OSPF-TRAP-MIB, BGP4-MIB) with only the bundled MIBs.
+        cases.append(RuleCase(rule: "routing.authFail", severity: .bad,
+                              title: "OSPF packets from 10.0.12.2 on 10.1.0.30 fail authentication: 1 rejected at \(c(0)).",
+                              make: { analyze([Round18Tests.ospfAuthTrap(0, id: 1)]) },
+                              below: { analyze([Round18Tests.ospfAuthTrap(0, id: 1), Round18Tests.ospfNeighborTrap(60, state: 8, id: 2)]) }))
+        cases.append(RuleCase(rule: "routing.authFail", severity: .bad,
+                              title: "BGP session with 10.0.0.2 on 10.1.0.31 fails authentication: 1 attempt ended with an authentication failure at \(c(0)).",
+                              make: { analyze([Round18Tests.bgpTrap(0, peer: "10.0.0.2", established: false, error: [2, 5], id: 1)]) },
+                              below: { analyze([Round18Tests.bgpTrap(0, peer: "10.0.0.2", established: false, error: [2, 5], id: 1),
+                                                Round18Tests.bgpTrap(60, peer: "10.0.0.2", established: true, id: 2)]) }))
+        cases.append(RuleCase(rule: "routing.neighbor", severity: .bad,
+                              title: "BGP neighbor 10.0.0.2 on 10.1.0.31 went down at \(c(0)) and has not come back.",
+                              make: { analyze([Round18Tests.bgpTrap(0, peer: "10.0.0.2", established: false, error: [4, 0], id: 1)]) },
+                              below: { analyze([Round18Tests.bgpTrap(0, peer: "10.0.0.2", established: false, error: [4, 0], id: 1),
+                                                Round18Tests.bgpTrap(40, peer: "10.0.0.2", established: true, id: 2)]) }))
         cases.append(RuleCase(rule: "config.change", severity: .info, title: "Configuration changed on R1 by admin at \(c(0)).",
                               make: logs { $0.add(0, "R1", "%SYS-5-CONFIG_I: Configured from console by admin on vty0 (10.1.0.5)") }))
         cases.append(RuleCase(rule: "device.restart", severity: .warn, title: "R1 restarted at \(c(0)).",

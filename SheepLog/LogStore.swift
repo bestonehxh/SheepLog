@@ -907,6 +907,8 @@ final class LogStore: ObservableObject {
         exportNote = nil
         await settle()
         let rows = exportRows
+        // A paused table is what is exported; the lines Pause holds back are not in the file.
+        let held = paused ? pausedCount : 0
         PendingWrites.begin()          // ⌘Q waits for the write
         let failure = await Task.detached(priority: .userInitiated) {
             defer { PendingWrites.end() }
@@ -915,8 +917,17 @@ final class LogStore: ObservableObject {
         isExporting = false
         if failure == nil {
             exportNote = "Exported \(Format.count(rows.count)) \(rows.count == 1 ? "line" : "lines") to \(url.lastPathComponent)"
+                + (held > 0 ? " — the table as paused; \(Format.count(held)) newer \(held == 1 ? "line" : "lines") held back \(held == 1 ? "is" : "are") not in it" : "")
         }
         return failure
+    }
+
+    /// The Export save panel's message: what the file will hold (a paused table's newer lines
+    /// are not in it — "the N lines shown" alone read as everything received).
+    static func exportPanelMessage(shown: Int, held: Int) -> String {
+        "Save the \(Format.count(shown)) \(shown == 1 ? "line" : "lines") shown"
+            + (held > 0 ? " (the table is paused: the \(Format.count(held)) newer \(held == 1 ? "line" : "lines") held back \(held == 1 ? "is" : "are") not included)" : "")
+            + ". Name it .csv for a spreadsheet, .log for raw lines."
     }
 
     /// Formats and writes (off the main actor); nil on success, else the error text.
@@ -1267,6 +1278,9 @@ nonisolated struct AddressWord: Sendable {
     /// Lower-cased spellings to look for: as typed and, for IPv6, inet_ntop's (what a device
     /// that prints addresses with inet_ntop writes: `2001:DB8:0:0::1` typed finds `2001:db8::1`).
     let forms: [[UInt8]]
+    /// A link-local address's zone as typed (`fe80::1%en0` → "en0", lower-cased): the address
+    /// written with another zone is another host; written without one it may be this one.
+    let zone: [UInt8]?
     /// IPv6: the longest group without its leading zeros (`db8` of 2001:db8::2 is shorter than
     /// `2001`) — every spelling of the address holds it (`2001:0DB8:0:0:0:0:0:2`,
     /// `2001:db8:0::2`), so only lines that do are parsed for an address of that value.
@@ -1277,7 +1291,9 @@ nonisolated struct AddressWord: Sendable {
         text = s
         bytes = b
         v6 = b.count == 16
-        var f = [Array(s.lowercased().utf8)]
+        let (address, zone) = CIDR.splitZone(s)
+        self.zone = zone.map { Array($0.lowercased().utf8) }
+        var f = [Array(address.lowercased().utf8)]
         var anchor: [UInt8]?
         if v6 {
             var a = in6_addr()
@@ -1311,7 +1327,9 @@ nonisolated struct AddressWord: Sendable {
     func found(in hay: String) -> Bool {
         var h = hay
         return h.withUTF8 { buf in
-            if forms.contains(where: { Self.find($0, in: buf, v6: v6) }) { return true }
+            if forms.contains(where: { f in Self.anyHit(f, in: buf) { Self.whole(buf, $0, $0 + f.count, v6: v6) && zoneMatches(buf, $0 + f.count) } }) {
+                return true
+            }
             guard let anchor else { return false }
             return Self.anyHit(anchor, in: buf) { at in byValue(buf, around: at, anchorLength: anchor.count) }
         }
@@ -1341,7 +1359,7 @@ nonisolated struct AddressWord: Sendable {
         if !(j > s && h[j - 1] == 0x2E), digits > 4 || last != UInt32(bytes[14]) << 8 | UInt32(bytes[15]) { return false }
         // The token as it stands, then from after each single ':' before the anchor.
         func tryAt(_ start: Int) -> Bool {
-            end - start >= 2 && end - start <= 45 && parses(h, start, end) && Self.whole(h, start, end, v6: true)
+            end - start >= 2 && end - start <= 45 && parses(h, start, end) && Self.whole(h, start, end, v6: true) && zoneMatches(h, end)
         }
         if tryAt(s) { return true }
         var k = s
@@ -1403,13 +1421,23 @@ nonisolated struct AddressWord: Sendable {
         }
     }
 
+    /// The address ending at `end` carries no zone, or the one asked for (`%en0` is not `%en1`
+    /// nor `%en01`). Always true for an address typed without a zone.
+    private func zoneMatches(_ h: UnsafeBufferPointer<UInt8>, _ end: Int) -> Bool {
+        guard let zone, end < h.count, h[end] == 0x25 else { return true }
+        let z = end + 1
+        guard z + zone.count <= h.count else { return false }
+        for k in 0..<zone.count {
+            var c = h[z + k]
+            if c >= 0x41, c <= 0x5A { c |= 0x20 }
+            if c != zone[k] { return false }
+        }
+        return z + zone.count == h.count || !CIDR.isZoneByte(h[z + zone.count])
+    }
+
     @inline(__always) static func isDigit(_ c: UInt8) -> Bool { c >= 0x30 && c <= 0x39 }
     @inline(__always) static func isHex(_ c: UInt8) -> Bool { let l = c | 0x20; return isDigit(c) || (l >= 0x61 && l <= 0x66) }
     @inline(__always) static func isAlnum(_ c: UInt8) -> Bool { let l = c | 0x20; return isDigit(c) || (l >= 0x61 && l <= 0x7A) }
-
-    static func find(_ n: [UInt8], in h: UnsafeBufferPointer<UInt8>, v6: Bool) -> Bool {
-        anyHit(n, in: h) { whole(h, $0, $0 + n.count, v6: v6) }
-    }
 
     /// Each place `n` (lower-case ASCII) occurs in `h` case-insensitively, until `accept` takes
     /// one. The first byte is found with memchr (both cases), as `Needle.search` does: a 256-term
@@ -1529,11 +1557,26 @@ nonisolated struct CIDR: Sendable {
         network = Self.masked(bytes, bits)
     }
 
-    /// The address's bytes (IPv4: 4, IPv6: 16), or nil when `s` is not an address.
+    /// An IPv6 address and its zone (`fe80::1%en0` → "fe80::1", "en0"; what `ndp -a`,
+    /// `ifconfig` and Wireshark print for a link-local neighbor); nil zone when there is none.
+    static func splitZone(_ s: String) -> (address: String, zone: String?) {
+        guard s.contains(":"), let pct = s.firstIndex(of: "%") else { return (s, nil) }
+        let zone = s[s.index(after: pct)...]
+        guard !zone.isEmpty, zone.utf8.allSatisfy(isZoneByte) else { return (s, nil) }
+        return (String(s[..<pct]), String(zone))
+    }
+
+    /// A byte of an interface name as a zone writes it (`en0`, `Gi0/0/1`, `eth1.100`, `vlan-10`).
+    @inline(__always) static func isZoneByte(_ c: UInt8) -> Bool {
+        AddressWord.isAlnum(c) || c == 0x2E || c == 0x5F || c == 0x2D || c == 0x2F
+    }
+
+    /// The address's bytes (IPv4: 4, IPv6: 16), or nil when `s` is not an address. An IPv6
+    /// zone (`%en0`) is not part of the address.
     static func bytes(of s: String) -> [UInt8]? {
         var v4 = in_addr(), v6 = in6_addr()
         if s.contains(":") {
-            guard inet_pton(AF_INET6, s, &v6) == 1 else { return nil }
+            guard inet_pton(AF_INET6, splitZone(s).address, &v6) == 1 else { return nil }
             return withUnsafeBytes(of: &v6) { Array($0) }
         }
         guard s.split(separator: ".", omittingEmptySubsequences: false).count == 4, inet_pton(AF_INET, s, &v4) == 1 else { return nil }
@@ -1745,7 +1788,11 @@ nonisolated indirect enum LogMatcher: Sendable {
         var v4 = in_addr(), v6 = in6_addr()
         let parts = s.split(separator: ".", omittingEmptySubsequences: false)
         if parts.count == 4, inet_pton(AF_INET, s, &v4) == 1 { return true }
-        return s.contains(":") && inet_pton(AF_INET6, s, &v6) == 1
+        // `fe80::1%en0`: a link-local address with its zone, as ndp / ifconfig / Wireshark
+        // print it (it was plain text: `host:` and `ip:` with it found nothing).
+        let (address, zone) = CIDR.splitZone(s)
+        guard let end = address.last, end != ":", zone != nil || !s.contains("%") else { return false }
+        return s.contains(":") && inet_pton(AF_INET6, address, &v6) == 1
     }
 
     private static func keys(_ names: [String]) -> [KeyName] { names.map(KeyName.init) }
@@ -1835,6 +1882,10 @@ nonisolated indirect enum LogMatcher: Sendable {
         case "raw": return .raw(op, Needle(value))
         case "word":
             guard op == .eq || op == .ne else { return fieldOr(.never) }
+            // A complete address is that address as a whole, as a bare one is: `word:10.0.0.1`
+            // missed "10.0.0.1:514" (a word may not go on with ":" and a digit — a channelized
+            // port) and an IPv6 address written another way.
+            if let a = AddressWord(value) { return fieldOr(op == .eq ? .address(a) : .not(.address(a))) }
             let w = LogMatcher.wholeWord(WholeWord(value))
             return fieldOr(op == .eq ? w : .not(w))
         case "pid": return .pid(op, value)

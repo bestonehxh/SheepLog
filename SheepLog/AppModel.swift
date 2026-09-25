@@ -464,8 +464,8 @@ final class AppModel: ObservableObject {
     }
 
     /// Settings → Apply ports: move the running listeners to the new ports. A listener that
-    /// cannot bind a new port goes back to the ports it had, so a typo never leaves it off.
-    /// One that had failed to start is tried again on the new ports.
+    /// cannot bind a new port stays on (syslog) or goes back to (traps) the ports it had, so a
+    /// typo never leaves it off. One that had failed to start is tried again on the new ports.
     func restartListeners() {
         if !syslog.isRunning, syslog.lastError != nil { startSyslog() }
         if !traps.isRunning, traps.lastError != nil { startTraps() }
@@ -473,41 +473,31 @@ final class AppModel: ObservableObject {
             && (syslog.udpPort != settings.syslogUDPPort || syslog.tcpPort != settings.syslogTCPPort)
         let moveTraps = traps.isRunning && traps.port != settings.trapPort
         let oldUDP = syslog.udpPort, oldTCP = syslog.tcpPort, oldTrap = traps.port
-        // Only the UDP port changes (TCP open and staying): the UDP socket alone is swapped —
-        // restarting the listener disconnected every TCP device (and lost their lines in flight).
-        let udpOnly = moveSyslog && oldTCP > 0 && oldTCP == settings.syslogTCPPort && oldUDP > 0 && settings.syslogUDPPort > 0
-        // Both moving listeners let go of their ports first: syslog may take the trap
-        // receiver's old port in the same Apply (or the two trade ports), which failed as
-        // "SheepLog's own trap receiver is listening there" when syslog moved first.
-        if moveSyslog, !udpOnly { syslog.stop() }
+        // The trap receiver lets go of its port first: syslog may take it in the same Apply
+        // (or the two trade ports), which failed as "SheepLog's own trap receiver is listening
+        // there" when syslog moved first.
         if moveTraps { traps.stop() }
-        var syslogError: String?, trapError: String?
-        if udpOnly, let e = syslog.moveUDP(to: settings.syslogUDPPort) {
-            report("Syslog could not move to UDP \(settings.syslogUDPPort), so it stays on UDP \(oldUDP) (TCP \(oldTCP) and its clients were not touched).",
-                   detail: moveFailureDetail(e, traps: false))
-        }
-        if moveSyslog, !udpOnly {
-            syslog.start(udpPort: settings.syslogUDPPort, tcpPort: settings.syslogTCPPort)
-            if let e = syslog.lastError { syslogError = e; syslog.stop() }
-        }
-        if moveTraps {
-            traps.start(port: settings.trapPort)
-            if let e = traps.lastError { trapError = e; traps.stop() }
-        }
-        // A listener that could not move goes back (its old ports may have gone to the other).
-        if let e = syslogError {
-            syslog.start(udpPort: oldUDP, tcpPort: oldTCP)
+        var trapError: String?
+        // Syslog moves in place: each new port is bound before its old one is let go, the TCP
+        // clients stay connected and what the old sockets hold is read. Restarting the listener
+        // disconnected every TCP device (lost their lines in flight) — for a TCP move, a retry
+        // of a port that failed at start, or a UDP move alike — and left UDP closed meanwhile.
+        if moveSyslog, let e = syslog.move(udpPort: settings.syslogUDPPort, tcpPort: settings.syslogTCPPort) {
             let old = Self.portsText(udp: oldUDP, tcp: oldTCP)
+            let udpOnly = oldTCP > 0 && oldTCP == settings.syslogTCPPort && oldUDP > 0 && settings.syslogUDPPort > 0
             // A listener running on one of its two ports (the other was taken at start) retried
             // with the same Settings: no port was new, so "could not move to the new ports" was
             // not what happened.
             let retry = (oldUDP == 0 || oldUDP == settings.syslogUDPPort) && (oldTCP == 0 || oldTCP == settings.syslogTCPPort)
             let wanted = Self.portsText(udp: oldUDP == 0 ? settings.syslogUDPPort : 0, tcp: oldTCP == 0 ? settings.syslogTCPPort : 0)
-            report(retry ? (syslog.isRunning ? "Syslog still cannot open \(wanted), so it stays on \(old) only."
-                                             : "Syslog still cannot open \(wanted), nor go back to \(old), so it is off.")
-                         : (syslog.isRunning ? "Syslog could not move to the new ports, so it stays on \(old)."
-                                             : "Syslog could not move to the new ports, nor go back to \(old), so it is off."),
+            report(retry ? "Syslog still cannot open \(wanted), so it stays on \(old) only."
+                         : udpOnly ? "Syslog could not move to UDP \(settings.syslogUDPPort), so it stays on UDP \(oldUDP) (TCP \(oldTCP) and its clients were not touched)."
+                                   : "Syslog could not move to the new ports, so it stays on \(old).",
                    detail: moveFailureDetail(e, traps: false))
+        }
+        if moveTraps {
+            traps.start(port: settings.trapPort)
+            if let e = traps.lastError { trapError = e; traps.stop() }
         }
         if let e = trapError {
             traps.start(port: oldTrap)
