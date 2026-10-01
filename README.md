@@ -11,8 +11,8 @@
 **[Get the latest release →](https://github.com/bestonehxh/SheepLog/releases/latest)** — download `SheepLog-1.9.zip`, unzip, and drag **SheepLog.app** into `Applications`. The build is not notarised: on first launch right-click the app and choose Open.
 
 Syslog viewer, SNMP tester and packet capture for network engineers — a native macOS app in
-the Sheep family (SheepTerm · SheepText · SheepTap · SheepPing · SheepDrop · SheepArt ·
-SheepRadius). No agents, no daemons, no Homebrew: copy the app, start it, point your devices at
+the Sheep family (SheepTerm · SheepText · SheepTap · SheepPing · SheepDrop ·
+LabDC). No agents, no daemons, no Homebrew: copy the app, start it, point your devices at
 your Mac.
 
 ## Syslog
