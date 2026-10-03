@@ -373,6 +373,10 @@ enum TroubleshootJump {
 
 // MARK: - The pane
 
+/// LabDC's page (round 22): the word "Troubleshoot" as the title with Re-analyse / Export
+/// report… as word links on its baseline, the state sentence and the facts under it, a tool row
+/// (the findings filter, Problems only, the client lookup; the categories as words under it),
+/// then the timeline and the findings as flush two-line rows with the severity as a word.
 struct TroubleshootView: View {
     @ObservedObject private var model = TroubleshootModel.shared
     /// Chip, text, Problems only and time range (`TroubleshootFilter`: the list is their intersection).
@@ -388,23 +392,26 @@ struct TroubleshootView: View {
         let _ = PaneProbe.ran("body.troubleshoot")
         VStack(alignment: .leading, spacing: 0) {
             TimelineView(.periodic(from: .now, by: 5)) { context in
-                PaneHeader(eyebrow: "Overview", heading: heading, subtitle: subtitle(now: context.date)) {
+                PaneHeader(pane: .troubleshoot, status: status, detail: detail(now: context.date),
+                           problem: problemCount > 0) {
                     headerActions
                 }
+                .help(fullDetail(now: context.date))
             }
             .paneColumn()
             .padding(.top, Metrics.headerTop)
-            .padding(.bottom, 12)
+            .padding(.bottom, 14)
 
             PaneStrip { strip }
 
             ScrollViewReader { proxy in
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 18) {
+                    VStack(alignment: .leading, spacing: 28) {
                         if let r = model.result, !r.timeline.isEmpty { timelineSection(r.timeline) }
                         findingsSection
                     }
-                    .padding(.vertical, 18)
+                    .padding(.top, 14)
+                    .padding(.bottom, 28)
                     .paneColumn()
                 }
                 .onChange(of: scrollTarget) { _, id in
@@ -440,15 +447,20 @@ struct TroubleshootView: View {
 
     private var findings: [Finding] { model.result?.findings ?? [] }
 
+    private var problemCount: Int { findings.filter { $0.severity == .bad }.count }
+
     private var nothingToRead: Bool {
         guard let s = model.result?.summary else { return false }
         return s.lines + s.traps + s.packets + s.snmpWalks == 0
     }
 
-    private var heading: String {
-        guard model.result != nil else { return model.analysing ? "Looking at what SheepLog has…" : "Troubleshoot" }
-        if nothingToRead { return "Nothing to troubleshoot yet." }
-        return TroubleshootFilter.heading(findings, range: filter.range, wide: wide)
+    /// Line 2's state sentence: `TroubleshootFilter.heading` without its closing period (the
+    /// header writes no trailing period).
+    private var status: String {
+        guard model.result != nil else { return model.analysing ? "Looking at what UncleSpy has" : "" }
+        if nothingToRead { return "Nothing to troubleshoot yet" }
+        let h = TroubleshootFilter.heading(findings, range: filter.range, wide: wide)
+        return h.hasSuffix(".") ? String(h.dropLast()) : h
     }
 
     /// The data covers more than a day: times of the range carry their day.
@@ -457,9 +469,10 @@ struct TroubleshootView: View {
         return TroubleshootFilter.wide(summary: r.summary, timeline: r.timeline)
     }
 
-    private func subtitle(now: Date) -> String {
+    /// Every fact, for the header's tooltip (line 2 shows what fits on one line).
+    private func fullDetail(now: Date) -> String {
         guard let s = model.result?.summary else {
-            return "Reads the syslog lines, traps, packets, TCP flows and SNMP results SheepLog already has."
+            return "Reads the syslog lines, traps, packets, TCP flows and SNMP results UncleSpy already has."
         }
         var parts: [String] = []
         if s.lines + s.traps > 0 {
@@ -476,6 +489,51 @@ struct TroubleshootView: View {
         return parts.isEmpty ? "Nothing received yet." : parts.joined(separator: " · ")
     }
 
+    /// Line 2's facts, short, and only as many as fit beside the state sentence on one line
+    /// (the most telling first: what was read, when it was analysed, the time it covers).
+    private func detail(now: Date) -> String {
+        guard let s = model.result?.summary else {
+            return "Reads the syslog lines, traps, packets, TCP flows and SNMP results UncleSpy already has"
+        }
+        // (text, priority): kept in display order, dropped from the highest priority number.
+        var parts: [(String, Int)] = []
+        if s.lines + s.traps > 0 {
+            var t = "\(Format.count(s.lines)) syslog line\(s.lines == 1 ? "" : "s")"
+            if s.traps > 0 { t += ", \(Format.count(s.traps)) trap\(s.traps == 1 ? "" : "s")" }
+            parts.append((t, 0))
+        }
+        if s.packets > 0 {
+            parts.append(("\(Format.count(s.packets)) packets", 3))
+            parts.append(("\(Format.count(s.flows)) TCP flow\(s.flows == 1 ? "" : "s")", 4))
+        }
+        if s.snmpWalks > 0 { parts.append(("SNMP from \(s.snmpWalks) device\(s.snmpWalks == 1 ? "" : "s")", 5)) }
+        if let a = s.start, let b = s.end {
+            let span = Calendar.gregorian.isDate(a, inSameDayAs: b)
+                ? "\(FText.clock(a))–\(FText.clock(b))" : "\(Format.dayClock.string(from: a)) – \(Format.dayClock.string(from: b))"
+            parts.append((span, 2))
+        }
+        if model.analysing { parts.append(("analysing…", 1)) }
+        else if let at = model.analysedAt { parts.append(("analysed \(Self.ago(now.timeIntervalSince(at)))", 1)) }
+        guard !parts.isEmpty else { return "Nothing received yet" }
+        guard paneWidth > 0 else { return parts.map(\.0).joined(separator: " · ") }
+
+        let column = paneWidth - 2 * PaneColumn.gutter(available: paneWidth)
+        let room = column - (status.isEmpty ? 0 : Self.textWidth(status) + 12) - 24
+        let separator = Self.textWidth(" · ")
+        var kept = Set<Int>()
+        var used: CGFloat = 0
+        for (i, p) in parts.enumerated().sorted(by: { $0.element.1 < $1.element.1 }) {
+            let w = Self.textWidth(p.0) + (kept.isEmpty ? 0 : separator)
+            if used + w <= room || kept.isEmpty { kept.insert(i); used += w }
+        }
+        return parts.enumerated().filter { kept.contains($0.offset) }.map(\.element.0).joined(separator: " · ")
+    }
+
+    /// The width of 13 pt body text (line 2's font).
+    private static func textWidth(_ s: String) -> CGFloat {
+        ceil((s as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 13)]).width)
+    }
+
     static func spanText(_ a: Date, _ b: Date) -> String {
         let cal = Calendar.gregorian
         if cal.isDate(a, inSameDayAs: b) { return "\(Format.day.string(from: a)) \(FText.clock(a))–\(FText.clock(b))" }
@@ -488,89 +546,51 @@ struct TroubleshootView: View {
         return "\(Int(s / 3600)) h ago"
     }
 
-    private var iconOnly: Bool { paneWidth > 0 && paneWidth < 1_150 }
-
     @ViewBuilder private var headerActions: some View {
-        ProgressView().controlSize(.small).opacity(model.analysing ? 1 : 0).accessibilityHidden(!model.analysing)
-        Group {
-            Button { model.start() } label: { Label("Re-analyse", systemImage: "arrow.clockwise") }
-                .disabled(model.analysing)
-                .help("Run every check again now")
-            Toggle(isOn: $filter.problemsOnly) { Label("Problems only", systemImage: "exclamationmark.triangle") }
-                .toggleStyle(.button)
-                .help("Hide notes; show problems and warnings only")
-            Button { exportReport() } label: { Label("Export report…", systemImage: "square.and.arrow.up") }
-                .disabled(model.result == nil)
-                .help("Save the findings shown and the timeline as a Markdown file for a ticket")
+        Button { model.start() } label: {
+            // One width for both words, so Export report… does not jump while it analyses.
+            Text(model.analysing ? "Analysing…" : "Re-analyse").frame(minWidth: 76, alignment: .trailing)
         }
-        .labelStyle(TroubleshootLabelStyle(iconOnly: iconOnly))
+        .buttonStyle(.quietLink)
+        .disabled(model.analysing)
+        .help("Run every check again now")
+        .accessibilityLabel("Re-analyse")
+        Button("Export report…") { exportReport() }
+            .buttonStyle(.quietLink)
+            .disabled(model.result == nil)
+            .help("Save the findings shown and the timeline as a Markdown file for a ticket")
     }
 
-    // MARK: Strip
+    // MARK: Tool row
 
+    /// Line 1: the findings filter (the page's search), Problems only, and at the right the
+    /// client lookup. Line 2: the categories as words — the chosen one ink and semibold, each
+    /// count faint after its word — wrapping when they do not fit.
     @ViewBuilder private var strip: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "person.crop.circle.badge.questionmark")
-                .font(.system(size: 11))
-                .foregroundStyle(Theme.faintText)
-                .accessibilityHidden(true)
-            TextField("Troubleshoot client", text: $clientText,
-                      prompt: Text("Client MAC or IP").font(.system(size: 12)).foregroundStyle(Theme.faintText))
-                .labelsHidden()
-                .textFieldStyle(.plain)
-                .font(.system(size: 12, design: clientText.isEmpty ? .default : .monospaced))
-                .onSubmit(runClientReport)
-                .accessibilityLabel("Client MAC or IP address")
-        }
-        .padding(.horizontal, 8)
-        .frame(width: paneWidth > 0 && paneWidth < 900 ? 150 : 180, height: 26)
-        .background(RoundedRectangle(cornerRadius: 6).fill(Theme.panel))
-        .overlay { RoundedRectangle(cornerRadius: 6).strokeBorder(Theme.hairline, lineWidth: 0.5) }
-        .help("A MAC (any spelling) or an IP address: everything SheepLog holds about it, as one report")
-        Button(action: runClientReport) {
-            if model.buildingReport { ProgressView().controlSize(.mini) } else { Text(paneWidth > 0 && paneWidth < 900 ? "Report" : "Troubleshoot client") }
-        }
-        .controlSize(.small)
-        .disabled(ClientID.parse(clientText) == nil || model.buildingReport)
-        .help("Build the client report (Return)")
-        Rectangle().fill(Theme.hairline).frame(width: 0.5, height: 18)
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 4) {
-                ForEach(filter.chips(findings)) { chip in
-                    self.chip(chip.category, chip.category?.label ?? "All", count: chip.count)
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center, spacing: 24) {
+                FilterField(text: $filter.text, prompt: "Filter findings", mono: false,
+                            help: "Matches titles, details, devices and clients as you type — words are ANDed; OR, NOT / -word, \"phrase\", sev:problem, device:, rule: as in the Log filter. ⌘F to focus, Esc to clear", focus: $filterFocused)
+                    .frame(minWidth: 150, maxWidth: 420)
+                QuietToolToggle("Problems only", isOn: $filter.problemsOnly,
+                                help: "Hide notes; show problems and warnings only")
+                Spacer(minLength: 8)
+                ClientLookupField(text: $clientText, onSubmit: runClientReport)
+                    .frame(width: paneWidth > 0 && paneWidth < 900 ? 140 : 180)
+                    .help("A MAC (any spelling) or an IP address: everything UncleSpy holds about it, as one report")
+                Button(action: runClientReport) {
+                    Text(model.buildingReport ? "Building…" : "Troubleshoot client").fixedSize()
                 }
+                .buttonStyle(.quietLink)
+                .disabled(ClientID.parse(clientText) == nil || model.buildingReport)
+                .help("Build the client report (Return)")
+                .accessibilityLabel("Troubleshoot client")
             }
-            .padding(.vertical, 2)
-            .padding(.trailing, 14)
-        }
-        .frame(maxWidth: .infinity)
-        // A soft edge where the chips run under the filter field (they scroll sideways).
-        .mask {
-            HStack(spacing: 0) {
-                Rectangle()
-                LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing).frame(width: 18)
+            // No findings, no categories (a lone "All 0" said nothing the list does not).
+            if !findings.isEmpty || filter.category != nil {
+                CategoryWords(chips: filter.chips(findings), selection: $filter.category)
             }
         }
-        FilterField(text: $filter.text, prompt: "Filter findings", mono: false,
-                    help: "Matches titles, details, devices and clients as you type — words are ANDed; OR, NOT / -word, \"phrase\", sev:problem, device:, rule: as in the Log filter. ⌘F to focus, Esc to clear", focus: $filterFocused)
-            .frame(width: paneWidth > 0 && paneWidth < 900 ? 130 : 190)
-    }
-
-    private func chip(_ c: FindingCategory?, _ title: String, count: Int) -> some View {
-        let selected = filter.category == c
-        return Button { filter.category = c } label: {
-            HStack(spacing: 4) {
-                Text(title).font(.system(size: 11.5, weight: selected ? .semibold : .regular))
-                Text(Format.count(count)).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(selected ? Theme.accent : Theme.faintText)
-            }
-            .foregroundStyle(selected ? Theme.accent : Theme.text2)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
-            .background(Capsule().fill(selected ? Theme.selectedAccent : Theme.control))
-            .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
     private func runClientReport() {
@@ -585,35 +605,35 @@ struct TroubleshootView: View {
     // MARK: Timeline
 
     private func timelineSection(_ t: Timeline) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Button {
                     withAnimation(.easeInOut(duration: 0.15)) { timelineShown.toggle() }
                 } label: {
-                    HStack(spacing: 6) {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text("Timeline")
+                            .font(Theme.emphasis)
+                            .foregroundStyle(Theme.text)
                         Image(systemName: "chevron.right")
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(.system(size: 9, weight: .semibold))
                             .rotationEffect(.degrees(timelineShown ? 90 : 0))
                             .foregroundStyle(Theme.faintText)
-                        Text("Timeline")
-                            .font(.system(size: 16.5, weight: .semibold))
-                            .foregroundStyle(Theme.text)
                     }
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityAddTraits(.isHeader)
                 .accessibilityLabel(timelineShown ? "Hide the timeline" : "Show the timeline")
                 Text("\(t.lanes.count) row\(t.lanes.count == 1 ? "" : "s") · \(Self.spanText(t.start, t.end))")
-                    .font(.system(size: 12))
+                    .font(Theme.caption)
                     .foregroundStyle(Theme.faintText)
                     .lineLimit(1)
                 Spacer(minLength: 0)
                 if filter.range != nil {
                     Button("Clear range") { filter.range = nil }
-                        .controlSize(.small)
+                        .buttonStyle(QuietLinkStyle(size: 12))
                 }
             }
-            .padding(.horizontal, 2)
             if timelineShown {
                 TimelineStrip(timeline: t, range: $filter.range) { event in
                     if case .finding(let id) = event.target { reveal(id) } else { TroubleshootJump.go(event.target) }
@@ -635,36 +655,40 @@ struct TroubleshootView: View {
         let list = rows
         PaneSection("Findings", note: findingsNote(list.count)) {
             if let notice = model.jumpNotice {
-                GroupedList {
-                    HStack(alignment: .top, spacing: 8) {
-                        NoteRow(text: notice, systemImage: "clock.badge.exclamationmark", tint: Theme.caution)
-                        Button("Dismiss") { model.jumpNotice = nil }
-                            .controlSize(.small)
-                            .padding(.trailing, 14)
-                            .padding(.top, 8)
-                    }
+                HStack(alignment: .firstTextBaseline, spacing: 16) {
+                    Text(notice)
+                        .font(Theme.detail)
+                        .foregroundStyle(Theme.text2)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: 760, alignment: .leading)
+                    Spacer(minLength: 12)
+                    Button("Dismiss") { model.jumpNotice = nil }
+                        .buttonStyle(QuietLinkStyle(size: 12))
                 }
-                .padding(.bottom, 8)
+                .padding(.vertical, 8)
             }
             if model.result == nil {
-                GroupedList { NoteRow(text: model.analysing ? "Analysing…" : "Starting…", systemImage: "hourglass") }
+                FaintLine(text: model.analysing ? "Analysing…" : "Starting…")
             } else if nothingToRead {
                 emptyState
             } else if findings.isEmpty {
                 allClear
             } else if list.isEmpty {
-                GroupedList {
-                    NoteRow(text: "No finding matches the filter\(filter.range != nil ? " in the selected time range" : "").", systemImage: "line.3.horizontal.decrease")
-                }
+                FaintLine(text: "No finding matches the filter\(filter.range != nil ? " in the selected time range" : "").")
             } else {
-                GroupedList {
-                    ForEach(list) { f in
-                        FindingRow(finding: f, expanded: expanded.contains(f.id), toggle: { toggle(f.id) },
-                                   troubleshootClient: { c in clientText = c; model.buildReport(c) },
-                                   show: { e in model.show(e) })
-                            // The scroll anchor: an `.id` on a GroupedList row itself is taken by
-                            // the list's variadic layout and `scrollTo` never finds it.
-                            .overlay(alignment: .top) { Color.clear.frame(height: 1).id(f.id) }
+                VStack(alignment: .leading, spacing: 0) {
+                    // LabDC's Leases: one hairline over the first row too.
+                    Rectangle().fill(Theme.hairline).frame(height: 1)
+                    GroupedList {
+                        ForEach(list) { f in
+                            FindingRow(finding: f, expanded: expanded.contains(f.id), toggle: { toggle(f.id) },
+                                       troubleshootClient: { c in clientText = c; model.buildReport(c) },
+                                       show: { e in model.show(e) })
+                                // The scroll anchor: an `.id` on a GroupedList row itself is taken by
+                                // the list's variadic layout and `scrollTo` never finds it.
+                                .overlay(alignment: .top) { Color.clear.frame(height: 1).id(f.id) }
+                        }
                     }
                 }
             }
@@ -674,8 +698,7 @@ struct TroubleshootView: View {
                         Text(n).hint()
                     }
                 }
-                .padding(.horizontal, 2)
-                .padding(.top, 4)
+                .padding(.top, 10)
             }
         }
     }
@@ -694,19 +717,13 @@ struct TroubleshootView: View {
     }
 
     private var emptyState: some View {
-        GroupedList {
-            NoteRow(text: "Troubleshoot turns what SheepLog receives into plain-English findings — there is nothing to read yet.", systemImage: "stethoscope", tint: Theme.accent)
-            NoteRow(text: "Syslog and traps: switch them on in the sidebar and point devices at this Mac (UDP/TCP 514, traps UDP 162). Link flaps, power and fans, spanning tree, logins, restarts, clocks and log floods are checked.", systemImage: "text.alignleft")
-            NoteRow(text: "Packets: start a capture on the Packets pane or open a .pcap (⌘O). DHCP, DNS, ARP, ICMP and every TCP conversation are checked.", systemImage: "point.3.connected.trianglepath.dotted")
-            NoteRow(text: "SNMP: run Interfaces on the SNMP Test pane. Port errors (and whether they grow on the next walk), ports down, half duplex, discards and recent reboots are checked.", systemImage: "antenna.radiowaves.left.and.right")
-            NoteRow(text: "It re-analyses by itself while data arrives. Type a MAC or IP above for one client's whole story.", systemImage: "arrow.clockwise")
-        }
+        FaintLine(text: "There is nothing to read yet — start syslog or traps on the Status page, start a capture or open a .pcap (⌘O), or run Interfaces on the SNMP Test pane; it re-analyses by itself while data arrives.")
+            .help("Syslog and traps: link flaps, power and fans, spanning tree, logins, restarts, clocks and log floods. Packets: DHCP, DNS, ARP, ICMP and every TCP conversation. SNMP Interfaces walks: port errors (and whether they grow on the next walk), ports down, half duplex, discards and recent reboots. Type a MAC or IP above for one client's whole story.")
     }
 
     private var allClear: some View {
-        GroupedList {
-            NoteRow(text: "Nothing wrong that SheepLog can see in what it has. Checked: link flaps and ports left down, power / fan / temperature / PoE, spanning tree, routing neighbors, restarts, admin logins, configuration changes, device clocks, log floods; DHCP, DNS, ARP, ICMP; TCP refusals, resets, retransmissions, handshake times and zero windows; SNMP port status and errors.", systemImage: "checkmark.circle", tint: Theme.ok)
-        }
+        FaintLine(text: "Nothing wrong that UncleSpy can see in what it has.")
+            .help("Checked: link flaps and ports left down, power / fan / temperature / PoE, spanning tree, routing neighbors, restarts, admin logins, configuration changes, device clocks, log floods; DHCP, DNS, ARP, ICMP; TCP refusals, resets, retransmissions, handshake times and zero windows; SNMP port status and errors.")
     }
 
     // MARK: Export
@@ -718,18 +735,76 @@ struct TroubleshootView: View {
         let md = filter.report(findings, summary: r.summary, timeline: r.timeline, generated: Date())
         let panel = NSSavePanel()
         panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]
-        panel.nameFieldStringValue = "SheepLog-troubleshoot-\(Format.compactStamp.string(from: Date())).md"
+        panel.nameFieldStringValue = "UncleSpy-troubleshoot-\(Format.compactStamp.string(from: Date())).md"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do { try md.write(to: url, atomically: true, encoding: .utf8) }
         catch { AppModel.shared.report("Could not write \(url.lastPathComponent).", detail: error.localizedDescription) }
     }
 }
 
-/// Icons only when the pane is narrow (the header's three buttons would wrap the heading).
-struct TroubleshootLabelStyle: LabelStyle {
-    let iconOnly: Bool
-    func makeBody(configuration: Configuration) -> some View {
-        if iconOnly { configuration.icon } else { HStack(spacing: 4) { configuration.icon; configuration.title } }
+/// An empty or waiting state: one faint sentence (LabDC's quiet note at body size).
+private struct FaintLine: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(Theme.body)
+            .foregroundStyle(Theme.faintText)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: Metrics.prose + 160, alignment: .leading)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// The client lookup of the tool row: the text over one hairline, like the findings filter
+/// beside it (`FilterField`'s look, with its own name for VoiceOver and no Clear).
+private struct ClientLookupField: View {
+    @Binding var text: String
+    let onSubmit: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            TextField("Troubleshoot client", text: $text,
+                      prompt: Text("Client MAC or IP").foregroundStyle(Theme.faintText))
+                .labelsHidden()
+                .textFieldStyle(.plain)
+                .font(.system(size: 12, design: text.isEmpty ? .default : .monospaced))
+                .foregroundStyle(Theme.text)
+                .onSubmit(onSubmit)
+                .accessibilityLabel("Client MAC or IP address")
+                .padding(.vertical, 5)
+            Rectangle().fill(Theme.control).frame(height: 1)
+        }
+    }
+}
+
+/// The finding categories as words ("All 17  Link 1  Hardware 2 …"): `QuietTabs` with a faint
+/// count after each word; they wrap onto a second line when the pane is narrow.
+private struct CategoryWords: View {
+    let chips: [TroubleshootFilter.Chip]
+    @Binding var selection: FindingCategory?
+
+    var body: some View {
+        WrapLayout(spacing: 16, lineSpacing: 8) {
+            ForEach(chips) { chip in
+                let selected = selection == chip.category
+                Button { selection = chip.category } label: {
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        Text(chip.category?.label ?? "All")
+                            .font(.system(size: 12, weight: selected ? .semibold : .regular))
+                            .foregroundStyle(selected ? Theme.text : Theme.text2)
+                        Text(Format.count(chip.count))
+                            .font(.system(size: 11).monospacedDigit())
+                            .foregroundStyle(Theme.faintText)
+                    }
+                    .fixedSize()
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(selected ? .isSelected : [])
+            }
+        }
     }
 }
 
@@ -745,6 +820,9 @@ enum FindingStyle {
     }
 }
 
+/// One finding as LabDC's Leases row: the sentence, the muted facts under it, the severity as a
+/// word at the right edge ("Problem" in the red) and the disclosure chevron. Expanded: the
+/// detail as flush prose, the evidence as word links, the next steps.
 struct FindingRow: View {
     let finding: Finding
     let expanded: Bool
@@ -752,55 +830,50 @@ struct FindingRow: View {
     let troubleshootClient: (String) -> Void
     /// An evidence button: the Log / Packets / Flows pane on it, or a note that it rolled out.
     var show: (Evidence) -> Void = { _ = TroubleshootJump.show($0) }
-    @State private var hovering = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Button(action: toggle) { header }
                 .buttonStyle(.plain)
-                .onHover { hovering = $0 }
                 .accessibilityLabel("\(finding.severity.word): \(finding.title)")
                 .accessibilityHint(expanded ? "Collapse" : "Show details")
             if expanded { details }
         }
-        .background(hovering && !expanded ? Theme.hover : .clear)
     }
 
     private var header: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Circle()
-                .fill(FindingStyle.color(finding.severity))
-                .frame(width: 8, height: 8)
-                .padding(.top, 5)
-                .help(finding.severity.word)
-            VStack(alignment: .leading, spacing: 4) {
+        HStack(alignment: .firstTextBaseline, spacing: 16) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(finding.title)
-                    .font(.system(size: 13, weight: finding.severity == .info ? .regular : .medium))
+                    .font(Theme.body)
                     .foregroundStyle(Theme.text)
                     .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: 6) {
-                    Text(finding.category.label)
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(Theme.dimText)
-                    if let d = finding.device { StatusPill(text: d, kind: .neutral) }
-                    if let c = finding.client, c != finding.device { StatusPill(text: c, kind: .accent) }
-                    Text(meta)
-                        .font(.system(size: 11.5).monospacedDigit())
-                        .foregroundStyle(Theme.faintText)
-                        .lineLimit(1)
-                }
+                Text(facts)
+                    .font(Theme.detail.monospacedDigit())
+                    .foregroundStyle(Theme.text2)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
-            Spacer(minLength: 8)
+            Spacer(minLength: 12)
+            StatusPill(text: finding.severity.word, kind: finding.severity == .bad ? .bad : .neutral)
             Image(systemName: "chevron.right")
-                .font(.system(size: 10.5, weight: .semibold))
+                .font(.system(size: 9, weight: .semibold))
                 .foregroundStyle(Theme.faintText)
                 .rotationEffect(.degrees(expanded ? 90 : 0))
-                .padding(.top, 4)
+                .frame(width: 10)
         }
-        .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .contentShape(Rectangle())
+    }
+
+    /// "Link · CORE-CX-6300 · 5× · 10:02:05–10:08:15".
+    private var facts: String {
+        var parts = [finding.category.label]
+        if let d = finding.device { parts.append(d) }
+        if let c = finding.client, c != finding.device { parts.append(c) }
+        parts.append(meta)
+        return parts.joined(separator: " · ")
     }
 
     private var meta: String {
@@ -810,54 +883,65 @@ struct FindingRow: View {
     }
 
     private var details: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             Text(finding.detail)
-                .font(.system(size: 12.5))
+                .font(Theme.body)
                 .foregroundStyle(Theme.text2)
                 .lineSpacing(2)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: 760, alignment: .leading)
             if !finding.evidence.isEmpty || finding.snmpTarget != nil || Self.reportTarget(finding) != nil {
-                WrapLayout(spacing: 6) {
+                WrapLayout(spacing: 20, lineSpacing: 8) {
                     ForEach(finding.evidence) { e in
-                        Button { show(e) } label: {
-                            Label(e.label, systemImage: Self.symbol(e.kind))
-                        }
-                        .help(help(e))
+                        Button("Show \(Self.words(e))") { show(e) }
+                            .buttonStyle(.quietLink)
+                            .help(help(e))
+                            .accessibilityLabel(e.label)
                     }
                     if let host = finding.snmpTarget {
-                        Button { TroubleshootJump.snmp(host) } label: { Label("SNMP test", systemImage: "antenna.radiowaves.left.and.right") }
+                        Button("SNMP test") { TroubleshootJump.snmp(host) }
+                            .buttonStyle(.quietLink)
                             .help("Open \(host) on the SNMP Test pane")
                     }
                     if let c = Self.reportTarget(finding) {
-                        Button { troubleshootClient(c) } label: { Label("Troubleshoot \(c)", systemImage: "person.crop.circle.badge.questionmark") }
-                            .help("Everything SheepLog holds about \(c)")
+                        Button("Troubleshoot \(c)") { troubleshootClient(c) }
+                            .buttonStyle(.quietLink)
+                            .help("Everything UncleSpy holds about \(c)")
                     }
                     CopyButton("Copy", value: copyText, bordered: true, help: "Copy this finding as text")
                 }
-                .controlSize(.small)
             }
             if !finding.nextSteps.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Next steps").groupTitle()
-                    ForEach(Array(finding.nextSteps.enumerated()), id: \.offset) { _, step in
-                        HStack(alignment: .firstTextBaseline, spacing: 6) {
-                            Text("•").foregroundStyle(Theme.accent)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Next steps")
+                        .font(Theme.caption)
+                        .foregroundStyle(Theme.text2)
+                    ForEach(Array(finding.nextSteps.enumerated()), id: \.offset) { i, step in
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text("\(i + 1).")
+                                .font(Theme.body.monospacedDigit())
+                                .foregroundStyle(Theme.faintText)
                             Text(step)
+                                .font(Theme.body)
                                 .foregroundStyle(Theme.text)
                                 .textSelection(.enabled)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
-                        .font(.system(size: 12.5))
                     }
                 }
                 .frame(maxWidth: 760, alignment: .leading)
             }
         }
-        .padding(.leading, 32)
-        .padding(.trailing, 14)
-        .padding(.bottom, 12)
+        .padding(.top, 2)
+        .padding(.bottom, 16)
+        .padding(.trailing, 60)
+    }
+
+    /// The evidence label as the object of "Show": "12 log lines", "8 packets", "flow" (the
+    /// label's ⇄ arrow is a glyph; the word link carries no icon).
+    static func words(_ e: Evidence) -> String {
+        e.label.replacingOccurrences(of: " ⇄", with: "").replacingOccurrences(of: "⇄", with: "")
     }
 
     /// The client a "Troubleshoot …" button can build a report for: a MAC or an IP. A RADIUS
@@ -865,15 +949,6 @@ struct FindingRow: View {
     static func reportTarget(_ f: Finding) -> String? {
         guard let c = f.client, ClientID.parse(c) != nil else { return nil }
         return c
-    }
-
-    static func symbol(_ k: Evidence.Kind) -> String {
-        switch k {
-        case .logLines: "text.alignleft"
-        case .traps: "bell"
-        case .packets: "square.stack.3d.up"
-        case .flows: "arrow.left.arrow.right"
-        }
     }
 
     private func help(_ e: Evidence) -> String {
@@ -891,9 +966,12 @@ struct FindingRow: View {
     }
 }
 
-/// Buttons that wrap onto the next line when the row is too narrow.
+/// Word links (or category words) that wrap onto the next line when the row is too narrow.
 struct WrapLayout: Layout {
     var spacing: CGFloat = 6
+    var lineSpacing: CGFloat? = nil
+
+    private var gap: CGFloat { lineSpacing ?? spacing }
 
     private func rows(_ sizes: [CGSize], width: CGFloat) -> [[Int]] {
         var rows: [[Int]] = [[]]
@@ -910,7 +988,7 @@ struct WrapLayout: Layout {
         let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
         let width = proposal.width ?? sizes.reduce(0) { $0 + $1.width + spacing }
         let rs = rows(sizes, width: width)
-        let height = rs.reduce(CGFloat(0)) { h, r in h + (r.map { sizes[$0].height }.max() ?? 0) } + spacing * CGFloat(max(0, rs.count - 1))
+        let height = rs.reduce(CGFloat(0)) { h, r in h + (r.map { sizes[$0].height }.max() ?? 0) } + gap * CGFloat(max(0, rs.count - 1))
         return CGSize(width: width, height: height)
     }
 
@@ -921,10 +999,11 @@ struct WrapLayout: Layout {
             var x = bounds.minX
             let h = r.map { sizes[$0].height }.max() ?? 0
             for i in r {
-                subviews[i].place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(sizes[i]))
+                // Bottom-aligned within the line: words of one size share a baseline.
+                subviews[i].place(at: CGPoint(x: x, y: y + h - sizes[i].height), proposal: ProposedViewSize(sizes[i]))
                 x += sizes[i].width + spacing
             }
-            y += h + spacing
+            y += h + gap
         }
     }
 }
@@ -932,7 +1011,9 @@ struct WrapLayout: Layout {
 // MARK: - Timeline strip
 
 /// One row per device (the capture last), dots for warning lines, traps and troubled flows, bars
-/// for findings. Drag across it to show only that time; click a dot to open it.
+/// for findings. Drag across it to show only that time; click a dot to open it. Flush with the
+/// section title: the device names in muted text (a device with a problem in the red), the
+/// marks the diagram's own (monochrome and the red).
 struct TimelineStrip: View {
     let timeline: Timeline
     @Binding var range: ClosedRange<Date>?
@@ -951,16 +1032,13 @@ struct TimelineStrip: View {
             HStack(alignment: .top, spacing: 10) {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(lanes) { lane in
-                        HStack(spacing: 6) {
-                            Circle().fill(FindingStyle.color(lane.worst)).frame(width: 6, height: 6)
-                            Text(lane.id)
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(Theme.text2)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                        }
-                        .frame(height: Self.rowHeight, alignment: .leading)
-                        .help("\(lane.id): \(Format.count(lane.total)) event\(lane.total == 1 ? "" : "s"), \(Format.count(lane.problems)) problem\(lane.problems == 1 ? "" : "s"), \(FText.clock(lane.first))–\(FText.clock(lane.last))")
+                        Text(lane.id)
+                            .font(Theme.detail)
+                            .foregroundStyle(lane.worst == .bad ? Theme.err : Theme.text2)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .frame(height: Self.rowHeight, alignment: .leading)
+                            .help("\(lane.id): \(Format.count(lane.total)) event\(lane.total == 1 ? "" : "s"), \(Format.count(lane.problems)) problem\(lane.problems == 1 ? "" : "s"), \(FText.clock(lane.first))–\(FText.clock(lane.last))")
                     }
                 }
                 .frame(width: Self.labelWidth, alignment: .leading)
@@ -995,23 +1073,20 @@ struct TimelineStrip: View {
             }
             .font(.system(size: 10, design: .monospaced))
             .foregroundStyle(Theme.faintText)
-            HStack(spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(caption)
-                    .font(.system(size: 11.5))
+                    .font(Theme.caption)
                     .foregroundStyle(hover == nil ? Theme.faintText : Theme.text2)
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Spacer(minLength: 8)
                 if timeline.lanes.count > Self.maxLanes {
                     Button(showAll ? "Show fewer" : "Show all \(timeline.lanes.count)") { showAll.toggle() }
-                        .buttonStyle(.link)
-                        .font(.system(size: 11.5))
+                        .buttonStyle(QuietLinkStyle(size: 11))
                 }
             }
+            .padding(.top, 4)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-        .panelCard()
     }
 
     private var caption: String {
@@ -1096,6 +1171,9 @@ struct TimelineStrip: View {
 
 // MARK: - Client report sheet
 
+/// LabDC's `QuietSheet` layout: the title (13 semibold) and a muted line under it, the sections
+/// (13 semibold titles, flush rows), then the footer — word links on the left, Done (the one
+/// primary) at the bottom right. Raw log lines sit in a `Theme.well` inset, in mono.
 struct ClientReportSheet: View {
     let report: ClientReport
     let dismiss: () -> Void
@@ -1104,26 +1182,23 @@ struct ClientReportSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text("CLIENT REPORT")
-                    .font(.system(size: 11, weight: .semibold))
-                    .kerning(1.3)
-                    .foregroundStyle(Theme.faintText)
+            VStack(alignment: .leading, spacing: 4) {
                 Text(report.title)
-                    .font(.system(size: 22, weight: .semibold))
+                    .font(Theme.emphasis)
                     .foregroundStyle(Theme.text)
                     .textSelection(.enabled)
+                    .accessibilityAddTraits(.isHeader)
                 Text(summary)
-                    .font(.system(size: 12.5))
+                    .font(Theme.detail)
                     .foregroundStyle(Theme.text2)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(.horizontal, 20)
-            .padding(.top, 18)
-            .padding(.bottom, 12)
-            Rectangle().fill(Theme.hairline).frame(height: 0.5)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 24)
+            .padding(.top, 22)
+            .padding(.bottom, 16)
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 28) {
                     section("Where it is", report.location, empty: "Not known — no log line or bridge table names its switch port.")
                     findingsSection
                     logSection
@@ -1131,38 +1206,44 @@ struct ClientReportSheet: View {
                     section("DNS", report.dns, empty: "No DNS queries from this client in the capture.")
                     section("ARP", report.arp, empty: "No ARP packets about this client in the capture.", mono: true)
                     flowsSection
-                    section("Next steps", report.nextSteps.enumerated().map { "\($0.offset + 1). \($0.element)" }, empty: "Nothing stands out.")
+                    nextStepsSection
                 }
-                .padding(20)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 24)
+                .padding(.top, 4)
+                .padding(.bottom, 8)
             }
-            Rectangle().fill(Theme.hairline).frame(height: 0.5)
-            HStack(spacing: 8) {
-                CopyButton("Copy as Markdown", value: report.markdown, bordered: true, help: "Copy the report as Markdown, ready to paste into a ticket")
-                Button("Export…", action: export)
-                if report.packetTotal > 0 {
-                    Button(ReportLink.title("Show \(Format.count(report.packetTotal)) packets", report.packetEvidence, epoch: report.packetEpoch)) {
-                        open(report.packetEvidence)
-                    }
-                }
+            VStack(alignment: .leading, spacing: 12) {
                 if let notice {
                     Text(notice)
-                        .font(.system(size: 11))
-                        .foregroundStyle(Theme.caution)
-                        .lineLimit(3)
+                        .font(Theme.detail)
+                        .foregroundStyle(Theme.text2)
                         .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
                 }
-                Spacer(minLength: 0)
-                Button("Done", action: dismiss)
-                    .buttonStyle(.borderedProminent)
-                    .tint(Theme.accent)
-                    .keyboardShortcut(.defaultAction)
+                HStack(alignment: .center, spacing: 20) {
+                    CopyButton("Copy as Markdown", value: report.markdown, bordered: true, help: "Copy the report as Markdown, ready to paste into a ticket")
+                    Button("Export…", action: export)
+                        .buttonStyle(.quietLink)
+                    if report.packetTotal > 0 {
+                        Button(ReportLink.title("Show \(Format.count(report.packetTotal)) packets", report.packetEvidence, epoch: report.packetEpoch)) {
+                            open(report.packetEvidence)
+                        }
+                        .buttonStyle(.quietLink)
+                        .lineLimit(1)
+                    }
+                    Spacer(minLength: 12)
+                    Button("Done", action: dismiss)
+                        .buttonStyle(.quietPrimary)
+                        .keyboardShortcut(.defaultAction)
+                }
             }
-            .controlSize(.small)
-            .padding(.horizontal, 20)
-            .padding(.vertical, 12)
+            .padding(.horizontal, 24)
+            .padding(.top, 16)
+            .padding(.bottom, 20)
         }
         .frame(width: 720, height: 580)
-        .background(Theme.panel)
+        .background(Theme.content)
         .sheetCancel(dismiss)
     }
 
@@ -1173,21 +1254,29 @@ struct ClientReportSheet: View {
         return parts.joined(separator: " · ")
     }
 
+    /// A section's empty state: one faint line.
+    private func emptyLine(_ text: String) -> some View {
+        Text(text)
+            .font(Theme.body)
+            .foregroundStyle(Theme.faintText)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.vertical, 4)
+    }
+
     private func section(_ title: String, _ lines: [String], empty: String, mono: Bool = false) -> some View {
         PaneSection(title) {
-            GroupedList {
-                if lines.isEmpty {
-                    NoteRow(text: empty)
-                } else {
+            if lines.isEmpty {
+                emptyLine(empty)
+            } else {
+                GroupedList {
                     ForEach(Array(lines.enumerated()), id: \.offset) { _, l in
                         Text(l)
-                            .font(.system(size: 12, design: mono ? .monospaced : .default))
+                            .font(mono ? Theme.mono : Theme.body)
                             .foregroundStyle(Theme.text)
                             .textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 7)
+                            .padding(.vertical, 8)
                     }
                 }
             }
@@ -1196,23 +1285,23 @@ struct ClientReportSheet: View {
 
     private var findingsSection: some View {
         PaneSection("Findings", note: report.findings.isEmpty ? "" : "\(report.findings.count)") {
-            GroupedList {
-                if report.findings.isEmpty {
-                    NoteRow(text: "No finding is about this client.")
-                } else {
+            if report.findings.isEmpty {
+                emptyLine("No finding is about this client.")
+            } else {
+                GroupedList {
                     ForEach(report.findings) { f in
-                        HStack(alignment: .top, spacing: 8) {
-                            Circle().fill(FindingStyle.color(f.severity)).frame(width: 7, height: 7).padding(.top, 5)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(f.title).font(.system(size: 12.5, weight: .medium)).foregroundStyle(Theme.text)
-                                Text(f.detail).font(.system(size: 12)).foregroundStyle(Theme.text2)
+                        HStack(alignment: .firstTextBaseline, spacing: 16) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(f.title).font(Theme.body).foregroundStyle(Theme.text)
+                                Text(f.detail).font(Theme.detail).foregroundStyle(Theme.text2)
                             }
                             .fixedSize(horizontal: false, vertical: true)
                             .textSelection(.enabled)
+                            Spacer(minLength: 12)
+                            StatusPill(text: f.severity.word, kind: f.severity == .bad ? .bad : .neutral)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
+                        .padding(.vertical, 10)
                     }
                 }
             }
@@ -1221,28 +1310,28 @@ struct ClientReportSheet: View {
 
     private var logSection: some View {
         PaneSection("Log lines", note: report.logTotal > report.logLines.count ? "last \(report.logLines.count) of \(Format.count(report.logTotal))" : "\(report.logTotal)") {
-            GroupedList {
-                if report.logLines.isEmpty {
-                    NoteRow(text: "No syslog line or trap mentions it.")
-                } else {
-                    ForEach(report.logLines) { l in
-                        HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            Text(FText.clock(l.time)).font(.system(size: 11.5, design: .monospaced)).foregroundStyle(Theme.dimText)
-                            Text(l.device).font(.system(size: 11.5)).foregroundStyle(Theme.text2).lineLimit(1).frame(width: 120, alignment: .leading)
-                            Text(l.message).font(.system(size: 12)).foregroundStyle(Theme.severityTint(l.severity) ?? Theme.text)
-                                .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+            if report.logLines.isEmpty {
+                emptyLine("No syslog line or trap mentions it.")
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    // The raw excerpt: the one inset of the sheet.
+                    VStack(alignment: .leading, spacing: 5) {
+                        ForEach(report.logLines) { l in
+                            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                                Text(FText.clock(l.time)).foregroundStyle(Theme.faintText)
+                                Text(l.device).foregroundStyle(Theme.text2).lineLimit(1).frame(width: 120, alignment: .leading)
+                                Text(l.message).foregroundStyle(Theme.severityTint(l.severity) ?? Theme.text)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .font(.system(size: 11.5, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 6)
                     }
-                    HStack {
-                        Spacer()
-                        Button(ReportLink.title("Show on the Log pane", report.logEvidence, epoch: report.packetEpoch)) { open(report.logEvidence) }
-                            .controlSize(.small)
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 6)
+                    .padding(12)
+                    .background(RoundedRectangle(cornerRadius: Metrics.field).fill(Theme.well))
+                    Button(ReportLink.title("Show on the Log pane", report.logEvidence, epoch: report.packetEpoch)) { open(report.logEvidence) }
+                        .buttonStyle(QuietLinkStyle(size: 12))
                 }
             }
         }
@@ -1250,32 +1339,53 @@ struct ClientReportSheet: View {
 
     private var flowsSection: some View {
         PaneSection("TCP flows", note: report.flowTotal > report.flows.count ? "\(report.flows.count) of \(Format.count(report.flowTotal))" : "\(report.flowTotal)") {
-            GroupedList {
-                if report.flows.isEmpty {
-                    NoteRow(text: "No TCP conversation of this client in the capture.")
-                } else {
+            if report.flows.isEmpty {
+                emptyLine("No TCP conversation of this client in the capture.")
+            } else {
+                GroupedList {
                     ForEach(report.flows) { f in
                         let gone = ReportLink.isGone(report.flowEvidence(f), epoch: report.packetEpoch)
                         Button { open(report.flowEvidence(f)) } label: {
-                            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                Circle().fill(f.health == .ok ? Theme.ok : f.health == .warn ? Theme.caution : Theme.err).frame(width: 7, height: 7)
-                                Text(f.text).font(.system(size: 12, design: .monospaced)).foregroundStyle(Theme.text)
+                            HStack(alignment: .firstTextBaseline, spacing: 16) {
+                                Text(f.text)
+                                    .font(Theme.mono)
+                                    .foregroundStyle(f.health == .bad ? Theme.err : Theme.text)
                                     .lineLimit(2).multilineTextAlignment(.leading)
-                                Spacer(minLength: 0)
+                                Spacer(minLength: 12)
                                 if gone {
-                                    Text("no longer in memory").font(.system(size: 10.5)).foregroundStyle(Theme.faintText)
+                                    StatusPill(text: "No longer in memory", kind: .neutral)
                                 } else {
-                                    Image(systemName: "arrow.left.arrow.right").font(.system(size: 10)).foregroundStyle(Theme.faintText)
+                                    Text("Open").font(.system(size: 12)).foregroundStyle(Theme.text)
+                                        .underline(true, color: Theme.text.opacity(0.3))
                                 }
                             }
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 7)
+                            .padding(.vertical, 9)
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .help("Open this conversation on the TCP flows pane")
                     }
                 }
+            }
+        }
+    }
+
+    private var nextStepsSection: some View {
+        PaneSection("Next steps") {
+            if report.nextSteps.isEmpty {
+                emptyLine("Nothing stands out.")
+            } else {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(report.nextSteps.enumerated()), id: \.offset) { i, step in
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text("\(i + 1).").font(Theme.body.monospacedDigit()).foregroundStyle(Theme.faintText)
+                            Text(step).font(Theme.body).foregroundStyle(Theme.text)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+                .padding(.vertical, 4)
             }
         }
     }

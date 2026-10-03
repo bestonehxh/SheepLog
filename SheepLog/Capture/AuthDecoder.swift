@@ -34,12 +34,14 @@ nonisolated enum AuthDecoder {
         }
     }
 
-    /// Printable text: UTF-8 (lossy), NULs trimmed, control characters shown as `·`, capped.
+    /// Printable text: UTF-8 (lossy), NULs trimmed, control characters — and bidi / format
+    /// characters that reorder an identity on screen (`PacketText`) — shown as `·`, capped.
     static func text(_ bytes: [UInt8], max: Int = 253) -> String {
         var v = Array(bytes.prefix(max))
         while let last = v.last, last == 0 { v.removeLast() }
-        let s = String(decoding: v, as: UTF8.self)
-        return String(s.unicodeScalars.map { $0.value < 0x20 || (0x7f...0x9f).contains($0.value) ? "·" : Character($0) })
+        // Pure printable ASCII (nearly every identity) needs no scalar pass.
+        if !v.contains(where: { $0 < 0x20 || $0 >= 0x7f }) { return String(decoding: v, as: UTF8.self) }
+        return PacketText.neutralised(String(decoding: v, as: UTF8.self), with: "·")
     }
 
     static func hex(_ bytes: [UInt8], max: Int = 16) -> String {

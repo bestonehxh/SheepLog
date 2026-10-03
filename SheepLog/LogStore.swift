@@ -122,7 +122,10 @@ final class LogStore: ObservableObject {
     /// publish does not re-sort every source with Foundation string compares.
     private var sourceOrder: [String] = []
     private var detected: [String: Vendor] = [:]
-    private var sourcesPublishScheduled = false
+    /// The throttled publish waiting to run. Any publish cancels it: a superseded one that still
+    /// ran found nothing new, yet moved `lastSourcesPublish` on — the next burst then waited up
+    /// to another 250 ms for a publish nothing had used up.
+    private(set) var pendingSourcesPublish: Task<Void, Never>?
     private var lastSourcesPublish = -Double.infinity      // sourcesClock() seconds
     /// What the 4 Hz Sources publish is timed on: the monotonic clock (a wall clock set back an
     /// hour after a publish froze Sources and the sidebar count for that hour). Tests put a
@@ -694,10 +697,10 @@ final class LogStore: ObservableObject {
             publishSources()
             return
         }
-        guard !sourcesPublishScheduled else { return }
-        sourcesPublishScheduled = true
-        Task { [weak self] in
+        guard pendingSourcesPublish == nil else { return }
+        pendingSourcesPublish = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(Int(wait * 1000) + 1))
+            guard !Task.isCancelled else { return }
             self?.publishSources()
         }
     }
@@ -713,7 +716,8 @@ final class LogStore: ObservableObject {
 
     /// Publish the sorted source list now (the ingest path throttles this to 4 Hz).
     func publishSources() {
-        sourcesPublishScheduled = false
+        pendingSourcesPublish?.cancel()
+        pendingSourcesPublish = nil
         lastSourcesPublish = sourcesClock()
         let list = sourceOrder.compactMap { sourceMap[$0] }
         if list != sources { sources = list }
@@ -970,11 +974,64 @@ final class LogStore: ObservableObject {
             out += ","; out += e.severity.name
             out += ","; out += e.facility.name
             out += ","; Format.appendCSV(&out, e.program)
+            // Host, program and message were neutralised when the line was parsed (DisplayText);
+            // raw is the sender's bytes (see `csvRaw`).
             out += ","; Format.appendCSV(&out, e.message)
-            out += ","; Format.appendCSV(&out, e.raw)
+            out += ","; Format.appendCSV(&out, csvRaw(e.raw))
             out += "\r\n"
         }
         return out
+    }
+
+    /// The raw line for its CSV cell: ESC / OSC / BEL / DEL / C1 and every other control written
+    /// as the disk log writes them (`#033`, `#233` for U+009B), or `cat` / `less -R` of the .csv
+    /// ran a sender's terminal sequences. Tab stays, and so do line breaks — the cell is quoted
+    /// and reads back as the line received, as the message cell does.
+    nonisolated static func csvRaw(_ raw: String) -> String {
+        @inline(__always) func control(_ c: UInt8) -> Bool { (c < 0x20 && c != 0x09 && c != 0x0A && c != 0x0D) || c == 0x7F }
+        // Every row of an export passes here: eight bytes at a time, and only eight that may
+        // hold a control (< 0x20, 0x7F) or a C1's lead byte (≥ 0x80) are read one by one.
+        var copy = raw
+        let clean = copy.withUTF8 { b -> Bool in
+            guard let base = b.baseAddress else { return true }
+            let p = UnsafeRawPointer(base)
+            let ones: UInt64 = 0x0101_0101_0101_0101, highs: UInt64 = 0x8080_8080_8080_8080
+            var i = 0
+            while i < b.count {
+                if i + 8 <= b.count {
+                    let v = p.loadUnaligned(fromByteOffset: i, as: UInt64.self)
+                    let d = v ^ (ones &* 0x7F)
+                    let below20 = (v &- ones &* 0x20) & ~v & highs
+                    let isDel = (d &- ones) & ~d & highs
+                    if below20 | isDel | (v & highs) == 0 { i += 8; continue }
+                }
+                let end = min(i + 8, b.count)
+                var prev: UInt8 = i > 0 ? b[i - 1] : 0
+                while i < end {
+                    let c = b[i]
+                    if control(c) || (prev == 0xC2 && c >= 0x80 && c <= 0x9F) { return false }
+                    prev = c
+                    i += 1
+                }
+            }
+            return true
+        }
+        if clean { return raw }
+        var out: [UInt8] = []
+        out.reserveCapacity(raw.utf8.count + 16)
+        func octal(_ c: UInt8) { out += [0x23, 0x30 + (c >> 6), 0x30 + ((c >> 3) & 7), 0x30 + (c & 7)] }
+        var pendingC2 = false
+        for c in raw.utf8 {
+            if pendingC2 {
+                pendingC2 = false
+                if c >= 0x80, c <= 0x9F { octal(c); continue }
+                out.append(0xC2)
+            }
+            if c == 0xC2 { pendingC2 = true; continue }
+            if control(c) { octal(c) } else { out.append(c) }
+        }
+        if pendingC2 { out.append(0xC2) }
+        return String(decoding: out, as: UTF8.self)
     }
 
     /// `Format.stamp` for many dates in a row: the date and time to the second formatted once
@@ -1331,20 +1388,30 @@ nonisolated struct AddressWord: Sendable {
                 return true
             }
             guard let anchor else { return false }
-            return Self.anyHit(anchor, in: buf) { at in byValue(buf, around: at, anchorLength: anchor.count) }
+            return Self.anyHit(anchor, in: buf) { at, next in byValue(buf, around: at, anchorLength: anchor.count, next: &next) }
         }
     }
 
     /// The IPv6 token around a hit of the anchor, parsed: this address as a whole. The token is
     /// the run of hex digits, `:` and `.` around it; when it does not parse, the parts after a
     /// single `:` are tried (ASA "outside:2001:db8::2", where "de:" glued "outside" on), and a
-    /// trailing `.` / `:` is dropped ("… from 2001:db8::2.").
-    private func byValue(_ h: UnsafeBufferPointer<UInt8>, around at: Int, anchorLength: Int) -> Bool {
+    /// trailing `.` / `:` is dropped ("… from 2001:db8::2."). A token longer than
+    /// `maxToken` is no address: `next` moves the search past its end.
+    private func byValue(_ h: UnsafeBufferPointer<UInt8>, around at: Int, anchorLength: Int, next: inout Int) -> Bool {
         @inline(__always) func tokenByte(_ c: UInt8) -> Bool { Self.isHex(c) || c == 0x3A || c == 0x2E }
+        let maxToken = 128
         var s = at, e = at + anchorLength
-        while s > 0, tokenByte(h[s - 1]) { s -= 1 }
-        while e < h.count, tokenByte(h[e]) { e += 1 }
-        guard e - s <= 128 else { return false }
+        // Both scans stop once the token is too long: unbounded, a line of "2001:" × n with
+        // `2001:db8::5` in force read the whole line around every one of its n hits (1 MB: 77 s
+        // on the main thread).
+        while s > 0, e - s <= maxToken, tokenByte(h[s - 1]) { s -= 1 }
+        while e < h.count, e - s <= maxToken, tokenByte(h[e]) { e += 1 }
+        guard e - s <= maxToken else {
+            // Every later hit inside it is refused the same way: read to its end once and go on there.
+            while e < h.count, tokenByte(h[e]) { e += 1 }
+            next = e
+            return false
+        }
         var end = e
         while end > s, h[end - 1] == 0x2E || (h[end - 1] == 0x3A && !(end - 2 >= s && h[end - 2] == 0x3A)) { end -= 1 }
         // Every spelling ends with the address's last group ("…:2", "…:0002", "…::" for 0):
@@ -1443,18 +1510,31 @@ nonisolated struct AddressWord: Sendable {
     /// one. The first byte is found with memchr (both cases), as `Needle.search` does: a 256-term
     /// filter of addresses over 100,000 lines compared every byte of every line 256 times.
     static func anyHit(_ n: [UInt8], in h: UnsafeBufferPointer<UInt8>, _ accept: (Int) -> Bool) -> Bool {
+        anyHit(n, in: h) { at, _ in accept(at) }
+    }
+
+    /// `anyHit`, where `accept` may move the search on past more than the hit (`next`, at + 1
+    /// on entry): a token it has read whole and refused holds no other hit worth reading.
+    static func anyHit(_ n: [UInt8], in h: UnsafeBufferPointer<UInt8>, resuming accept: (Int, inout Int) -> Bool) -> Bool {
         let m = n.count, len = h.count
         guard m > 0, m <= len, let base = h.baseAddress else { return false }
         let first = n[0]
-        let other: UInt8? = first >= 0x61 && first <= 0x7A ? first & ~0x20 : nil
+        let isLetter = first >= 0x61 && first <= 0x7A
+        let firstUpper = first & ~0x20
         let last = len - m
+        // The next occurrence of each case, found once and reused until the scan passes it:
+        // re-running memchr for the lower case at every hit of the upper one (`word:Gi1/0/1`
+        // over a line of "G"s) scanned to the end of the line each time — quadratic.
+        var nextLower = -1, nextUpper = isLetter ? -1 : Int.max
+        func find(_ c: UInt8, from i: Int) -> Int {
+            guard let p = memchr(base + i, Int32(c), last - i + 1) else { return Int.max }
+            return base.distance(to: p.assumingMemoryBound(to: UInt8.self))
+        }
         var i = 0
         while i <= last {
-            var at = Int.max
-            if let p = memchr(base + i, Int32(first), last - i + 1) { at = base.distance(to: p.assumingMemoryBound(to: UInt8.self)) }
-            if let o = other, let p = memchr(base + i, Int32(o), min(at, last + 1) - i) {
-                at = min(at, base.distance(to: p.assumingMemoryBound(to: UInt8.self)))
-            }
+            if nextLower < i { nextLower = find(first, from: i) }
+            if nextUpper < i { nextUpper = find(firstUpper, from: i) }
+            let at = min(nextLower, nextUpper)
             if at > last { return false }
             var j = 1
             while j < m {
@@ -1463,8 +1543,9 @@ nonisolated struct AddressWord: Sendable {
                 if c != n[j] { break }
                 j += 1
             }
-            if j == m, accept(at) { return true }
-            i = at + 1
+            var next = at + 1
+            if j == m, accept(at, &next) { return true }
+            i = max(next, at + 1)
         }
         return false
     }
@@ -1516,14 +1597,74 @@ nonisolated struct AddressWord: Sendable {
 nonisolated struct WholeWord: Sendable {
     let text: String
     let lower: [UInt8]
+    /// A non-ASCII needle cannot be byte-folded (`Ä`.lowercased is two bytes no fold maps to),
+    /// so its matches are found with Foundation's case-insensitive search and the word edges
+    /// are read as Characters (the same rules, Unicode-wide).
+    let ascii: Bool
+    /// Non-ASCII needle, read once (not per line): the lower-cased text and its edge flags.
+    private let folded: String
+    private let firstAlnum: Bool
+    private let lastAlnum: Bool
+    /// The needle holds a character that no ASCII text matches case-insensitively (`ä`, not
+    /// the Kelvin sign `K` or `ſ`, which fold to `k` / `s`): a pure-ASCII line cannot hold it.
+    private let needsNonASCII: Bool
+    /// The needle's longest ASCII run (≥ 2 bytes, lower-cased): an ASCII line without it is no hit.
+    private let asciiRun: [UInt8]?
 
     init(_ text: String) {
         self.text = text
+        ascii = text.utf8.allSatisfy { $0 < 0x80 }
         lower = Array(text.lowercased().utf8)
+        folded = text.lowercased()
+        firstAlnum = folded.first.map { $0.isLetter || $0.isNumber } ?? false
+        lastAlnum = folded.last.map { $0.isLetter || $0.isNumber } ?? false
+        needsNonASCII = text.unicodeScalars.contains { Self.noASCIIForm($0) }
+        var best: [UInt8] = [], run: [UInt8] = []
+        for b in lower + [0x80] {
+            if b < 0x80 { run.append(b); continue }
+            if run.count > best.count { best = run }
+            run = []
+        }
+        asciiRun = best.count >= 2 ? best : nil
+    }
+
+    /// A non-ASCII scalar whose case fold, lower and upper case all keep a non-ASCII scalar
+    /// (`ß` → "SS", `ı` → "I" do not: they count as matchable by ASCII, to be safe).
+    private static func noASCIIForm(_ u: Unicode.Scalar) -> Bool {
+        guard !u.isASCII else { return false }
+        let s = String(u)
+        return [s.folding(options: .caseInsensitive, locale: nil), s.lowercased(), s.uppercased()]
+            .allSatisfy { $0.unicodeScalars.contains { !$0.isASCII } }
+    }
+
+    /// Every byte below 0x80, eight at a time.
+    static func isASCII(_ h: UnsafeBufferPointer<UInt8>) -> Bool {
+        guard let base = h.baseAddress else { return true }
+        let raw = UnsafeRawPointer(base)
+        var i = 0
+        while i + 8 <= h.count {
+            if raw.loadUnaligned(fromByteOffset: i, as: UInt64.self) & 0x8080_8080_8080_8080 != 0 { return false }
+            i += 8
+        }
+        while i < h.count { if h[i] >= 0x80 { return false }; i += 1 }
+        return true
     }
 
     func found(in hay: String) -> Bool {
         guard !lower.isEmpty else { return true }
+        guard ascii else {
+            // Foundation's search costs ~18 µs a line; most lines are ASCII and are told apart
+            // with a byte scan (100,000 lines: 1.8 s optimised for the search alone).
+            var h = hay
+            let plain = h.withUTF8 { buf -> Bool? in
+                guard Self.isASCII(buf) else { return nil }
+                if needsNonASCII { return false }
+                if let asciiRun, !Needle.search(buf, asciiRun) { return false }
+                return nil
+            }
+            if plain == false { return false }
+            return foldedFound(in: hay)
+        }
         var h = hay
         return h.withUTF8 { buf in
             let m = lower.count, len = buf.count
@@ -1540,6 +1681,37 @@ nonisolated struct WholeWord: Sendable {
                 return okBefore && okAfter
             }
         }
+    }
+
+    /// The byte path's word edges for a needle with letters outside ASCII: not a letter or
+    /// digit on either side of a word whose first / last character is one, and not followed
+    /// by `.`, `/` or `:` and a digit.
+    static func foldedFound(_ needle: String, in hay: String) -> Bool {
+        WholeWord(needle).foldedFound(in: hay)
+    }
+
+    private func foldedFound(in hay: String) -> Bool {
+        guard !folded.isEmpty else { return false }
+        var from = hay.startIndex
+        while from < hay.endIndex, let r = hay.range(of: folded, options: .caseInsensitive, range: from..<hay.endIndex) {
+            let before = r.lowerBound > hay.startIndex ? hay[hay.index(before: r.lowerBound)] : nil
+            let after = r.upperBound < hay.endIndex ? hay[r.upperBound] : nil
+            // The character after `after`, when there is one ("… Äruba." ends the line: reading
+            // past it trapped).
+            var deeper: Character?
+            if let after, after == "." || after == "/" || after == ":" {
+                let k = hay.index(after: r.upperBound)
+                if k < hay.endIndex { deeper = hay[k] }
+            }
+            let okBefore = !firstAlnum || !(before?.isLetter ?? false) && !(before?.isNumber ?? false)
+            let okAfter = !lastAlnum || (!(after?.isLetter ?? false) && !(after?.isNumber ?? false)
+                && !(deeper?.isNumber ?? false))
+            if okBefore && okAfter { return true }
+            // On from the next character, not past the match: matches may overlap (`ä-ä` in
+            // "xä-ä-ä" is the second one), as the byte path's search does.
+            from = hay.index(after: r.lowerBound)
+        }
+        return false
     }
 }
 

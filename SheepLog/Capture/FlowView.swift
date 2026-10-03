@@ -158,26 +158,28 @@ struct FlowView: View {
         let _ = PaneProbe.ran("body.flows")
         VStack(alignment: .leading, spacing: 0) {
             TimelineView(.periodic(from: .now, by: 1)) { context in
-                PaneHeader(eyebrow: "Capture", heading: heading, subtitle: subtitle(now: context.date)) {
+                PaneHeader(pane: .flows, status: heading, detail: subtitle(now: context.date),
+                           problem: problemCount > 0) {
                     headerActions
                 }
             }
             .paneColumn()
             .padding(.top, Metrics.headerTop)
-            .padding(.bottom, 12)
+            .padding(.bottom, 14)
 
             PaneStrip { strip }
 
+            // The conversations and the ladder, one hairline (the split's divider) between them.
             HSplitView {
                 table
-                    .frame(minWidth: 300, idealWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
-                    .padding(.trailing, 6)
+                    .frame(minWidth: 290, idealWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(.trailing, 14)
                 ladderPane
-                    .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)   // table 300 + 420 fit the 1000 pt window
-                    .padding(.leading, 6)
+                    .frame(minWidth: 390, maxWidth: .infinity, maxHeight: .infinity)   // 290 + 390 + gaps fit the 1000 pt window's 716 pt column
+                    .padding(.leading, 18)
             }
             .paneColumn()
-            .padding(.vertical, 14)
+            .padding(.bottom, 14)
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { paneWidth = $0 }
         .paneKeyCommands(find: { filterFocused = true }, copy: { if selectedFlow == nil { NSSound.beep() } else { copySummary() } })
@@ -248,11 +250,12 @@ struct FlowView: View {
 
     private var problemCount: Int { flows.filter { $0.health != .ok }.count }
 
+    /// The state as the page's status words: "12 conversations, 3 with problems".
     private var heading: String {
-        if flows.isEmpty { return analysing ? "Analysing TCP conversations…" : "No TCP conversations yet." }
-        let noun = flows.count == 1 ? "TCP conversation" : "TCP conversations"
+        if flows.isEmpty { return analysing ? "Analysing TCP conversations…" : "No TCP conversations yet" }
+        let noun = flows.count == 1 ? "conversation" : "conversations"
         let p = problemCount
-        return "\(Format.count(flows.count)) \(noun), \(p == 0 ? "none" : Format.count(p)) with problems."
+        return "\(Format.count(flows.count)) \(noun), \(p == 0 ? "none" : Format.count(p)) with problems"
     }
 
     private func subtitle(now: Date) -> String {
@@ -269,52 +272,51 @@ struct FlowView: View {
         return "\(Int(s / 3600)) h ago"
     }
 
+    /// Word links on the status line (the page has tabs). "analysing…" is in the status line's
+    /// facts, so no spinner.
     @ViewBuilder private var headerActions: some View {
-        // Always laid out (hidden when idle): inserting it shifted every button to its right.
-        ProgressView().controlSize(.small).opacity(analysing ? 1 : 0).accessibilityHidden(!analysing)
-        Group {
-            let _ = PaneProbe.button("flows.Re-analyse", enabled: !analysing) { if DemoFlags.flows { loadDemo() } else { startAnalysis() } }
-            let _ = PaneProbe.button("flows.Copy summary", enabled: selectedFlow != nil) { copySummary() }
-            Button {
-                if DemoFlags.flows { loadDemo() } else { startAnalysis() }
-            } label: {
-                Label("Re-analyse", systemImage: "arrow.clockwise")
-            }
-            .disabled(analysing)
-            .help("Analyse the packets again")
-            Toggle(isOn: $problemsOnly) { Label("Problems only", systemImage: "exclamationmark.triangle") }
-                .toggleStyle(.button)
-                .help("Show only conversations with problems")
-            Button { copySummary() } label: { Label("Copy summary", systemImage: "doc.on.doc") }
-                .disabled(selectedFlow == nil)
-                .help("Copy the selected conversation as plain text for a ticket: endpoints, RTT, response time, bytes and timed problems (⌘⇧C)")
-            Button { exportPNG() } label: { Label("Export PNG…", systemImage: "square.and.arrow.up") }
-                .disabled(selectedFlow == nil)
-                .help("Save the ladder diagram of the selected conversation as a PNG")
+        let _ = PaneProbe.button("flows.Re-analyse", enabled: !analysing) { if DemoFlags.flows { loadDemo() } else { startAnalysis() } }
+        let _ = PaneProbe.button("flows.Copy summary", enabled: selectedFlow != nil) { copySummary() }
+        Button("Re-analyse") {
+            if DemoFlags.flows { loadDemo() } else { startAnalysis() }
         }
-        // Icons only below 1,150 pt of pane (windows under ~1,360 pt): with titles the four buttons take ~470 pt and the
-        // heading wrapped to three lines at 1000 pt, two at 1280.
-        .labelStyle(AdaptiveLabelStyle(iconOnly: paneWidth > 0 && paneWidth < 1_150))
+        .buttonStyle(.quietLink)
+        .fixedSize()        // a long file name in the facts truncates them, never wraps a link
+        .disabled(analysing)
+        .help("Analyse the packets again")
+        Button("Copy summary") { copySummary() }
+            .buttonStyle(.quietLink)
+            .fixedSize()
+            .disabled(selectedFlow == nil)
+            .help("Copy the selected conversation as plain text for a ticket: endpoints, RTT, response time, bytes and timed problems (⌘⇧C)")
+        Button("Export…") { exportPNG() }
+            .buttonStyle(.quietLink)
+            .fixedSize()
+            .disabled(selectedFlow == nil)
+            .help("Save the ladder diagram of the selected conversation as a PNG")
     }
 
     @ViewBuilder private var strip: some View {
         FilterField(text: $filterText, prompt: "Filter client, server, app or problem", mono: false,
                     help: "Matches as you type. ⌘F to focus, Esc to clear", focus: $filterFocused)
-            .frame(maxWidth: 380)
-        Text(shownText)
-            .font(.system(size: 11.5))
-            .foregroundStyle(Theme.faintText)
+            .frame(minWidth: 160, maxWidth: 380)
+        QuietToolToggle("Problems only", isOn: $problemsOnly, help: "Show only conversations with problems")
+        QuietToolToggle("Collapse ACKs", isOn: $collapseAcks,
+                        help: "Hide the pure ACKs between data groups (the handshake ACK and closing ACKs stay).")
         Spacer(minLength: 8)
-        Toggle("Collapse ACKs", isOn: $collapseAcks)
-            .toggleStyle(.checkbox)
-            .font(.system(size: 12))
-            .controlSize(.small)
-            .help("Hide the pure ACKs between data groups (the handshake ACK and closing ACKs stay).")
+        Text(shownText)
+            .font(Theme.body)
+            .foregroundStyle(Theme.text2)
+            .lineLimit(1)
+            .fixedSize()
     }
 
+    /// The tool row's count (LabDC: "2 leases"): every conversation, or how many the filters keep.
     private var shownText: String {
+        guard !flows.isEmpty else { return "" }
         let n = rows.count
-        return n == flows.count ? "" : "\(Format.count(n)) of \(Format.count(flows.count)) shown"
+        let noun = flows.count == 1 ? "conversation" : "conversations"
+        return n == flows.count ? "\(Format.count(n)) \(noun)" : "\(Format.count(n)) of \(Format.count(flows.count)) \(noun)"
     }
 
     // MARK: Table
@@ -336,11 +338,7 @@ struct FlowView: View {
 
     private var table: some View {
         Table(rows, selection: $selection, sortOrder: $sortOrder) {
-            TableColumn("", value: \FlowRow.healthRank) { r in
-                HealthDot(health: r.health)
-                    .help(r.health == .ok ? "Healthy" : r.problems)
-            }
-            .width(14)
+            // No health dot: the Problems column says it in words (red for what is wrong).
             TableColumn("Client", value: \FlowRow.client) { r in
                 Text(r.client).font(.system(size: 11.5, design: .monospaced)).identifierText()
             }
@@ -354,9 +352,9 @@ struct FlowView: View {
             // Right after App: at the default pane width the numeric columns after it scroll,
             // and the reason a row is orange must not be the part that scrolls away.
             TableColumn("Problems", value: \FlowRow.problems) { r in
-                Text(r.problems).proseText()
-                    .foregroundStyle(r.health == .bad ? Theme.err : r.health == .warn ? Theme.warn : Theme.dimText)
-                    .help(r.problems)
+                Text(r.problems.isEmpty ? "Healthy" : r.problems).proseText()
+                    .foregroundStyle(r.health == .ok ? Theme.text2 : Theme.err)
+                    .help(r.problems.isEmpty ? "Healthy" : r.problems)
             }
             .width(min: 120, ideal: 240)
             TableColumn("Packets", value: \FlowRow.packets) { r in
@@ -385,6 +383,7 @@ struct FlowView: View {
             .width(min: 50, ideal: 64)
         }
         .font(.system(size: 12))
+        .quietTable(selection: selection)
         .tablePanel()
         .overlay {
             if rows.isEmpty {
@@ -406,16 +405,17 @@ struct FlowView: View {
         LadderLayout.make(flow: flow, collapseAcks: collapseAcks, width: ladderWidth)
     }
 
+    /// The selected conversation the LabDC inspector way: its name as the 20 pt subtitle, facts
+    /// label-above, verdicts as words — then the timeline, the ladder and its footer, flush left.
     @ViewBuilder private var ladderPane: some View {
-        VStack(spacing: 0) {
+        VStack(alignment: .leading, spacing: 0) {
             if let flow = selectedFlow {
                 let layout = layout(for: flow)
                 let _ = PaneProbe.drewFlow(flow, event: selectedEvent)
                 LadderHeader(flow: flow)
                 FlowTimeline(flow: flow, layout: layout, selected: $selectedEvent)
-                    .padding(.horizontal, 14)
-                    .padding(.bottom, 8)
-                Rectangle().fill(Theme.hairlineSoft).frame(height: 0.5)
+                    .padding(.bottom, 10)
+                Rectangle().fill(Theme.hairline).frame(height: 1)
                 // The tap below, for tests (a unit-test host cannot click a SwiftUI canvas).
                 let _ = PaneProbe.tapTarget("flows.ladder") { point in
                     let hit = layout.hit(point)
@@ -432,46 +432,45 @@ struct FlowView: View {
                 }
                 .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { ladderWidth = max(360, $0) }
                 .id(flow.id)
-                Rectangle().fill(Theme.hairlineSoft).frame(height: 0.5)
+                Rectangle().fill(Theme.hairline).frame(height: 1)
                 selectionFooter(flow)
             } else {
                 let _ = PaneProbe.drewFlow(nil, event: nil)
                 TableEmptyOverlay(text: "Select a conversation on the left to see its ladder diagram.")
             }
-            Rectangle().fill(Theme.hairlineSoft).frame(height: 0.5)
             FlowLegend()
         }
-        .panelCard()
     }
 
     @ViewBuilder private func selectionFooter(_ flow: TCPFlow) -> some View {
-        HStack(spacing: 8) {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
             if let id = selectedEvent, let event = flow.events.first(where: { $0.id == id }) {
                 let ids = event.packetIDs
                 Text(LadderLayout.label(for: event, flow: flow))
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(Theme.emphasis)
                     .foregroundStyle(event.problem != nil ? Theme.err : Theme.text)
                     .proseText()
                 Text(framesText(ids))
-                    .font(.system(size: 11.5, design: .monospaced))
-                    .foregroundStyle(Theme.dimText)
+                    .font(Theme.mono)
+                    .foregroundStyle(Theme.faintText)
                     .identifierText()
                     .textSelection(.enabled)
                 Spacer(minLength: 8)
                 let _ = PaneProbe.button("flows.Show packets", enabled: !ids.isEmpty) { showPackets(ids, flow: flow) }
                 Button("Show packets") { showPackets(ids, flow: flow) }
-                    .controlSize(.small)
+                    .buttonStyle(.quietLink)
+                    .fixedSize()
                     .disabled(ids.isEmpty)
             } else {
                 let _ = PaneProbe.button("flows.Show packets", enabled: false) {}
                 Text("Click an arrow or its label to see its packets.")
-                    .font(.system(size: 11.5))
+                    .font(Theme.body)
                     .foregroundStyle(Theme.faintText)
+                    .proseText()
                 Spacer(minLength: 0)
             }
         }
-        .padding(.horizontal, 14)
-        .frame(height: 36)
+        .frame(height: 38)
     }
 
     private func framesText(_ ids: [Int]) -> String {
@@ -640,19 +639,6 @@ struct FlowView: View {
     }
 }
 
-/// Title and icon, or the icon alone (VoiceOver still reads the title) when the pane is narrow.
-struct AdaptiveLabelStyle: LabelStyle {
-    let iconOnly: Bool
-
-    func makeBody(configuration: Configuration) -> some View {
-        if iconOnly {
-            Label(configuration).labelStyle(.iconOnly)
-        } else {
-            Label(configuration).labelStyle(.titleAndIcon)
-        }
-    }
-}
-
 // MARK: - Table rows
 
 nonisolated struct FlowRow: Identifiable {
@@ -725,77 +711,80 @@ enum FlowStyle {
     }
 }
 
-/// The health mark: a filled dot for healthy and problem, a ring for a warning — in the dark
-/// appearance the family's warn and err colours are close, and the shape still tells them apart.
-struct HealthDot: View {
-    let health: TCPFlow.Health
-    var size: CGFloat = 8
-
-    var body: some View {
-        ZStack {
-            if health == .warn {
-                Circle().strokeBorder(Theme.warn, lineWidth: 2)
-            } else {
-                Circle().fill(FlowStyle.healthColor(health))
-            }
-        }
-        .frame(width: size, height: size)
-    }
-}
-
 // MARK: - Ladder header, legend
 
+/// The selected conversation, LabDC's inspector shape: the name as the 20 pt subtitle with its
+/// endpoints under it (mono, faint), the facts label-above, the verdicts as words — red only for
+/// what is wrong — and the analyser's reasons and notes as sentences.
 private struct LadderHeader: View {
     let flow: TCPFlow
 
     var body: some View {
-        VStack(spacing: 6) {
-            HStack(spacing: 8) {
-                HealthDot(health: flow.health)
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(flow.application)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(Theme.subtitle)
                     .foregroundStyle(Theme.text)
                     .proseText()
-                Text("\(flow.clientEndpoint)  ⇄  \(flow.serverEndpoint)")
-                    .font(.system(size: 11.5, design: .monospaced))
-                    .foregroundStyle(Theme.dimText)
+                Text("\(flow.clientEndpoint)  →  \(flow.serverEndpoint)")
+                    .font(Theme.mono)
+                    .foregroundStyle(Theme.faintText)
                     .identifierText()
                     .textSelection(.enabled)
             }
-            PillFlow(spacing: 6) {
-                ForEach(Array(pills.enumerated()), id: \.offset) { _, pill in
-                    StatusPill(text: pill.0, kind: pill.1)
+            CaptureFactWrap(spacing: 24, lineSpacing: 10) {
+                ForEach(Array(facts.enumerated()), id: \.offset) { _, fact in
+                    QuietField(fact.0) {
+                        Text(fact.1)
+                            .font(Theme.body)
+                            .monospacedDigit()
+                            .foregroundStyle(fact.2 ? Theme.err : Theme.text)
+                            .fixedSize()
+                    }
+                    .fixedSize()
+                }
+            }
+            CaptureFactWrap(spacing: 14, lineSpacing: 4) {
+                ForEach(Array(verdicts.enumerated()), id: \.offset) { _, v in
+                    StatusPill(text: v.0, kind: v.1)
                 }
             }
             if !flow.reasons.isEmpty {
                 Text(flow.reasons.joined(separator: " · "))
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(flow.health == .bad ? Theme.err : Theme.warn)
-                    .multilineTextAlignment(.center)
+                    .font(Theme.detail)
+                    .foregroundStyle(Theme.text2)
                     .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
             }
             if !flow.notes.isEmpty {
                 Text(flow.notes.joined(separator: " · "))
-                    .font(.system(size: 11))
-                    .foregroundStyle(Theme.dimText)
-                    .multilineTextAlignment(.center)
+                    .font(Theme.caption)
+                    .foregroundStyle(Theme.faintText)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .frame(maxWidth: .infinity)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.top, 2)
+        .padding(.bottom, 14)
     }
 
-    private var pills: [(String, StatusPill.Kind)] {
-        var out: [(String, StatusPill.Kind)] = []
-        if let rtt = flow.handshakeRTT {
-            out.append(("RTT \(TCPFlowAnalyzer.msText(rtt))", rtt > 0.3 ? .warn : .neutral))
-        }
+    /// Label, value, wrong?
+    private var facts: [(String, String, Bool)] {
+        var out: [(String, String, Bool)] = []
+        if let rtt = flow.handshakeRTT { out.append(("RTT", TCPFlowAnalyzer.msText(rtt), rtt > 0.3)) }
         if let r = flow.firstResponseTime {
             let slowest = max(r, flow.longestResponseWait ?? 0)
-            out.append(("Response \(TCPFlowAnalyzer.msText(r))", slowest > 3 ? .bad : r > 1 ? .warn : .neutral))
+            out.append(("Response", TCPFlowAnalyzer.msText(r), slowest > 1))
         }
+        out.append(("Packets", Format.count(flow.packetCount), false))
+        out.append(("Bytes", Format.bytes(flow.bytesToServer + flow.bytesToClient), false))
+        out.append(("Duration", FlowTimeline.durationText(flow.duration), false))
+        return out
+    }
+
+    /// What the analyser counted, as words: red where it is trouble, muted otherwise.
+    private var verdicts: [(String, StatusPill.Kind)] {
+        var out: [(String, StatusPill.Kind)] = []
         if flow.retransmissions > 0 {
             out.append(("\(flow.retransmissions) retransmission\(flow.retransmissions == 1 ? "" : "s")",
                         flow.health == .bad && flow.reasons.contains { $0.contains("retransmissions (") } ? .bad : .warn))
@@ -804,17 +793,19 @@ private struct LadderHeader: View {
         if flow.outOfOrder > 0 { out.append(("\(flow.outOfOrder) out of order", .warn)) }
         if flow.refused { out.append(("Refused", .warn)) }
         if flow.dupAcks > 0 { out.append(("\(flow.dupAcks) dup ACK\(flow.dupAcks == 1 ? "" : "s")", flow.dupAcks >= 3 ? .warn : .neutral)) }
-        if flow.resets > 0 { out.append(("\(flow.resets) reset\(flow.resets == 1 ? "" : "s")", flow.health == .bad ? .bad : flow.health == .warn ? .warn : .neutral)) }
+        if flow.resets > 0 { out.append(("\(flow.resets) reset\(flow.resets == 1 ? "" : "s")", flow.health == .ok ? .neutral : .bad)) }
         if flow.zeroWindows > 0 { out.append(("\(flow.zeroWindows) zero window", .bad)) }
-        out.append(("\(Format.count(flow.packetCount)) packets · \(Format.bytes(flow.bytesToServer + flow.bytesToClient))", .neutral))
         if flow.health == .ok { out.append(("Healthy", .ok)) }
         return out
     }
 }
 
-/// Centred rows that wrap, for the metric pills.
-private struct PillFlow: Layout {
-    var spacing: CGFloat = 6
+/// Left-aligned rows that wrap — the facts and verdict words of the Flows and Authentication
+/// inspectors (LabDC lays a few label-above fields side by side; a 390 pt ladder needs them to
+/// wrap).
+struct CaptureFactWrap: Layout {
+    var spacing: CGFloat = 24
+    var lineSpacing: CGFloat = 10
 
     private func rows(_ sizes: [CGSize], width: CGFloat) -> [[Int]] {
         var rows: [[Int]] = [[]]
@@ -833,61 +824,43 @@ private struct PillFlow: Layout {
         let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
         let width = proposal.width ?? sizes.reduce(0) { $0 + $1.width + spacing }
         let rs = rows(sizes, width: width)
-        let height = rs.reduce(0) { h, r in h + (r.map { sizes[$0].height }.max() ?? 0) } + spacing * CGFloat(max(0, rs.count - 1))
-        let used = rs.map { r in r.reduce(0) { $0 + sizes[$1].width } + spacing * CGFloat(max(0, r.count - 1)) }.max() ?? 0
-        return CGSize(width: min(width, used), height: height)
+        let height = rs.reduce(0) { h, r in h + (r.map { sizes[$0].height }.max() ?? 0) } + lineSpacing * CGFloat(max(0, rs.count - 1))
+        return CGSize(width: proposal.width ?? width, height: sizes.isEmpty ? 0 : height)
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
         let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
         var y = bounds.minY
         for r in rows(sizes, width: bounds.width) {
-            let rowWidth = r.reduce(0) { $0 + sizes[$1].width } + spacing * CGFloat(max(0, r.count - 1))
             let rowHeight = r.map { sizes[$0].height }.max() ?? 0
-            var x = bounds.midX - rowWidth / 2
+            var x = bounds.minX
             for i in r {
                 subviews[i].place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(sizes[i]))
                 x += sizes[i].width + spacing
             }
-            y += rowHeight + spacing
+            y += rowHeight + lineSpacing
         }
     }
 }
 
+/// The ladder's own key, one faint row (two when the ladder is narrow): the arrow colours and the
+/// processing bar. No health dots — the words above say it.
 private struct FlowLegend: View {
     var body: some View {
-        // Three steps down to the 420 pt minimum ladder: at that width even the two-row form
-        // runs off both edges ("…arning", "Server processin…").
         ViewThatFits(in: .horizontal) {
-            HStack(spacing: 12) { health; Rectangle().fill(Theme.hairline).frame(width: 0.5, height: 12); arrows }
-            VStack(alignment: .leading, spacing: 5) { health; arrows }
+            HStack(spacing: 14) { arrowsFirst; arrowsSecond }.fixedSize()
             VStack(alignment: .leading, spacing: 5) {
-                health
-                HStack(spacing: 12) { arrowsFirst }.fixedSize()
-                HStack(spacing: 12) { arrowsSecond }.fixedSize()
+                HStack(spacing: 14) { arrowsFirst }.fixedSize()
+                HStack(spacing: 14) { arrowsSecond }.fixedSize()
             }
         }
-        .font(.system(size: 11))
-        .foregroundStyle(Theme.dimText)
+        .font(Theme.caption)
+        .foregroundStyle(Theme.faintText)
         .lineLimit(1)
         .fixedSize(horizontal: false, vertical: true)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-    }
-
-    private var health: some View {
-        HStack(spacing: 12) {
-            dot(.ok, "Healthy")
-            dot(.warn, "Warning")
-            dot(.bad, "Problem")
-        }
-        .fixedSize()
-    }
-
-    private var arrows: some View {
-        HStack(spacing: 12) { arrowsFirst; arrowsSecond }
-            .fixedSize()
+        .padding(.top, 6)
+        .padding(.bottom, 2)
     }
 
     @ViewBuilder private var arrowsFirst: some View {
@@ -901,22 +874,17 @@ private struct FlowLegend: View {
         line(Theme.warn, "Reordered", dashed: true)
         HStack(spacing: 4) {
             RoundedRectangle(cornerRadius: 1.5).fill(Theme.warn).frame(width: 5, height: 12)
-            RoundedRectangle(cornerRadius: 1.5).fill(Theme.err).frame(width: 5, height: 12)
-            Text("Server processing (red: over 1 s)")
+            Text("Server processing")
         }
-    }
-
-    private func dot(_ h: TCPFlow.Health, _ t: String) -> some View {
-        HStack(spacing: 4) { HealthDot(health: h, size: 7); Text(t) }
     }
 
     private func line(_ c: Color, _ t: String, dashed: Bool = false) -> some View {
         HStack(spacing: 4) {
             if dashed {
-                HStack(spacing: 2) { ForEach(0..<3, id: \.self) { _ in Capsule().fill(c).frame(width: 3.5, height: 2) } }
+                HStack(spacing: 2) { ForEach(0..<3, id: \.self) { _ in Rectangle().fill(c).frame(width: 3.5, height: 1.5) } }
                     .frame(width: 14)
             } else {
-                Capsule().fill(c).frame(width: 14, height: 2)
+                Rectangle().fill(c).frame(width: 14, height: 1.5)
             }
             Text(t)
         }
@@ -1159,8 +1127,8 @@ struct LadderCanvas: View {
     private func draw(_ ctx: inout GraphicsContext, _ size: CGSize) {
         let L = layout
         drawLifelines(&ctx)
-        endpointBox(&ctx, x: L.leftX, symbol: "laptopcomputer", title: "Client", detail: L.clientTitle)
-        endpointBox(&ctx, x: L.rightX, symbol: "server.rack", title: "Server", detail: L.serverTitle)
+        endpointHead(&ctx, x: L.leftX, title: "Client", detail: L.clientTitle)
+        endpointHead(&ctx, x: L.rightX, title: "Server", detail: L.serverTitle)
         drawProcessingBars(&ctx)
         drawEvents(&ctx)
         if L.hidden > 0 {
@@ -1309,36 +1277,32 @@ struct LadderCanvas: View {
                  at: CGPoint(x: x, y: yy), anchor: side == 0 ? .trailing : .leading)
     }
 
-    private func endpointBox(_ ctx: inout GraphicsContext, x: CGFloat, symbol: String, title: String, detail full: String) {
-        // Each box stays in its half of the canvas: an IPv6 endpoint is wider than the margin
-        // outside the lifeline, and would be cut off at the pane's edge. Too long → shortened in
-        // the middle (the port and the address's end stay).
+    /// A lifeline's head as words (Round 22: no card, no device glyph): the role in ink and
+    /// semibold, the endpoint under it in mono, faint — centred on the lifeline, kept in its half of
+    /// the canvas (an IPv6 endpoint is wider than the margin outside the lifeline), and shortened in
+    /// the middle when it is still too long (the port and the address's end stay).
+    private func endpointHead(_ ctx: inout GraphicsContext, x: CGFloat, title: String, detail full: String) {
         let font = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .regular)
         func width(_ t: String) -> CGFloat { (t as NSString).size(withAttributes: [.font: font]).width }
         let half = layout.width / 2
-        let maxW = max(120, half - 12)
+        let maxW = max(100, half - 12)
         var detail = full
-        if width(detail) + 48 > maxW, detail.count > 12 {
+        if width(detail) > maxW, detail.count > 12 {
             let chars = Array(full)
             var keep = chars.count - 1
-            while keep > 8, width(String(chars.prefix(keep / 2)) + "…" + String(chars.suffix(keep - keep / 2))) + 48 > maxW { keep -= 1 }
+            while keep > 8, width(String(chars.prefix(keep / 2)) + "…" + String(chars.suffix(keep - keep / 2))) > maxW { keep -= 1 }
             detail = String(chars.prefix(keep / 2)) + "…" + String(chars.suffix(keep - keep / 2))
         }
-        let w = min(maxW, max(120, width(detail) + 48))
+        let w = max(width(detail), 50)
         let left = x < half
         let minX = left ? 6 : half + 6
-        let maxX = left ? half - 6 - w : layout.width - 6 - w
-        let rect = CGRect(x: min(max(x - w / 2, minX), max(minX, maxX)), y: LadderLayout.boxTop, width: w, height: LadderLayout.boxHeight)
-        let box = Path(roundedRect: rect, cornerRadius: 8)
-        ctx.fill(box, with: .color(Theme.panel))
-        ctx.fill(box, with: .color(Theme.well))
-        ctx.stroke(box, with: .color(Theme.hairline), lineWidth: 0.75)
-        ctx.draw(Text(Image(systemName: symbol)).font(.system(size: 15)).foregroundStyle(Theme.dimText),
-                 at: CGPoint(x: rect.minX + 20, y: rect.midY), anchor: .center)
-        ctx.draw(Text(title).font(.system(size: 11.5, weight: .semibold)).foregroundStyle(Theme.text),
-                 at: CGPoint(x: rect.minX + 36, y: rect.midY - 8), anchor: .leading)
-        ctx.draw(Text(detail).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(Theme.text2),
-                 at: CGPoint(x: rect.minX + 36, y: rect.midY + 8), anchor: .leading)
+        let maxX = left ? half - 6 : layout.width - 6
+        let cx = min(max(x, minX + w / 2), max(minX + w / 2, maxX - w / 2))
+        let top = LadderLayout.boxTop
+        ctx.draw(Text(title).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.text),
+                 at: CGPoint(x: cx, y: top + 10), anchor: .center)
+        ctx.draw(Text(detail).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(Theme.faintText),
+                 at: CGPoint(x: cx, y: top + 27), anchor: .center)
     }
 }
 
@@ -1477,7 +1441,7 @@ struct FlowTimeline: View {
 
     nonisolated static func durationText(_ s: Double) -> String {
         if s < 60 { return TCPFlowAnalyzer.msText(s) }
-        let m = Int(s) / 60, sec = Int(s) % 60
+        let whole = Int(saturating: s), m = whole / 60, sec = whole % 60
         if m < 60 { return "\(m) min \(sec) s" }
         return "\(m / 60) h \(m % 60) min"
     }

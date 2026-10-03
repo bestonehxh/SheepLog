@@ -163,7 +163,7 @@ nonisolated struct TroubleshootFilter: Equatable, Sendable {
         let bad = shown.filter { $0.severity == .bad }.count
         let warn = shown.filter { $0.severity == .warn }.count
         guard bad + warn > 0 else {
-            guard range != nil else { return "Nothing wrong that SheepLog can see." }
+            guard range != nil else { return "Nothing wrong that UncleSpy can see." }
             let outside = findings.filter { $0.severity >= .warn }.count
             return "Nothing wrong\(span)" + (outside > 0 ? " (\(Format.count(outside)) problem\(outside == 1 ? "" : "s") and warning\(outside == 1 ? "" : "s") outside it)." : ".")
         }

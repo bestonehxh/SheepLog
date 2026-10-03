@@ -2,19 +2,13 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-// MARK: - Grouped lists (System Settings shape, shared with SheepRadius)
+// MARK: - Quiet list rows (LabDC look: no cards, hairline rules, words for state)
 
 struct GroupedList<Content: View>: View {
     @ViewBuilder var content: Content
 
     var body: some View {
         _VariadicView.Tree(SeparatedRows()) { content }
-            .background(RoundedRectangle(cornerRadius: Metrics.card).fill(Theme.panel))
-            .clipShape(RoundedRectangle(cornerRadius: Metrics.card))
-            .overlay {
-                RoundedRectangle(cornerRadius: Metrics.card)
-                    .strokeBorder(Theme.hairline, lineWidth: 0.5)
-            }
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
@@ -26,7 +20,7 @@ private struct SeparatedRows: _VariadicView_MultiViewRoot {
             ForEach(children) { child in
                 child
                 if child.id != last {
-                    Rectangle().fill(Theme.hairlineSoft).frame(height: 0.5)
+                    Rectangle().fill(Theme.hairline).frame(height: 1)
                 }
             }
         }
@@ -51,13 +45,15 @@ struct PaneGroup<Content: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Text(title).groupTitle()
-                Spacer(minLength: 0)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(title)
+                    .font(Theme.emphasis)
+                    .foregroundStyle(Theme.text)
+                    .accessibilityAddTraits(.isHeader)
+                Spacer(minLength: 12)
                 if let accessory { accessory.controlSize(.small) }
             }
-            .padding(.horizontal, 2)
             GroupedList { content }
         }
     }
@@ -81,19 +77,17 @@ struct KeyValueRow<Value: View>: View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             HStack(spacing: 4) {
                 Text(key)
-                    .font(.system(size: 12))
+                    .font(Theme.body)
                     .foregroundStyle(Theme.text2)
                     .fixedSize(horizontal: false, vertical: true)
-                if let help { HelpDot(text: help) }
-                Spacer(minLength: 0)
             }
             .frame(width: keyWidth, alignment: .leading)
             value
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
+        .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .help(help ?? "")
     }
 }
 
@@ -104,17 +98,13 @@ struct NoteRow: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
-            if let systemImage {
-                Image(systemName: systemImage).font(.system(size: 11)).foregroundStyle(tint)
-            }
             Text(text)
-                .font(.system(size: 11.5))
+                .font(Theme.caption)
                 .foregroundStyle(tint == Theme.faintText ? Theme.faintText : Theme.text2)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: Metrics.prose, alignment: .leading)
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 14)
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -125,22 +115,17 @@ struct NoteRow: View {
 nonisolated enum CopyFeedback {
     static let hold: Double = 1.2
     static let word = "Copied"
-    static let idleSymbol = "doc.on.doc"
-    static let copiedSymbol = "checkmark"
-    static func symbol(copied: Bool) -> String { copied ? copiedSymbol : idleSymbol }
     static func title(_ idle: String?, copied: Bool) -> String? {
         guard let idle else { return nil }
         return copied ? word : idle
     }
 }
 
+/// A Copy link that says "Copied" for a moment (the word, not an icon).
 struct CopyButton: View {
     private let value: () -> String
     private let title: String?
     private let bordered: Bool
-    private let iconSize: CGFloat?
-    private let help: String
-
     @State private var copied = false
     @State private var revert: Task<Void, Never>?
 
@@ -149,29 +134,18 @@ struct CopyButton: View {
         self.value = value
         self.title = title
         self.bordered = bordered
-        self.iconSize = iconSize
         self.help = help
     }
 
-    @ViewBuilder
-    var body: some View {
-        if bordered {
-            Button(action: copy) { label }.buttonStyle(.bordered).help(help)
-        } else {
-            Button(action: copy) { label }.buttonStyle(.borderless).help(help)
-        }
-    }
+    private let help: String
 
-    private var label: some View {
-        HStack(spacing: 4) {
-            Image(systemName: CopyFeedback.symbol(copied: copied))
-                .font(iconSize.map { Font.system(size: $0) })
-                .frame(width: iconSize.map { $0 + 4 })
-            if let title = CopyFeedback.title(title, copied: copied) {
-                Text(title)
-            }
+    var body: some View {
+        Button(action: copy) {
+            Text(CopyFeedback.title(title ?? (bordered ? "Copy" : nil), copied: copied) ?? "Copy")
+                .frame(minWidth: title == nil ? 40 : 0, alignment: .trailing)
         }
-        .foregroundStyle(copied ? Theme.accent : (bordered ? Color.primary : Theme.dimText))
+        .buttonStyle(.quietLink)
+        .help(help)
         .accessibilityLabel(copied ? CopyFeedback.word : (title ?? "Copy"))
     }
 
@@ -190,6 +164,7 @@ struct CopyButton: View {
 
 // MARK: - Values
 
+/// State as words (no capsule, no colour but the red): "ERR", "3 warnings", "Running".
 struct StatusPill: View {
     enum Kind { case ok, bad, warn, neutral, accent }
     let text: String
@@ -197,37 +172,22 @@ struct StatusPill: View {
 
     var body: some View {
         Text(text)
-            .font(.system(size: 11, weight: .medium))
+            .font(Theme.detail)
             .foregroundStyle(foreground)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 2)
-            .background(Capsule().fill(background))
             .fixedSize()
+            .accessibilityLabel(text)
     }
 
     private var foreground: Color {
         switch kind {
-        case .ok: Theme.ok
-        case .bad: Theme.err
-        case .warn: Theme.warn
-        case .neutral: Theme.dimText
-        case .accent: Theme.accent
-        }
-    }
-
-    private var background: Color {
-        switch kind {
-        case .ok: Theme.ok.opacity(0.13)
-        case .bad: Theme.err.opacity(0.13)
-        case .warn: Theme.warn.opacity(0.13)
-        case .neutral: Theme.control
-        case .accent: Theme.accent.opacity(0.13)
+        case .ok, .neutral: Theme.text2
+        case .bad, .warn: Theme.err
+        case .accent: Theme.text
         }
     }
 }
 
-/// **One panel, several cells with hairlines between them** — the Status strip SheepRadius
-/// draws under its heading (caption / big value / one line under it, per cell).
+/// **One row of quiet numbers**: caption above, value under it, hairlines between cells.
 struct StatCell: Identifiable, Sendable {
     var id: String { caption }
     let caption: String
@@ -243,36 +203,34 @@ struct StatStrip: View {
     let cells: [StatCell]
 
     var body: some View {
-        HStack(spacing: 0) {
+        HStack(alignment: .top, spacing: 0) {
             ForEach(Array(cells.enumerated()), id: \.element.id) { i, c in
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(c.caption)
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(Theme.faintText)
+                VStack(alignment: .leading, spacing: 6) {
                     Text(c.value)
-                        .font(.system(size: c.mono ? 16 : 19, weight: .semibold,
-                                      design: c.mono ? .monospaced : .default))
+                        .font(Theme.metric)
+                        .tracking(-0.5)
                         .foregroundStyle(c.tint)
                         .lineLimit(1)
-                        .minimumScaleFactor(0.7)
+                        .minimumScaleFactor(0.6)
                         .textSelection(.enabled)
+                    Text(c.caption)
+                        .font(Theme.caption)
+                        .foregroundStyle(Theme.text2)
                     Text(c.detail.isEmpty ? " " : c.detail)
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(Theme.dimText)
+                        .font(Theme.caption)
+                        .foregroundStyle(Theme.faintText)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
                 .frame(maxWidth: .infinity, alignment: .topLeading)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 12)
                 .contentShape(Rectangle())
                 .help(c.help.isEmpty ? "\(c.caption): \(c.value)\(c.detail.isEmpty ? "" : " — \(c.detail)")" : c.help)
                 if i < cells.count - 1 {
-                    Rectangle().fill(Theme.hairlineSoft).frame(width: 0.5).padding(.vertical, 10)
+                    Rectangle().fill(Theme.hairline).frame(width: 1).padding(.horizontal, 14).padding(.vertical, 4)
                 }
             }
         }
-        .panelCard()
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -303,30 +261,17 @@ extension View {
     func valueNumber(_ width: CGFloat = Metrics.numberField) -> some View {
         frame(width: width, alignment: .leading)
     }
+    /// Quiet: no card — tables and lists sit flat on the page (the modifier stays for the call sites).
     func tablePanel(minHeight: CGFloat = 120) -> some View {
         frame(minHeight: minHeight)
-            .background(RoundedRectangle(cornerRadius: Metrics.card).fill(Theme.panel))
-            .clipShape(RoundedRectangle(cornerRadius: Metrics.card))
-            .overlay {
-                RoundedRectangle(cornerRadius: Metrics.card)
-                    .strokeBorder(Theme.hairline, lineWidth: 0.5)
-            }
     }
-    func panelCard(cornerRadius: CGFloat = Metrics.card) -> some View {
-        background(RoundedRectangle(cornerRadius: cornerRadius).fill(Theme.panel))
-            .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
-            .overlay {
-                RoundedRectangle(cornerRadius: cornerRadius)
-                    .strokeBorder(Theme.hairline, lineWidth: 0.5)
-            }
-    }
+    func panelCard(cornerRadius: CGFloat = Metrics.card) -> some View { self }
     func groupTitle() -> some View {
-        font(.system(size: 11.5, weight: .semibold))
-            .kerning(0.2)
-            .foregroundStyle(Theme.faintText)
+        font(Theme.emphasis)
+            .foregroundStyle(Theme.text)
     }
     func hint() -> some View {
-        font(.system(size: 11.5))
+        font(Theme.caption)
             .foregroundStyle(Theme.faintText)
             .lineSpacing(2)
             .frame(maxWidth: Metrics.prose, alignment: .leading)
@@ -341,76 +286,123 @@ struct PaneBody<Content: View>: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: spacing) { content }
-                .padding(.vertical, 18)
+                .padding(.top, 18)
+                .padding(.bottom, 24)
                 .paneColumn(maxWidth: maxWidth)
         }
     }
 }
 
-/// Every pane's control strip under its header. The hairline under it is the only rule in a
-/// pane that is not part of a group.
+/// A pane's tool row under its header (LabDC's "Search … · Include history · 2 leases  Refresh"):
+/// the filter field first, switches with their words, then a `Spacer` and the counts / word
+/// links at the right. No band and no rule of its own — the table's header line follows it.
 struct PaneStrip<Content: View>: View {
     var maxWidth: CGFloat?
     @ViewBuilder var content: Content
 
     var body: some View {
-        HStack(spacing: 8) { content }
+        HStack(alignment: .center, spacing: 20) { content }
             .paneColumn(maxWidth: maxWidth ?? .infinity)
-            .frame(height: 48)
-            .overlay(alignment: .bottom) {
-                Rectangle().fill(Theme.hairline).frame(height: 0.5)
-            }
+            .padding(.top, 2)
+            .padding(.bottom, 14)
     }
 }
 
-/// An eyebrow, a heading that states the state, a subtitle.
+/// A page header the LabDC way. Line 1: the **page's name** (28 pt light) and, on its baseline
+/// at the right, the page's tabs — or, on a page without tabs, the actions. Line 2: the state
+/// as a sentence and the facts after it, both muted (LabDC: "Running   relay-only · 2 scopes ·
+/// 2 leases"; red when `problem`), and on a page with tabs the actions at the right.
 struct PaneHeader<Actions: View>: View {
-    let eyebrow: String
-    let heading: String
-    var subtitle: String = ""
-    @ViewBuilder var actions: Actions
+    private let title: String
+    private let tabs: AnyView?
+    var status: String = ""
+    var detail: String = ""
+    var problem = false
+    private let actions: Actions
+
+    /// A pane of the app: the title and the tabs are its page's (`Page.of(pane)`).
+    init(pane: MainPane, status: String = "", detail: String = "", problem: Bool = false,
+         @ViewBuilder actions: () -> Actions) {
+        let page = Page.of(pane)
+        title = page.title
+        tabs = page.panes.count > 1 ? AnyView(PageTabs(page: page, current: pane)) : nil
+        self.status = status
+        self.detail = detail
+        self.problem = problem
+        self.actions = actions()
+    }
+
+    /// A page with tabs of its own (Settings): the caller holds the selection.
+    init<Tab: Hashable>(title: String, tabs: [(Tab, String)], selection: Binding<Tab>, status: String = "",
+                        detail: String = "", problem: Bool = false, @ViewBuilder actions: () -> Actions) {
+        self.title = title
+        self.tabs = AnyView(QuietTabs(items: tabs, selection: selection))
+        self.status = status
+        self.detail = detail
+        self.problem = problem
+        self.actions = actions()
+    }
+
+    private var hasActions: Bool { Actions.self != EmptyView.self }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 16) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(eyebrow.uppercased())
-                    .font(.system(size: 11, weight: .semibold))
-                    .kerning(1.3)
-                    .foregroundStyle(Theme.faintText)
-                Text(heading)
-                    .font(.system(size: 29, weight: .semibold))
-                    .kerning(-0.3)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .firstTextBaseline, spacing: 24) {
+                Text(title)
+                    .font(Theme.pageTitle)
+                    .tracking(-0.5)
                     .foregroundStyle(Theme.text)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: 620, alignment: .leading)
-                    .textSelection(.enabled)
-                    .padding(.top, 1)
-                if !subtitle.isEmpty {
-                    Text(subtitle)
-                        .font(.system(size: 12.5))
-                        .foregroundStyle(Theme.text2)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: 720, alignment: .leading)
-                        .padding(.top, 2)
-                }
+                    .lineLimit(1)
+                    .accessibilityAddTraits(.isHeader)
+                Spacer(minLength: 16)
+                if let tabs { tabs } else { HStack(spacing: 24) { actions } }
             }
-            Spacer(minLength: 12)
-            HStack(spacing: 8) { actions }
-                .controlSize(.small)
-                .fixedSize(horizontal: true, vertical: false)
-                .padding(.top, 8)
+            if !status.isEmpty || !detail.isEmpty || (tabs != nil && hasActions) {
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    if !status.isEmpty {
+                        Text(status)
+                            .font(Theme.body)
+                            .foregroundStyle(problem ? Theme.err : Theme.text2)
+                            .lineLimit(1)
+                            .textSelection(.enabled)
+                            .layoutPriority(1)
+                    }
+                    if !detail.isEmpty {
+                        Text(detail)
+                            .font(Theme.body)
+                            .foregroundStyle(Theme.text2)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .textSelection(.enabled)
+                    }
+                    Spacer(minLength: 16)
+                    if tabs != nil { HStack(spacing: 24) { actions } }
+                }
+                .padding(.top, 12)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
 extension PaneHeader where Actions == EmptyView {
-    init(eyebrow: String, heading: String, subtitle: String = "") {
-        self.init(eyebrow: eyebrow, heading: heading, subtitle: subtitle) { EmptyView() }
+    init(pane: MainPane, status: String = "", detail: String = "", problem: Bool = false) {
+        self.init(pane: pane, status: status, detail: detail, problem: problem) { EmptyView() }
     }
 }
 
-/// A titled section of a pane (a larger title and a note beside it, then the content).
+/// The page's panes as tabs; a click switches the pane.
+private struct PageTabs: View {
+    let page: Page
+    let current: MainPane
+
+    var body: some View {
+        QuietTabs(items: page.panes.map { ($0, Page.tabTitle($0)) },
+                  selection: Binding(get: { current }, set: { AppModel.shared.mainPane = $0 }))
+    }
+}
+
+/// A titled section of a pane (a 13 pt semibold title and a note beside it, then the content).
 struct PaneSection<Content: View>: View {
     let title: String
     var note: String = ""
@@ -426,23 +418,22 @@ struct PaneSection<Content: View>: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text(title)
-                    .font(.system(size: 16.5, weight: .semibold))
+                    .font(Theme.emphasis)
                     .foregroundStyle(Theme.text)
                 if !note.isEmpty {
                     Text(note)
-                        .font(.system(size: 12))
+                        .font(Theme.caption)
                         .foregroundStyle(Theme.faintText)
                         .lineLimit(1)
                 }
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 2)
             content
         }
     }
 }
 
-/// A read-only fact: key left, value right, copy at the end.
+/// A read-only fact: key left, value right, Copy at the end.
 struct FactRow: View {
     let key: String
     let value: String
@@ -458,14 +449,11 @@ struct FactRow: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 16) {
-            HStack(spacing: 4) {
-                Text(key)
-                    .font(.system(size: 12))
-                    .foregroundStyle(Theme.text2)
-                    .fixedSize(horizontal: false, vertical: true)
-                if let help { HelpDot(text: help) }
-            }
-            .frame(width: keyWidth, alignment: .leading)
+            Text(key)
+                .font(Theme.body)
+                .foregroundStyle(Theme.text2)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(width: keyWidth, alignment: .leading)
             if keyWidth == nil { Spacer(minLength: 12) }
             Text(value)
                 .font(.system(size: 12, design: mono ? .monospaced : .default))
@@ -476,38 +464,12 @@ struct FactRow: View {
                 .truncationMode(.middle)
                 // Prose values wrap (a MIB enum list cut to one line reads "test…lowerLayerDown(7)").
                 .fixedSize(horizontal: false, vertical: !mono || monoLines > 1)
-                .help(value)
+                .help(help ?? value)
             if copyable { CopyButton(value: copyValue ?? value, help: "Copy \(copyValue ?? value)") }
         }
-        .padding(.horizontal, 14)
         .padding(.vertical, 9)
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-struct HelpDot: View {
-    let text: String
-    @State private var showing = false
-
-    var body: some View {
-        Button { showing = true } label: {
-            Image(systemName: "questionmark.circle")
-                .font(.system(size: 11.5))
-                .foregroundStyle(Theme.faintText)
-        }
-        .buttonStyle(.plain)
-        .help(text)
-        .accessibilityLabel("Help")
-        .accessibilityHint(text)
-        .popover(isPresented: $showing, arrowEdge: .bottom) {
-            Text(text)
-                .font(.system(size: 12))
-                .lineSpacing(3)
-                .textSelection(.enabled)
-                .multilineTextAlignment(.leading)
-                .frame(width: 340, alignment: .leading)
-                .padding(16)
-        }
+        .help(help ?? "")
     }
 }
 
@@ -516,7 +478,7 @@ struct TableEmptyOverlay: View {
 
     var body: some View {
         Text(text)
-            .font(.system(size: 12))
+            .font(Theme.body)
             .foregroundStyle(Theme.faintText)
             .multilineTextAlignment(.center)
             .frame(maxWidth: Metrics.prose)
@@ -546,8 +508,8 @@ extension View {
     }
 }
 
-/// The filter box of Log, Packets and TCP flows (one look for the three): panel fill, hairline
-/// (orange when the text does not parse), a clear button, Esc clears, Return applies.
+/// The filter box of Log, Packets and TCP flows (one look for the three): Quiet's field is the
+/// text over a single hairline — the line turns the red when the text does not parse.
 struct FilterField: View {
     @Binding var text: String
     let prompt: String
@@ -559,35 +521,31 @@ struct FilterField: View {
     var onClear: () -> Void = {}
 
     var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "line.3.horizontal.decrease")
-                .font(.system(size: 11))
-                .foregroundStyle(Theme.faintText)
-                .accessibilityHidden(true)
-            TextField("Filter", text: $text, prompt: Text(prompt).foregroundStyle(Theme.faintText))
-                .labelsHidden()
-                .textFieldStyle(.plain)
-                .font(.system(size: 12, design: mono ? .monospaced : .default))
-                .focused(focus)
-                .onSubmit(onSubmit)
-                .onExitCommand { clear() }
-                .accessibilityLabel("Filter")
-            if !text.isEmpty {
-                Button(action: clear) {
-                    Image(systemName: "xmark.circle.fill").font(.system(size: 11))
+        VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                TextField("Filter", text: $text, prompt: Text(prompt).foregroundStyle(Theme.faintText))
+                    .labelsHidden()
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12, design: mono ? .monospaced : .default))
+                    .foregroundStyle(Theme.text)
+                    .focused(focus)
+                    .onSubmit(onSubmit)
+                    .onExitCommand { clear() }
+                    .accessibilityLabel("Filter")
+                if !text.isEmpty {
+                    Button(action: clear) {
+                        Text("Clear")
+                            .font(Theme.caption)
+                    }
+                    .buttonStyle(.quietLink)
+                    .help("Clear the filter (Esc)")
+                    .accessibilityLabel("Clear the filter")
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(Theme.faintText)
-                .help("Clear the filter (Esc)")
-                .accessibilityLabel("Clear the filter")
             }
-        }
-        .padding(.horizontal, 8)
-        .frame(height: 26)
-        .background(RoundedRectangle(cornerRadius: 6).fill(Theme.panel))
-        .overlay {
-            RoundedRectangle(cornerRadius: 6)
-                .strokeBorder(error == nil ? Theme.hairline : Theme.err, lineWidth: error == nil ? 0.5 : 1)
+            .padding(.vertical, 5)
+            Rectangle()
+                .fill(error == nil ? Theme.control : Theme.err)
+                .frame(height: 1)
         }
         .help(error ?? help)
     }
@@ -637,27 +595,22 @@ struct ErrorSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 18))
-                    .foregroundStyle(Theme.warn)
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Something went wrong")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(Theme.text)
-                    Text(message)
-                        .font(.system(size: 12))
-                        .foregroundStyle(Theme.text2)
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Something went wrong")
+                    .font(Theme.emphasis)
+                    .foregroundStyle(Theme.text)
+                Text(message)
+                    .font(Theme.body)
+                    .foregroundStyle(Theme.text2)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if let detail, !detail.isEmpty, detail != message {
                 DisclosureGroup("Details", isExpanded: $showDetail) {
                     ScrollView {
                         Text(detail)
                             .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(Theme.dimText)
+                            .foregroundStyle(Theme.text2)
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(8)
@@ -665,8 +618,8 @@ struct ErrorSheet: View {
                     .frame(height: 180)
                     .background(RoundedRectangle(cornerRadius: Metrics.field).fill(Theme.well))
                 }
-                .font(.system(size: 12))
-                .tint(Theme.accent)
+                .font(Theme.body)
+                .tint(Theme.text)
             }
             HStack {
                 if let detail, !detail.isEmpty {
@@ -674,19 +627,103 @@ struct ErrorSheet: View {
                 }
                 Spacer(minLength: 0)
                 Button("OK", action: dismiss)
-                    .buttonStyle(.borderedProminent)
-                    .tint(Theme.accent)
+                    .buttonStyle(.quietPrimary)
                     .keyboardShortcut(.defaultAction)
             }
         }
         .controlSize(.small)
-        .padding(18)
+        .padding(24)
         .frame(width: 520)
-        // An explicit ground: the sheet's own material is drawn by the window, not the content
-        // view, so a dark-mode capture would be white-on-white ("Something went wrong" invisible).
         .background(Theme.panel)
         .sheetCancel(dismiss)
     }
+}
+
+// MARK: - Quiet controls (LabDC's styles)
+
+/// The default action: a word with a thin underline ("Pause", "Export…", "Copy").
+struct QuietLinkStyle: ButtonStyle {
+    var role: ButtonRole?
+    var size: CGFloat = 13
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        let color = role == .destructive ? Theme.err : Theme.text
+        configuration.label
+            .font(.system(size: size))
+            .foregroundStyle(color)
+            .underline(true, color: color.opacity(0.3))
+            .opacity(isEnabled ? (configuration.isPressed ? 0.55 : 1) : 0.35)
+            .contentShape(Rectangle())
+    }
+}
+
+/// The single strong action of a screen: ink fill, background text.
+struct QuietPrimaryStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 13, weight: .medium))
+            .foregroundStyle(Theme.content)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 8)
+            .background(Theme.text, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .opacity(isEnabled ? (configuration.isPressed ? 0.75 : 1) : 0.3)
+            .contentShape(Rectangle())
+    }
+}
+
+extension ButtonStyle where Self == QuietLinkStyle {
+    static var quietLink: QuietLinkStyle { QuietLinkStyle() }
+    static var quietDestructive: QuietLinkStyle { QuietLinkStyle(role: .destructive) }
+}
+
+extension ButtonStyle where Self == QuietPrimaryStyle {
+    static var quietPrimary: QuietPrimaryStyle { QuietPrimaryStyle() }
+}
+
+/// The monochrome switch: ink when on, the control grey when off.
+struct QuietToggleStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Button { configuration.isOn.toggle() } label: {
+            HStack(spacing: 10) {
+                configuration.label
+                Spacer(minLength: 0)
+                ZStack(alignment: configuration.isOn ? .trailing : .leading) {
+                    Capsule().fill(configuration.isOn ? Theme.text : Theme.control).frame(width: 34, height: 20)
+                    Circle().fill(Theme.content).frame(width: 16, height: 16).padding(2)
+                }
+                .animation(.easeOut(duration: 0.15), value: configuration.isOn)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityValue(configuration.isOn ? "On" : "Off")
+    }
+}
+
+extension ToggleStyle where Self == QuietToggleStyle {
+    static var quiet: QuietToggleStyle { QuietToggleStyle() }
+}
+
+/// A text field with only a line under it (search, wizard fields).
+struct QuietFieldStyle: TextFieldStyle {
+    var size: CGFloat = 13
+
+    func _body(configuration: TextField<Self._Label>) -> some View {
+        VStack(spacing: 4) {
+            configuration
+                .textFieldStyle(.plain)
+                .font(.system(size: size))
+                .foregroundStyle(Theme.text)
+            Rectangle().fill(Theme.control).frame(height: 1)
+        }
+    }
+}
+
+extension TextFieldStyle where Self == QuietFieldStyle {
+    static var quiet: QuietFieldStyle { QuietFieldStyle() }
 }
 
 // MARK: - Small helpers
@@ -734,7 +771,7 @@ nonisolated enum Format {
     }
 
     /// Gregorian + POSIX locale, so a Thai-locale Mac does not print Buddhist-era years. Every
-    /// date SheepLog shows or puts in a file name comes from one of these.
+    /// date UncleSpy shows or puts in a file name comes from one of these.
     static func gregorian(_ format: String) -> DateFormatter {
         let f = DateFormatter()
         f.calendar = Calendar(identifier: .gregorian)
@@ -793,8 +830,6 @@ nonisolated enum Format {
     }
 }
 
-
-
 extension Calendar {
     /// Gregorian for every date arithmetic that reaches the screen or a file (a Thai-locale Mac's
     /// current calendar is Buddhist).
@@ -805,9 +840,8 @@ extension Calendar {
     }()
 }
 
-
-/// An `NSTableRowView` whose selection is the family's soft accent tint instead of the
-/// system's full-strength bar, with the cells keeping their own text colours (no white-on-plum).
+/// The selected table row: Quiet's quiet fill with a 2 pt ink edge on the left, the cells keeping
+/// their own text colours.
 class SoftSelectionRowView: NSTableRowView {
     override var isEmphasized: Bool {
         get { false }
@@ -817,6 +851,8 @@ class SoftSelectionRowView: NSTableRowView {
     override func drawSelection(in dirtyRect: NSRect) {
         guard selectionHighlightStyle != .none, isSelected else { return }
         Theme.nsSelectedAccent.setFill()
-        NSBezierPath(roundedRect: bounds.insetBy(dx: 4, dy: 0), xRadius: Metrics.row, yRadius: Metrics.row).fill()
+        NSBezierPath(rect: bounds).fill()
+        Theme.nsText.setFill()
+        NSBezierPath(rect: NSRect(x: 0, y: 0, width: 2, height: bounds.height)).fill()
     }
 }

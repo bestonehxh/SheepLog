@@ -47,7 +47,7 @@ nonisolated enum AuthFindings {
             // lists (from 51 frames the range showed every other client's auth traffic of those
             // seconds — the round-11 fix of the pane, not made here).
             let query = AuthView.packetFilter(s.packetIDs)
-            out.append(Finding(id: "auth|\(s.client)|\(Int(s.firstTime.timeIntervalSince1970))",
+            out.append(Finding(id: "auth|\(s.client)|\(Int(saturating: s.firstTime.timeIntervalSince1970))",
                                rule: "auth.session", severity: severity, category: .auth, source: .auth,
                                title: title, detail: detail,
                                evidence: [Evidence(kind: .packets, label: "\(s.packetIDs.count) packets", ids: s.packetIDs, query: query)],

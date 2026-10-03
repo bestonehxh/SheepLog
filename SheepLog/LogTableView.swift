@@ -29,7 +29,7 @@ struct LogTableView: NSViewRepresentable {
         table.allowsMultipleSelection = true
         table.allowsColumnReordering = false
         table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
-        table.backgroundColor = Theme.nsDynamic(light: 0xFFFFFF, dark: 0x2A2A2E)
+        table.backgroundColor = Theme.nsContent
         table.focusRingType = .none
 
         for spec in LogColumn.all {
@@ -348,8 +348,8 @@ struct LogTableView: NSViewRepresentable {
         }
 
         // One dynamic colour each, not a new NSColor per cell per row.
-        private static let timeColor = Theme.nsDynamic(light: 0x86868B, dark: 0x8E8E93)
-        private static let textColor = Theme.nsDynamic(light: 0x3A3A3C, dark: 0xD1D1D6)
+        private static let timeColor = Theme.nsFaint
+        private static let textColor = Theme.nsText
         private static let vendorColors: [Vendor: NSColor] =
             Dictionary(uniqueKeysWithValues: Vendor.allCases.map { ($0, LogColors.nsVendorColor($0)) })
 
@@ -530,33 +530,22 @@ extension LogColumn {
 
 /// Mirrors `Theme.vendorColor` / `Theme.severityTint` as `NSColor` for the AppKit cells.
 enum LogColors {
+    /// Quiet: vendors read as words — one muted tone for every vendor.
     static func nsVendorColor(_ v: Vendor) -> NSColor {
-        switch v {
-        case .arubaCX, .arubaOS, .arubaSwitch, .clearPass: return dynamic(0xE0562A, 0xF07A52)
-        case .huawei: return dynamic(0xCF0A2C, 0xF04A64)
-        case .checkPoint: return dynamic(0xE8318A, 0xF56AAE)
-        case .paloAlto: return dynamic(0xFA582D, 0xFF8A5C)
-        case .fortigate: return dynamic(0xC4232B, 0xF05A62)
-        case .snmpTrap: return dynamic(0x5B7BD5, 0x8FA8F0)
-        case .unknown: return dynamic(0x8E8E93, 0x8E8E93)
-        }
+        Theme.nsMuted
     }
 
-    /// Error tint for emerg…err, warning tint for warning, nil for the rest (as `Theme.severityTint`).
-    /// One instance each, not a new dynamic colour per pill per draw.
+    /// The red for emerg…err, nothing for the rest (as `Theme.severityTint`: the word WARN
+    /// carries a warning). One instance each, not a new dynamic colour per pill per draw.
     static func nsSeverityTint(_ s: Severity) -> NSColor? {
         switch s {
         case .emergency, .alert, .critical, .error: return errTint
-        case .warning: return warnTint
         default: return nil
         }
     }
 
-    private static let errTint = dynamic(0xB8451F, 0xFF8A5C)
-    private static let warnTint = dynamic(0xA85B00, 0xF0A030)
-    static let pillText = dynamic(0x6E6E73, 0xAEAEB2)
-
-    private static func dynamic(_ light: UInt32, _ dark: UInt32) -> NSColor { Theme.nsDynamic(light: light, dark: dark) }
+    private static let errTint = Theme.nsErr
+    static let pillText = Theme.nsMuted
 }
 
 // MARK: - Cells
@@ -616,24 +605,12 @@ final class SeverityPillCell: NSView {
     override func accessibilityLabel() -> String? { severity.name }
 
     override func draw(_ dirtyRect: NSRect) {
+        // Quiet: the severity is the word, no capsule — the red only for real problems.
         let text = severity.label as NSString
         let tint = LogColors.nsSeverityTint(severity)
         let fg = tint ?? LogColors.pillText
         let attrs: [NSAttributedString.Key: Any] = [.font: Self.font, .foregroundColor: fg]
-        let size = text.size(withAttributes: attrs)
-        let w = ceil(size.width) + 12
-        let h: CGFloat = 16
-        let rect = NSRect(x: 1, y: (bounds.height - h) / 2, width: min(w, bounds.width - 2), height: h)
-        let bg: NSColor
-        if let tint {
-            bg = tint.withAlphaComponent(0.14)
-        } else {
-            let isDark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-            bg = isDark ? NSColor.white.withAlphaComponent(0.12) : NSColor.black.withAlphaComponent(0.055)
-        }
-        bg.setFill()
-        NSBezierPath(roundedRect: rect, xRadius: h / 2, yRadius: h / 2).fill()
-        text.draw(at: NSPoint(x: rect.minX + (rect.width - size.width) / 2, y: rect.minY + (h - size.height) / 2),
+        text.draw(at: NSPoint(x: 1, y: (bounds.height - text.size(withAttributes: attrs).height) / 2),
                   withAttributes: attrs)
     }
 }

@@ -1,61 +1,76 @@
 import AppKit
 import SwiftUI
 
-/// Sheep-family tokens, lifted from SheepRadius / SheepDrop (design v2) so the apps read as
-/// siblings. Only the accent differs per app: SheepLog is plum (icon tile #B8407E → #933265).
+/// The family's "Quiet" look (LabDC, formerly SheepAuth — owner, 27 Sep 2026): simple, refined,
+/// monochrome, no icons. Hierarchy comes from type size, weight and whitespace; state is written
+/// as words; the only colour is a muted red for what went wrong. Warm ivory page / near-black in
+/// dark mode, the sidebar one shade off the page. Every page takes its values from here.
 enum Theme {
     // Surfaces
-    static let content = dynamic(light: 0xF7F7F8, dark: 0x232326)
-    static let panel = dynamic(light: 0xFFFFFF, dark: 0x2A2A2E)
-    static let sidebar = dynamic(light: 0xF6F6F8, dark: 0x2C2C2E)
-    static let well = dynamicAlpha(light: (0x000000, 0.045), dark: (0xFFFFFF, 0.08))
+    /// The page ground.
+    static let content = dynamic(light: 0xFBFAF7, dark: 0x141413)
+    /// Cards are gone in Quiet: tables and lists sit flat on the page (the symbol stays for the
+    /// call sites that asked for a panel ground).
+    static let panel = dynamic(light: 0xFBFAF7, dark: 0x141413)
+    static let sidebar = dynamic(light: 0xF3F1EC, dark: 0x1B1B1A)
+    /// Inset fill for code and copyable values.
+    static let well = dynamic(light: 0xF1EFEA, dark: 0x1E1E1D)
 
     // Text
-    static let text = dynamic(light: 0x1D1D1F, dark: 0xF5F5F7)
-    static let text2 = dynamic(light: 0x3A3A3C, dark: 0xD1D1D6)
-    static let dimText = dynamic(light: 0x6E6E73, dark: 0xAEAEB2)
-    static let faintText = dynamic(light: 0x86868B, dark: 0x8E8E93)
+    static let text = dynamic(light: 0x141414, dark: 0xF1F0EC)
+    static let text2 = dynamic(light: 0x8A8984, dark: 0x7B7A76)
+    static let dimText = dynamic(light: 0x8A8984, dark: 0x7B7A76)
+    /// Darker than LabDC's own faint (0xA3A29C): it must hold 3:1 on the sidebar (round 6's
+    /// contrast test), which the original misses at 2.27:1.
+    static let faintText = dynamic(light: 0x888780, dark: 0x747376)
 
     // Lines / fills
-    static let hairline = dynamicAlpha(light: (0x000000, 0.10), dark: (0xFFFFFF, 0.14))
-    static let hairlineSoft = dynamicAlpha(light: (0x000000, 0.07), dark: (0xFFFFFF, 0.10))
-    static let hover = dynamicAlpha(light: (0x000000, 0.04), dark: (0xFFFFFF, 0.07))
-    static let control = dynamicAlpha(light: (0x000000, 0.055), dark: (0xFFFFFF, 0.12))
-    static let selectedAccent = dynamicAlpha(light: (0xB8407E, 0.13), dark: (0xE87AAD, 0.18))
+    static let hairline = dynamic(light: 0xE6E4DE, dark: 0x262624)
+    static let hairlineSoft = dynamic(light: 0xE6E4DE, dark: 0x262624)
+    static let hover = dynamicAlpha(light: (0x141414, 0.04), dark: (0xF1F0EC, 0.05))
+    /// Field borders and the inactive switch track.
+    static let control = dynamic(light: 0xD9D7D0, dark: 0x3A3A38)
+    /// The selected row of a table (with a 2 pt ink edge on the left).
+    static let selectedAccent = dynamic(light: 0xEFEDE7, dark: 0x20201F)
 
-    // Accent + status
-    static let accent = dynamic(light: 0xB8407E, dark: 0xE87AAD)
-    /// Light 0x2A9662, not the family's 0x30A46C: "Listening" / "udp 514" in it measured 2.95:1
-    /// on the content ground (2.92:1 on the sidebar); this is ≥ 3.4:1, the same green.
-    static let ok = dynamic(light: 0x2A9662, dark: 0x4ED48A)
-    static let warn = dynamic(light: 0xB8451F, dark: 0xFF8A5C)
-    static let err = dynamic(light: 0xB8451F, dark: 0xFF8A5C)
-    /// Amber for a *warning-severity* line — distinct from `warn`/`err` (the family's orange-red) so
-    /// a WARN pill and an ERR pill can be told apart in a column of them.
-    static let caution = dynamic(light: 0xA85B00, dark: 0xF0A030)
-    static let live = dynamic(light: 0x30D158, dark: 0x30D158)
+    // Accent + status — Quiet has no accent hue: actions and selection are ink, state is words,
+    // and the one colour is a muted red for what went wrong.
+    static let accent = dynamic(light: 0x141414, dark: 0xF1F0EC)
+    static let ok = dynamic(light: 0x8A8984, dark: 0x7B7A76)
+    static let warn = dynamic(light: 0x9B3B2E, dark: 0xE08A7C)
+    /// The one warning colour: what went wrong, destructive actions.
+    static let err = dynamic(light: 0x9B3B2E, dark: 0xE08A7C)
+    /// A warning-severity line is not "wrong" yet: it reads as plain ink, the word WARN carries it.
+    static let caution = dynamic(light: 0x8A8984, dark: 0x7B7A76)
+    static let live = dynamic(light: 0x8A8984, dark: 0x7B7A76)
 
-    /// Severity tints for the log grid: only problems carry colour.
+    /// Severity tints for the log grid: only real problems carry colour (the words carry the rest).
     static func severityTint(_ s: Severity) -> Color? {
         switch s {
         case .emergency, .alert, .critical, .error: return err
-        case .warning: return caution
+        case .warning: return nil
         default: return nil
         }
     }
 
-    /// One hue per vendor, used only on the dot and the vendor column.
+    /// Quiet reads vendors as words, not hues: one muted tone for every vendor (the dots that
+    /// used the hue are gone from the panes).
     static func vendorColor(_ v: Vendor) -> Color {
-        switch v {
-        case .arubaCX, .arubaOS, .arubaSwitch, .clearPass: return dynamic(light: 0xE0562A, dark: 0xF07A52)
-        case .huawei: return dynamic(light: 0xCF0A2C, dark: 0xF04A64)
-        case .checkPoint: return dynamic(light: 0xE8318A, dark: 0xF56AAE)
-        case .paloAlto: return dynamic(light: 0xFA582D, dark: 0xFF8A5C)
-        case .fortigate: return dynamic(light: 0xC4232B, dark: 0xF05A62)
-        case .snmpTrap: return dynamic(light: 0x5B7BD5, dark: 0x8FA8F0)
-        case .unknown: return dynamic(light: 0x8E8E93, dark: 0x8E8E93)
-        }
+        dynamic(light: 0x8A8984, dark: 0x7B7A76)
     }
+
+    // MARK: Type (the Quiet scale: 28 title · 20 name · 13 body · 11 labels)
+
+    static let pageTitle = Font.system(size: 28, weight: .light)
+    static let subtitle = Font.system(size: 20, weight: .regular)
+    /// The Overview numbers.
+    static let metric = Font.system(size: 30, weight: .regular).monospacedDigit()
+    /// Row titles, section titles.
+    static let emphasis = Font.system(size: 13, weight: .semibold)
+    static let body = Font.system(size: 13)
+    static let detail = Font.system(size: 12)
+    static let caption = Font.system(size: 11)
+    static let mono = Font.system(size: 12, design: .monospaced)
 
     static func dynamic(light: UInt32, dark: UInt32) -> Color {
         Color(nsColor: nsDynamic(light: light, dark: dark))
@@ -68,9 +83,16 @@ enum Theme {
         }
     }
 
-    /// The selected-row tint as an `NSColor`, for the AppKit tables (Log, Packets): the same
-    /// soft plum the SwiftUI rows use — the system's full-strength accent bar was too heavy.
-    static let nsSelectedAccent = nsDynamicAlpha(light: (0xB8407E, 0.13), dark: (0xE87AAD, 0.18))
+    /// The selected-row tint as an `NSColor`, for the AppKit tables (Log, Packets): Quiet's
+    /// selected row — a quiet fill, drawn with its 2 pt ink edge by `SoftSelectionRowView`.
+    static let nsSelectedAccent = nsDynamic(light: 0xEFEDE7, dark: 0x20201F)
+    /// The ink for the selection's left edge, as an `NSColor`.
+    static let nsText = nsDynamic(light: 0x141414, dark: 0xF1F0EC)
+    /// The page ground, as an `NSColor` (the AppKit tables draw their own background).
+    static let nsContent = nsDynamic(light: 0xFBFAF7, dark: 0x141413)
+    static let nsMuted = nsDynamic(light: 0x8A8984, dark: 0x7B7A76)
+    static let nsFaint = nsDynamic(light: 0x888780, dark: 0x747376)
+    static let nsErr = nsDynamic(light: 0x9B3B2E, dark: 0xE08A7C)
 
     static func nsDynamicAlpha(light: (UInt32, CGFloat), dark: (UInt32, CGFloat)) -> NSColor {
         NSColor(name: nil) { appearance in
@@ -96,7 +118,7 @@ enum Theme {
 }
 
 enum Metrics {
-    static let card: CGFloat = 10
+    static let card: CGFloat = 8
     static let field: CGFloat = 8
     static let row: CGFloat = 6
     static let key: CGFloat = 200
@@ -106,13 +128,14 @@ enum Metrics {
     /// 30 pt (SheepRadius build 32): the traffic lights end ~26 pt down, both columns level.
     static let titleBar: CGFloat = 30
     /// Above a pane's first line, under the band — same on every pane.
-    static let headerTop: CGFloat = 2
+    static let headerTop: CGFloat = 10
     static let titleBarFullScreen: CGFloat = 12
-    static let sidebar: CGFloat = 212
+    static let sidebar: CGFloat = 220
     static let minimumWindow: CGFloat = 1000
 }
 
-/// Behind-window vibrancy — the standard macOS sidebar material.
+/// Behind-window vibrancy — kept for the shell's material, unused by the Quiet surfaces (flat
+/// colours only).
 struct VisualEffectBackground: NSViewRepresentable {
     let material: NSVisualEffectView.Material
 
@@ -131,9 +154,10 @@ struct VisualEffectBackground: NSViewRepresentable {
 
 /// The pane column: everything except two gutters that grow with the pane.
 nonisolated enum PaneColumn {
-    static let gutterFraction: CGFloat = 0.03
-    static let minGutter: CGFloat = 20
-    static let maxGutter: CGFloat = 96
+    // LabDC's page insets are 48 pt; a narrow window gives some of it back to the tables.
+    static let gutterFraction: CGFloat = 0.04
+    static let minGutter: CGFloat = 32
+    static let maxGutter: CGFloat = 48
 
     static func gutter(available: CGFloat) -> CGFloat {
         guard available > 0 else { return minGutter }

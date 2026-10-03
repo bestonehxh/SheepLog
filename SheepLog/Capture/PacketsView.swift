@@ -21,15 +21,14 @@ struct PacketsView: View {
             PacketsHeader(interfaces: interfaces)
                 .paneColumn()
                 .padding(.top, Metrics.headerTop)
-                .padding(.bottom, 12)
+                .padding(.bottom, 14)
             PacketsStrip(interfaces: interfaces)
             // VSplitView ignores ideal heights and opens 50/50; this split opens 60/40 and keeps
             // the fraction the user drags to.
             PacketsSplit(fraction: split) {
                 PacketsTableArea(controller: table)
                     .paneColumn()
-                    .padding(.top, 12)
-                    .padding(.bottom, 8)
+                    .padding(.bottom, 4)
             } bottom: {
                 PacketDetailArea(controller: table)
                     .paneColumn()
@@ -73,9 +72,11 @@ private struct PacketsSplit<Top: View, Bottom: View>: View {
             let topH = min(max(180, h * fraction), max(180, h - 150 - 9))
             VStack(spacing: 0) {
                 top.frame(height: topH)
+                // The one hairline between table and detail, on the pane's column (not full-bleed).
                 Rectangle()
                     .fill(Theme.hairline)
                     .frame(height: 1)
+                    .paneColumn()
                     .padding(.vertical, 4)
                     .contentShape(Rectangle())
                     .onHover { inside in if inside { NSCursor.resizeUpDown.push() } else { NSCursor.pop() } }
@@ -101,31 +102,38 @@ private struct PacketsHeader: View {
     let interfaces: [CaptureInterface]
 
     var body: some View {
-        PaneHeader(eyebrow: "Capture", heading: heading, subtitle: subtitle) {
+        PaneHeader(pane: .packets, status: status, detail: subtitle, problem: problem) {
+            // Each action its own width (`fixedSize` on the group reaches every button): a long
+            // status truncates the facts, never wraps a link.
+            Group { actions }.fixedSize()
+        }
+    }
+
+    @ViewBuilder private var actions: some View {
             Button {
                 if capture.isRunning { model.stopCapture() } else { model.startCapture() }
             } label: {
                 Text(capture.isRunning ? "Stop" : "Start").frame(minWidth: 36)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(Theme.accent)
+            .buttonStyle(.quietPrimary)
             .keyboardShortcut("e", modifiers: .command)
             .help(capture.isRunning ? "Stop capturing (⌘E)" : "Start capturing on the chosen interface (⌘E)")
             Button("Open…") { PacketFileActions.open() }
-                .buttonStyle(.bordered)
+                .buttonStyle(.quietLink)
                 .help("Open a .pcap or .pcapng file (⌘O)")
             Button(store.isSaving ? "Saving…" : "Save…") { PacketFileActions.save() }
-                .buttonStyle(.bordered)
+                .buttonStyle(.quietLink)
                 .disabled(store.packets.isEmpty || store.isSaving)
                 .help(store.query.isEmpty ? "Save every packet as .pcap" : "Save the filtered packets as .pcap")
             Button("Clear") { store.clear() }
-                .buttonStyle(.bordered)
+                .buttonStyle(.quietLink)
                 .disabled(store.packets.isEmpty && store.fileURL == nil)
-        }
     }
 
-    private var heading: String {
-        if capture.isRunning { return "Capturing on \(capture.interfaceName)." }
+    /// The state as the page's status words (LabDC: "Running"): what is being captured or read,
+    /// or why nothing is. The counts follow in `subtitle`.
+    private var status: String {
+        if capture.isRunning { return "Capturing on \(capture.interfaceName)" }
         if let url = store.fileURL {
             if store.isLoading {
                 return store.totalReceived == 0 ? "Opening \(url.lastPathComponent)…"
@@ -133,11 +141,16 @@ private struct PacketsHeader: View {
             }
             // The ring keeps the newest `limit` packets: say so, or the count reads as the file's.
             if store.totalReceived > store.packets.count {
-                return "\(url.lastPathComponent) — showing the last \(Format.count(store.packets.count)) of \(Format.count(store.totalReceived)) packets."
+                return "\(url.lastPathComponent), the last \(Format.count(store.packets.count)) of \(Format.count(store.totalReceived)) packets"
             }
-            return "\(url.lastPathComponent) — \(Format.count(store.totalReceived)) packets."
+            return url.lastPathComponent
         }
-        return "Not capturing."
+        if let error = capture.lastError { return error }
+        return "Not capturing"
+    }
+
+    private var problem: Bool {
+        !capture.isRunning && store.fileURL == nil && capture.lastError != nil
     }
 
     private var subtitle: String {
@@ -151,12 +164,13 @@ private struct PacketsHeader: View {
                                              : "saving \(Format.count(store.savingCount)) filtered packets…")
         }
         if capture.isRunning, let w = capture.warning { parts.append(w) }
-        var s = parts.joined(separator: " · ")
         let name = capture.isRunning ? capture.interfaceName : chosenInterface
         if store.fileURL == nil, let iface = interfaces.first(where: { $0.name == name }), !iface.addresses.isEmpty {
-            s += " — \(iface.name) " + iface.addresses.prefix(3).joined(separator: ", ")
+            // The first address only: three (an IPv4 and two IPv6) ran past the status line at the
+            // 1000 pt window; Status lists them all.
+            parts.append("\(iface.name) \(iface.addresses[0])")
         }
-        return s
+        return parts.joined(separator: " · ")
     }
 
     private var chosenInterface: String {
@@ -183,13 +197,13 @@ private struct PacketsStrip: View {
                         focus: $filterFocused,
                         onSubmit: { store.applyQueryNow() },
                         onClear: { store.applyQueryNow() })
-                .frame(minWidth: 220, maxWidth: .infinity)
+                .frame(minWidth: 180, maxWidth: .infinity)
             Button { store.paused.toggle() } label: {
                 Text(store.paused ? "Resume" : "Pause").frame(minWidth: 46)     // no jump on Pause
             }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                .buttonStyle(.quietLink)
                 .help(store.paused ? "Show the packets that arrived while paused" : "Freeze the table; packets keep being received")
+            // The system pop-up, its own width (Round 22: menus stay system `.menu` pickers).
             Picker("Capture interface", selection: $model.settings.captureInterface) {
                 Text("Automatic").tag("")
                 if let extra = InterfacePicker.extraRow(selected: model.settings.captureInterface, among: interfaces) {
@@ -199,21 +213,19 @@ private struct PacketsStrip: View {
                     Text(i.pickerTitle).tag(i.name)
                 }
             }
+            .pickerStyle(.menu)
             .labelsHidden()
             .controlSize(.small)
-            .frame(width: 190)
+            // Not `.fixedSize()`: a menu picker's ideal width is its widest item ("en0 — Wi-Fi
+            // 192.168.1.5, fe80::…"), which took 460 pt of the row from the filter.
+            .frame(width: 180)
             .disabled(capture.isRunning)
             .help("Interface to capture on")
-            Toggle("Promiscuous", isOn: $model.settings.capturePromiscuous)
-                .toggleStyle(.checkbox)
-                .controlSize(.small)
+            QuietToolToggle("Promiscuous", isOn: $model.settings.capturePromiscuous,
+                            help: "Required to see mirrored (SPAN) traffic that is not addressed to this Mac.")
                 .disabled(capture.isRunning)
-                .help("Required to see mirrored (SPAN) traffic that is not addressed to this Mac.")
-            Button("TCP flows ›") { model.mainPane = .flows }
-                .buttonStyle(.borderless)
-                .controlSize(.small)
-                .foregroundStyle(Theme.accent)
-                .help("Analyse the packets in memory as TCP conversations — all of them, the filter here does not apply (⌘7)")
+            // No "TCP flows ›" here: the page's TCP flows tab opens the same pane (and the
+            // filter here never applied to it).
         }
         .paneKeyCommands(find: { filterFocused = true })
     }
@@ -252,30 +264,22 @@ struct PacketsTableArea: View {
                     .allowsHitTesting(false)
             }
             if controller.showJump {
-                Button {
-                    controller.jumpToLatest()
-                } label: {
-                    Label("Jump to latest", systemImage: "arrow.down")
-                        .font(.system(size: 11.5, weight: .medium))
-                }
-                .buttonStyle(.bordered)
-                .buttonBorderShape(.capsule)
-                .controlSize(.small)
-                .tint(Theme.accent)
-                .shadow(color: .black.opacity(0.12), radius: 4, y: 1)
-                .padding(.bottom, 12)
+                // A word on the page ground over the rows (no capsule, no arrow glyph).
+                Button("Jump to latest") { controller.jumpToLatest() }
+                    .buttonStyle(.quietLink)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 5)
+                    .background(Theme.content)
+                    .padding(.bottom, 12)
             } else if let error = store.queryError {
-                // As on the Log: the field's red border alone did not say what is wrong, nor
+                // As on the Log: the field's red line alone did not say what is wrong, nor
                 // that the table still shows the previous filter.
-                let tint = store.queryErrorIsNotice ? Theme.caution : Theme.err
                 Text(LogView.filterBanner(error, isNotice: store.queryErrorIsNotice))
-                    .font(.system(size: 11.5, weight: .medium))
-                    .foregroundStyle(tint)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
-                    .background(Capsule().fill(Theme.panel))
-                    .overlay(Capsule().strokeBorder(tint.opacity(0.5), lineWidth: 0.5))
-                    .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
+                    .font(Theme.detail)
+                    .foregroundStyle(store.queryErrorIsNotice ? Theme.text2 : Theme.err)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 5)
+                    .background(Theme.content)
                     .padding(.bottom, 12)
                     .allowsHitTesting(false)
             }
@@ -294,23 +298,18 @@ struct PacketsFooter: View {
                                     received: store.totalReceived, bytes: store.totalBytes,
                                     filtered: !store.query.isEmpty, file: store.fileURL?.lastPathComponent,
                                     waiting: store.pausedCount))
-                .font(.system(size: 11))
-                .foregroundStyle(Theme.dimText)
+                .font(Theme.caption)
+                .foregroundStyle(Theme.faintText)
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: 8)
-            Picker("Time", selection: $controller.absoluteTime) {
-                Text("Relative").tag(false)
-                Text("Time of day").tag(true)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .controlSize(.mini)
-            .fixedSize()
-            .help("Time column: seconds since the first packet, or the arrival time of day (HH:mm:ss.SSS)")
+            // The time column's two forms as words (no segmented control).
+            QuietTabs(items: [(false, "Relative"), (true, "Time of day")], selection: $controller.absoluteTime,
+                      spacing: 14, size: 11)
+                .help("Time column: seconds since the first packet, or the arrival time of day (HH:mm:ss.SSS)")
+                .accessibilityLabel("Time column")
         }
-        .padding(.horizontal, 10)
-        .frame(height: 26)
+        .frame(height: 28)
     }
 
     nonisolated static func text(shown: Int, inMemory: Int, received: Int, bytes: Int, filtered: Bool, file: String?,
@@ -336,22 +335,47 @@ struct PacketsFooter: View {
 private struct PacketDetailArea: View {
     @ObservedObject var controller: PacketTableController
 
+    /// The detail area's width: below `PacketHexView.wideArea` the halves share it (Bytes then
+    /// shows 8 bytes a line), above it Bytes keeps room for 16 bytes a line.
+    @State private var width: CGFloat = 0
+
     var body: some View {
-        HSplitView {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Decode").groupTitle().padding(.horizontal, 2)
-                PacketDecodeTree(packet: controller.selected, linkType: AppModel.shared.packets.linkType)
-                    .panelCard()
+        let selected = controller.selected
+        let compact = width > 0 && width < PacketHexView.wideArea
+        ZStack(alignment: .topLeading) {
+            // Always laid out (hidden with nothing selected): the decode tree keeps what was
+            // opened and the halves keep the width they were dragged to.
+            HSplitView {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Decode").groupTitle().accessibilityAddTraits(.isHeader)
+                    PacketDecodeTree(packet: selected, linkType: AppModel.shared.packets.linkType)
+                }
+                .frame(minWidth: compact ? PacketHexView.decodeMinCompact : 170, idealWidth: 460,
+                       maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .padding(.trailing, 12)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Bytes").groupTitle().accessibilityAddTraits(.isHeader)
+                    // Only the hex keeps an inset (code / hex blocks: `Theme.well`).
+                    PacketHexView(packet: selected)
+                        .background(Theme.well, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                }
+                // Wide: 16 bytes a line + ASCII (520 pt at 11.5 pt in the inset). Compact (the
+                // 1000 pt window's ~716 pt column): 8 bytes a line, so Decode keeps ≥ 300 pt and
+                // its lines are not all cut.
+                .frame(minWidth: compact ? PacketHexView.width(bytesPerLine: 8) : PacketHexView.width(bytesPerLine: 16),
+                       idealWidth: 580, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .padding(.leading, 12)
             }
-            .frame(minWidth: 200, idealWidth: 460, maxWidth: .infinity)
-            .padding(.trailing, 5)
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Bytes").groupTitle().padding(.horizontal, 2)
-                PacketHexView(packet: controller.selected)
-                    .panelCard()
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
+            .opacity(selected == nil ? 0 : 1)
+            .allowsHitTesting(selected != nil)
+            .accessibilityHidden(selected == nil)
+            if selected == nil {
+                Text("Select a packet to see its layers and bytes.")
+                    .font(Theme.body)
+                    .foregroundStyle(Theme.faintText)
+                    .padding(.top, 6)
             }
-            .frame(minWidth: 525, idealWidth: 560, maxWidth: .infinity)   // 16 bytes/line at 11.5 pt; fits the 1000 pt window
-            .padding(.leading, 5)
         }
     }
 }
@@ -380,8 +404,7 @@ private struct PacketDecodeTree: View {
                         rows(node, depth: 0)
                     }
                 }
-                .padding(.vertical, 6)
-                .padding(.horizontal, 8)
+                .padding(.vertical, 2)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .id(packet.id)      // a new packet starts at the top, not where the last was scrolled
@@ -666,14 +689,42 @@ struct PacketHexView: View {
     /// Text laid that out on every selection (hundreds of ms); lazy 1 KB blocks cost what is seen.
     static let blockLines = 64
 
+    /// The dump's font, and the width one character takes in it.
+    static let fontSize: CGFloat = 11.5
+    static let charWidth: CGFloat = {
+        let font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        return ("0" as NSString).size(withAttributes: [.font: font]).width
+    }()
+
+    /// The width a dump of `bytesPerLine` bytes a line needs (4-digit offsets, the inset's
+    /// padding included): 16 → ~520 pt, 8 → ~290 pt.
+    static func width(bytesPerLine n: Int) -> CGFloat {
+        let chars = 4 + 2 + n * 3 + (n > 8 ? 1 : 0) + 1 + n
+        return (CGFloat(chars) * charWidth + 20).rounded(.up)
+    }
+
+    /// Decode's least width when the area is shared (8 bytes a line).
+    static let decodeMinCompact: CGFloat = 300
+    /// The detail area width from which Bytes keeps 16 bytes a line beside a usable Decode
+    /// (the two halves' 12 pt paddings included).
+    static var wideArea: CGFloat { decodeMinCompact + 24 + width(bytesPerLine: 16) }
+
+    @State private var available: CGFloat = 0
+
+    /// 16 bytes a line when they fit, else 8 (a narrow window, or the divider dragged).
+    private var bytesPerLine: Int {
+        available > 0 && available < Self.width(bytesPerLine: 16) - 1 ? 8 : 16
+    }
+
     var body: some View {
         if let packet {
-            let blocks = (packet.data.count + Self.blockLines * 16 - 1) / (Self.blockLines * 16)
+            let perLine = bytesPerLine
+            let blocks = (packet.data.count + Self.blockLines * perLine - 1) / (Self.blockLines * perLine)
             ScrollView([.vertical, .horizontal]) {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(0..<max(1, blocks), id: \.self) { b in
-                        Text(Self.dump(packet.data, lines: b * Self.blockLines..<(b + 1) * Self.blockLines))
-                            .font(.system(size: 11.5, design: .monospaced))
+                        Text(Self.dump(packet.data, lines: b * Self.blockLines..<(b + 1) * Self.blockLines, bytesPerLine: perLine))
+                            .font(.system(size: Self.fontSize, design: .monospaced))
                             .foregroundStyle(Theme.text2)
                             .textSelection(.enabled)
                             .fixedSize()
@@ -684,6 +735,7 @@ struct PacketHexView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .id(packet.id)      // a new packet starts at its first byte
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { available = $0 }
         } else {
             TableEmptyOverlay(text: "Select a packet to see its bytes.")
         }
@@ -695,20 +747,22 @@ struct PacketHexView: View {
         dump(data, lines: 0..<(data.count + 15) / 16)
     }
 
-    nonisolated static func dump(_ data: Data, lines: Range<Int>) -> String {
+    /// `bytesPerLine` 16 (two groups of 8) or 8 (one group: the narrow layout).
+    nonisolated static func dump(_ data: Data, lines: Range<Int>, bytesPerLine: Int = 16) -> String {
         let hex = PacketFormat.hexChars
+        let per = bytesPerLine == 8 ? 8 : 16
         var digits = 4
         while data.count - 1 >= 1 << (digits * 4), digits < 16 { digits += 1 }
         var out: [UInt8] = []
         out.reserveCapacity(lines.count * (digits + 70))
         data.withUnsafeBytes { raw in
-            var off = max(0, lines.lowerBound) * 16
-            let end = min(raw.count, lines.upperBound * 16)
+            var off = max(0, lines.lowerBound) * per
+            let end = min(raw.count, lines.upperBound * per)
             while off < end {
-                let n = min(16, raw.count - off)
+                let n = min(per, raw.count - off)
                 for shift in stride(from: (digits - 1) * 4, through: 0, by: -4) { out.append(hex[(off >> shift) & 0xf]) }
                 out.append(0x20); out.append(0x20)
-                for i in 0..<16 {
+                for i in 0..<per {
                     if i == 8 { out.append(0x20) }
                     if i < n {
                         let v = raw[off + i]
@@ -723,7 +777,7 @@ struct PacketHexView: View {
                     let v = raw[off + i]
                     out.append(v >= 0x20 && v < 0x7f ? v : 0x2e)
                 }
-                off += 16
+                off += per
                 if off < end { out.append(0x0a) }
             }
         }
@@ -755,10 +809,10 @@ enum PacketFileActions {
         }
     }
 
-    /// `SheepLog-20260924-081530.pcap` — Gregorian digits whatever the Mac's calendar (a plain
-    /// `DateFormatter` writes `SheepLog-25690924-…` on a Thai-calendar Mac).
+    /// `UncleSpy-20260924-081530.pcap` — Gregorian digits whatever the Mac's calendar (a plain
+    /// `DateFormatter` writes `UncleSpy-25690924-…` on a Thai-calendar Mac).
     nonisolated static func saveName(date: Date) -> String {
-        "SheepLog-\(Format.compactStamp.string(from: date)).pcap"
+        "UncleSpy-\(Format.compactStamp.string(from: date)).pcap"
     }
 
     static func save() {
@@ -1368,6 +1422,27 @@ final class PacketNSTableView: NSTableView {
     }
 }
 
+/// The column titles on the page ground with one hairline under them — no header band (the
+/// system's is a grey bar in the dark appearance) and no separators between the titles.
+final class PacketHeaderView: NSTableHeaderView {
+    private static let rule = Theme.nsDynamic(light: 0xE6E4DE, dark: 0x262624)
+
+    override func draw(_ dirtyRect: NSRect) {
+        Theme.nsContent.setFill()
+        bounds.fill()
+        if let tv = tableView {
+            for (i, col) in tv.tableColumns.enumerated() where !col.isHidden {
+                let r = headerRect(ofColumn: i)
+                guard r.intersects(dirtyRect) else { continue }
+                // The cell draws its title at the top of the frame: nudged to the middle.
+                col.headerCell.drawInterior(withFrame: r.offsetBy(dx: 0, dy: isFlipped ? 3 : -3), in: self)
+            }
+        }
+        Self.rule.setFill()
+        NSRect(x: bounds.minX, y: isFlipped ? bounds.maxY - 1 : bounds.minY, width: bounds.width, height: 1).fill()
+    }
+}
+
 /// A row view that is never transparent (see `tableView(_:rowViewForRow:)`).
 final class PacketRowView: SoftSelectionRowView {
     static let identifier = NSUserInterfaceItemIdentifier("packetRow")
@@ -1434,7 +1509,10 @@ struct PacketTableView: NSViewRepresentable {
         tv.allowsColumnReordering = true
         tv.allowsColumnResizing = true
         tv.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
-        tv.backgroundColor = .clear
+        // The page ground, opaque (as the Log grid): with a clear table the rows scrolled under
+        // the header showed through its titles.
+        tv.backgroundColor = Theme.nsContent
+        tv.focusRingType = .none
         tv.usesAutomaticRowHeights = false
         for col in PacketTableController.Column.allCases {
             let c = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(col.rawValue))
@@ -1443,9 +1521,13 @@ struct PacketTableView: NSViewRepresentable {
             c.minWidth = col == .info ? 120 : 32
             if col == .info { c.maxWidth = 100_000; c.resizingMask = .autoresizingMask } else { c.resizingMask = .userResizingMask }
             c.headerCell.alignment = col.rightAligned ? .right : .left
+            c.headerCell.font = NSFont.systemFont(ofSize: 11, weight: .medium)
             tv.addTableColumn(c)
         }
         PacketTableController.restoreHiddenColumns(tv)
+        // An opaque header: the plain style's is see-through, and the rows scrolled under it
+        // (the scroll view's floating header) showed through the column titles.
+        tv.headerView = PacketHeaderView(frame: tv.headerView?.frame ?? NSRect(x: 0, y: 0, width: 100, height: 28))
         let header = NSMenu()
         header.identifier = NSUserInterfaceItemIdentifier("header")
         header.delegate = controller
@@ -1463,7 +1545,8 @@ struct PacketTableView: NSViewRepresentable {
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = true
         scroll.autohidesScrollers = true
-        scroll.drawsBackground = false
+        scroll.drawsBackground = true
+        scroll.backgroundColor = Theme.nsContent
         scroll.borderType = .noBorder
         scroll.contentView.postsBoundsChangedNotifications = true
         controller.attach(tv, scrollView: scroll)

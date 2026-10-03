@@ -596,6 +596,16 @@ nonisolated enum TCPFlowAnalyzer {
             return raw + shift
         }
 
+        /// `t` seconds as whole microseconds in nanoseconds, saturating at ±146 years: two
+        /// packets of one connection 10^10 s apart (pcapng says what it likes) overflowed
+        /// `Int64 * 1000` and crashed Flows and Troubleshoot. Half of Int64's range, so the
+        /// analysis's differences and sums of two times cannot overflow either.
+        static func wholeMicrosNS(_ t: Double) -> Int64 {
+            let limit = Int64.max / 2_000
+            let us = Int64(saturating: (t * 1e6).rounded())
+            return min(max(us, -limit), limit) * 1000
+        }
+
         // MARK: Segments
 
         mutating func step(_ p: Packet) {
@@ -611,7 +621,7 @@ nonisolated enum TCPFlowAnalyzer {
             lastPacketTime = s.t
             // Whole microseconds: a Date near 2026 resolves ~0.24 µs, so a 20.000 ms gap read
             // back from a pcap came out as 19.9999998 ms (Wireshark's "< 20 ms" said fast).
-            let ws = sequence.analyse(fromClient: s.c2s, timeNS: Int64((s.t * 1e6).rounded()) * 1000, tcp: tcp)
+            let ws = sequence.analyse(fromClient: s.c2s, timeNS: Self.wholeMicrosNS(s.t), tcp: tcp)
             peerProbed = sentKeepAlive[s.o]
             sentKeepAlive[s.d] = false
             defer {

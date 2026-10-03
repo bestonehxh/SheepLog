@@ -1,32 +1,67 @@
 import AppKit
 import SwiftUI
 
+/// Settings the LabDC way: the page's name with its own text tabs (Listeners · Log · Capture ·
+/// SNMP · About), every setting a label above an underlined field, switches at the right edge
+/// with their words on the left, notes as faint captions under their section.
 struct SettingsView: View {
     @ObservedObject private var model = AppModel.shared
-    // Apply ports follows the listeners' state (switched from the sidebar while this is open).
+    // Apply ports follows the listeners' state (started / stopped on Status while this is open).
     @ObservedObject private var syslog = AppModel.shared.syslog
     @ObservedObject private var traps = AppModel.shared.traps
     @ObservedObject private var capture = AppModel.shared.capture
     @State private var interfaces: [CaptureInterface] = []
+    /// The tab the page was left on (remembered across launches).
+    @AppStorage("SheepLog.settingsTab") private var tab: SettingsTab = .listeners
 
     private var s: Binding<AppSettings> { $model.settings }
+
+    private enum SettingsTab: String, CaseIterable {
+        case listeners, log, capture, snmp, about
+
+        var title: String {
+            switch self {
+            case .listeners: "Listeners"
+            case .log: "Log"
+            case .capture: "Capture"
+            case .snmp: "SNMP"
+            case .about: "About"
+            }
+        }
+    }
 
     var body: some View {
         let _ = PaneProbe.ran("body.settings")
         VStack(spacing: 0) {
-            PaneHeader(eyebrow: "App", heading: "Ports, buffers and files.",
-                       subtitle: "Where SheepLog listens, how much it keeps, and where it writes")
-                .paneColumn()
-                .padding(.top, Metrics.headerTop)
-                .padding(.bottom, 12)
+            PaneHeader(title: "Settings", tabs: SettingsTab.allCases.map { ($0, $0.title) }, selection: $tab,
+                       status: status, detail: detail) {
+                if tab == .listeners {
+                    Button("Apply ports") { model.restartListeners() }
+                        .buttonStyle(.quietLink)
+                        .disabled(!model.listenerPortsChanged)
+                        .help("Moves the running syslog and trap listeners to these ports (a port that cannot be opened leaves that listener on its old one), and retries a listener that failed to start.")
+                }
+            }
+            .paneColumn()
+            .padding(.top, Metrics.headerTop)
+            .padding(.bottom, 14)
 
-            PaneBody {
-                syslogGroup
-                trapGroup
-                logGroup
-                captureGroup
-                snmpGroup
-                aboutGroup
+            PaneBody(spacing: 28) {
+                switch tab {
+                case .listeners:
+                    syslogSection
+                    trapSection
+                case .log:
+                    logMemorySection
+                    diskSection
+                case .capture:
+                    captureSection
+                    captureMemorySection
+                case .snmp:
+                    snmpSection
+                case .about:
+                    aboutSection
+                }
             }
         }
         .task {
@@ -36,58 +71,102 @@ struct SettingsView: View {
         }
     }
 
-    private var syslogGroup: some View {
-        PaneGroup("Syslog listener",
-                  accessory: Button("Apply ports") { model.restartListeners() }
-                    .buttonStyle(.bordered)
-                    .disabled(!model.listenerPortsChanged)
-                    .help("Moves the running syslog and trap listeners to these ports (a port that cannot be opened leaves that listener on its old one), and retries a listener that failed to start.")) {
-            KeyValueRow("UDP port") { portField(s.syslogUDPPort) }
-            KeyValueRow("TCP port", help: "RFC 6587 framing: newline-delimited or octet-counted. 0 disables TCP.") { portField(s.syslogTCPPort) }
-            KeyValueRow("Start at launch") { settingSwitch("Start syslog at launch", s.syslogAutoStart) }
-            NoteRow(text: "Port 514 binds without administrator rights on this Mac. If another tool already holds it, the switch in the sidebar shows “failed” and the reason is in the error sheet.")
+    // MARK: Header line
+
+    /// The tab's state as words (the header's muted line).
+    private var status: String {
+        switch tab {
+        case .listeners:
+            if model.listenerPortsChanged { return "New ports not applied yet" }
+            let sys = syslog.isRunning ? "Syslog on \(StatusView.syslogPorts(syslog))" : "Syslog off"
+            let tr = traps.isRunning ? "traps on udp \(traps.port)" : "traps off"
+            return "\(sys) · \(tr)"
+        case .log:
+            return "Keeping \(Format.count(model.settings.logLimit)) lines"
+        case .capture:
+            return capture.isRunning ? "Capturing on \(capture.interfaceName)" : "Not capturing"
+        case .snmp:
+            let r = model.settings.snmpRetries
+            return "Timeout \(CommitNumberField.text(model.settings.snmpTimeout, integer: false)) s · \(r) \(r == 1 ? "retry" : "retries")"
+        case .about:
+            return "UncleSpy \(Self.version)"
         }
     }
 
-    private var trapGroup: some View {
-        PaneGroup("SNMP trap receiver") {
-            KeyValueRow("UDP port") { portField(s.trapPort) }
-            KeyValueRow("Start at launch") { settingSwitch("Start the trap receiver at launch", s.trapAutoStart) }
-            NoteRow(text: "SNMPv1 and v2c traps and informs. Each trap appears in the Log as vendor “Trap”, with its var-binds as fields named from the loaded MIBs."
-                    + (traps.isRunning && model.settings.trapPort != traps.port ? " A new port takes effect with Apply ports (above)." : ""))
+    private var detail: String {
+        switch tab {
+        case .listeners: model.listenerPortsChanged ? "Apply ports moves the listeners" : ""
+        case .log: model.settings.diskLogging ? "writing every line to disk" : "not writing to disk"
+        case .capture: model.settings.capturePromiscuous ? "promiscuous" : ""
+        case .snmp, .about: ""
         }
     }
 
-    private var logGroup: some View {
-        PaneGroup("Log buffer and files") {
-            KeyValueRow("Keep in memory", help: "Oldest lines are dropped past this (1,000 … 2,000,000). 100,000 lines is roughly 40 MB.") {
-                HStack(spacing: 6) {
-                    CommitNumberField(value: intBinding(\.logLimit), clamp: { Double(AppModel.clampLogLimit(Int($0))) })
-                    unit("lines")
-                }
+    // MARK: Listeners
+
+    private var syslogSection: some View {
+        PaneSection("Syslog listener") {
+            HStack(alignment: .top, spacing: 28) {
+                QuietField("UDP port") { PortField(value: s.syslogUDPPort) }
+                QuietField("TCP port (0 = off)") { PortField(value: s.syslogTCPPort) }
+                    .help("RFC 6587 framing: newline-delimited or octet-counted. 0 disables TCP.")
             }
-            KeyValueRow("Newest first") { settingSwitch("Newest first", s.newestFirst) }
-            KeyValueRow("Write to disk", help: "Every received line, raw, appended to one file per day. Independent of the in-memory limit and of the filter.") {
-                settingSwitch("Write to disk", s.diskLogging)
+            .padding(.top, 4)
+            QuietToggleRow("Start syslog at launch", isOn: s.syslogAutoStart)
+            note("Port 514 binds without administrator rights on this Mac. If another tool already holds it, the Status page says “Syslog could not start” and the reason is in the error sheet.")
+        }
+    }
+
+    private var trapSection: some View {
+        PaneSection("SNMP trap receiver") {
+            QuietField("UDP port") { PortField(value: s.trapPort) }
+                .padding(.top, 4)
+            QuietToggleRow("Start the trap receiver at launch", isOn: s.trapAutoStart)
+            note("SNMPv1 and v2c traps and informs. Each trap appears in the Log as vendor “Trap”, with its var-binds as fields named from the loaded MIBs."
+                 + (traps.isRunning && model.settings.trapPort != traps.port ? " A new port takes effect with Apply ports." : ""))
+        }
+    }
+
+    // MARK: Log
+
+    private var logMemorySection: some View {
+        PaneSection("Memory") {
+            QuietField("Lines kept in memory (1,000 … 2,000,000)") {
+                CommitNumberField(value: intBinding(\.logLimit), clamp: { Double(AppModel.clampLogLimit(Int($0))) })
             }
-            KeyValueRow("Folder") {
-                HStack(spacing: 8) {
+            .help("Oldest lines are dropped past this (1,000 … 2,000,000). 100,000 lines is roughly 40 MB.")
+            .padding(.top, 4)
+            QuietToggleRow("Newest first", isOn: s.newestFirst)
+            note("100,000 lines take roughly 40 MB. Past the limit the oldest lines roll out of memory (the disk log, when on, keeps every line).")
+        }
+    }
+
+    private var diskSection: some View {
+        PaneSection("Disk") {
+            QuietToggleRow("Write to disk", note: "Every received line, raw, appended to one file per day — independent of the in-memory limit and of the filter.",
+                           isOn: s.diskLogging)
+            QuietField("Folder") {
+                HStack(alignment: .firstTextBaseline, spacing: 20) {
                     Text(model.settings.logDirectoryURL.path(percentEncoded: false))
-                        .font(.system(size: 12, design: .monospaced))
-                        .foregroundStyle(Theme.text2)
+                        .font(Theme.mono)
+                        .foregroundStyle(Theme.text)
+                        .textSelection(.enabled)
                         .identifierText()
-                        .frame(maxWidth: 420, alignment: .leading)
-                    Button("Choose…") { chooseFolder() }.buttonStyle(.bordered).controlSize(.small)
+                    Spacer(minLength: 12)
+                    Button("Choose…") { chooseFolder() }.buttonStyle(.quietLink)
                     Button("Reveal") { NSWorkspace.shared.activateFileViewerSelecting([model.settings.logDirectoryURL]) }
-                        .buttonStyle(.bordered).controlSize(.small)
+                        .buttonStyle(.quietLink)
                 }
             }
+            .padding(.top, 6)
         }
     }
 
-    private var captureGroup: some View {
-        PaneGroup("Capture") {
-            KeyValueRow("Interface") {
+    // MARK: Capture
+
+    private var captureSection: some View {
+        PaneSection("Live capture") {
+            QuietField("Interface") {
                 Picker("Capture interface", selection: s.captureInterface) {
                     Text("Automatic").tag("")
                     // Chosen earlier, gone now (or the list still loading): show it rather than a blank picker.
@@ -98,55 +177,71 @@ struct SettingsView: View {
                         Text(i.pickerTitle).tag(i.name)
                     }
                 }
-                .labelsHidden().valueControl()
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .fixedSize()
             }
-            KeyValueRow("Promiscuous", help: "Required to see mirrored (SPAN) traffic that is not addressed to this Mac.") {
-                settingSwitch("Promiscuous", s.capturePromiscuous)
+            .padding(.top, 4)
+            QuietToggleRow("Promiscuous", note: "Required to see mirrored (SPAN) traffic that is not addressed to this Mac.",
+                           isOn: s.capturePromiscuous)
+            QuietField("Capture filter (libpcap / BPF; empty captures everything)") {
+                // No example inside the box: a plain field draws its placeholder nearly as dark as
+                // a value (LabDC's UI audit), so an empty filter looked like "not port 22".
+                TextField("Capture filter", text: s.captureFilter, prompt: Text(""))
+                    .labelsHidden()
+                    .textFieldStyle(.quiet)
             }
-            KeyValueRow("Capture filter", help: "A libpcap (BPF) expression applied in the kernel, e.g. “not port 22” or “host 10.1.0.1 and tcp”. Empty captures everything.") {
-                TextField("", text: s.captureFilter).textFieldStyle(.roundedBorder).valueControl(360)
-            }
-            if let note = Self.captureRestartNote(settings: model.settings, running: capture.isRunning,
-                                                  interface: capture.interfaceName, promiscuous: capture.runningPromiscuous,
-                                                  filter: capture.runningFilter) {
-                NoteRow(text: note, systemImage: "arrow.clockwise", tint: Theme.warn)
-            }
-            KeyValueRow("Keep in memory") {
-                HStack(spacing: 6) {
-                    CommitNumberField(value: intBinding(\.packetLimit), clamp: { Double(AppModel.clampPacketLimit(Int($0))) })
-                    unit("packets")
-                }
+            .help("A libpcap (BPF) expression applied in the kernel, e.g. “not port 22” or “host 10.1.0.1 and tcp”. Empty captures everything.")
+            if let restart = Self.captureRestartNote(settings: model.settings, running: capture.isRunning,
+                                                     interface: capture.interfaceName, promiscuous: capture.runningPromiscuous,
+                                                     filter: capture.runningFilter) {
+                note(restart, tint: Theme.text2)
             }
             // Checked on this Mac, not assumed.
             if FileManager.default.isReadableFile(atPath: "/dev/bpf0") {
-                NoteRow(text: "Capture needs read access to /dev/bpf*. This Mac allows it (Wireshark’s ChmodBPF or similar), so no administrator prompt is needed.")
+                note("Capture needs read access to /dev/bpf*. This Mac allows it (Wireshark’s ChmodBPF or similar), so no administrator prompt is needed.")
             } else {
-                NoteRow(text: "Capture needs read access to /dev/bpf*, which this Mac does not allow yet. Install Wireshark’s ChmodBPF, then start Capture again.",
-                        systemImage: "exclamationmark.triangle", tint: Theme.warn)
+                note("Capture needs read access to /dev/bpf*, which this Mac does not allow yet. Install Wireshark’s ChmodBPF, then start Capture again.",
+                     tint: Theme.err)
             }
         }
     }
 
-    private var snmpGroup: some View {
-        PaneGroup("SNMP defaults") {
-            KeyValueRow("Timeout") {
-                HStack(spacing: 6) {
+    private var captureMemorySection: some View {
+        PaneSection("Memory") {
+            QuietField("Packets kept in memory") {
+                CommitNumberField(value: intBinding(\.packetLimit), clamp: { Double(AppModel.clampPacketLimit(Int($0))) })
+            }
+            .padding(.top, 4)
+        }
+    }
+
+    // MARK: SNMP
+
+    private var snmpSection: some View {
+        PaneSection("SNMP test defaults") {
+            HStack(alignment: .top, spacing: 28) {
+                QuietField("Timeout (seconds)") {
                     CommitNumberField(value: s.snmpTimeout, clamp: SNMPTestModel.clampTimeout, integer: false)
-                    unit("seconds")
+                }
+                QuietField("Retries (0 … 10)") {
+                    CommitNumberField(value: intBinding(\.snmpRetries), clamp: { Double(SNMPTestModel.clampRetries(Int($0))) })
                 }
             }
-            KeyValueRow("Retries", help: "0 … 10") {
-                CommitNumberField(value: intBinding(\.snmpRetries), clamp: { Double(SNMPTestModel.clampRetries(Int($0))) })
-            }
-            NoteRow(text: "Communities and SNMPv3 passwords typed on the Test pane are kept in the Keychain (Bestchaan.SheepLog), never in settings.json.")
+            .padding(.top, 4)
+            note("Communities and SNMPv3 passwords typed on the Test pane are kept in the Keychain (Bestchaan.SheepLog), never in settings.json.")
         }
     }
 
-    private var aboutGroup: some View {
-        PaneGroup("About") {
-            FactRow(key: "Version", value: Self.version, copyable: false)
-            FactRow(key: "Settings file", value: AppSettings.file.path(percentEncoded: false))
-            FactRow(key: "MIB folder", value: MIBRegistry.shared.userFolder.path(percentEncoded: false))
+    // MARK: About
+
+    private var aboutSection: some View {
+        // The version is the header's status line ("UncleSpy 1.9 (24)").
+        PaneSection("Files") {
+            GroupedList {
+                ReadOnlyFieldRow(label: "Settings file", value: AppSettings.file.path(percentEncoded: false))
+                ReadOnlyFieldRow(label: "MIB folder", value: MIBRegistry.shared.userFolder.path(percentEncoded: false))
+            }
         }
     }
 
@@ -170,16 +265,15 @@ struct SettingsView: View {
         return "\(v) (\(b))"
     }
 
-    private func portField(_ binding: Binding<UInt16>) -> some View {
-        PortField(value: binding)
-    }
-
-    private func settingSwitch(_ title: String, _ isOn: Binding<Bool>) -> some View {
-        Toggle(title, isOn: isOn).labelsHidden().toggleStyle(.switch).controlSize(.small).tint(Theme.accent)
-    }
-
-    private func unit(_ text: String) -> some View {
-        Text(text).font(.system(size: 12)).foregroundStyle(Theme.faintText)
+    /// A faint caption under its section (red only for what is wrong).
+    private func note(_ text: String, tint: Color = Theme.faintText) -> some View {
+        Text(text)
+            .font(Theme.caption)
+            .foregroundStyle(tint)
+            .lineSpacing(2)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: 680, alignment: .leading)
+            .padding(.top, 2)
     }
 
     private func intBinding(_ key: WritableKeyPath<AppSettings, Int>) -> Binding<Double> {
@@ -198,6 +292,50 @@ struct SettingsView: View {
     }
 }
 
+/// A read-only fact the LabDC inspector way: the label above the value, Copy at the right edge.
+private struct ReadOnlyFieldRow: View {
+    let label: String
+    let value: String
+    var mono = true
+    var copyable = true
+
+    var body: some View {
+        HStack(alignment: .lastTextBaseline, spacing: 16) {
+            QuietField(label) {
+                Text(value)
+                    .font(mono ? Theme.mono : Theme.body)
+                    .foregroundStyle(Theme.text)
+                    .textSelection(.enabled)
+                    .identifierText()
+                    .help(value)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if copyable { CopyButton(value: value, help: "Copy \(value)") }
+        }
+        .padding(.vertical, 10)
+    }
+}
+
+/// The quiet field's look for the number and port boxes: the text over one line (red while the
+/// text is not a value), no box, no focus ring.
+private struct UnderlinedBox: ViewModifier {
+    var bad = false
+    var width: CGFloat = 110
+
+    func body(content: Content) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            content
+                .textFieldStyle(.plain)
+                .font(.system(size: 13).monospacedDigit())
+                .foregroundStyle(Theme.text)
+                .focusEffectDisabled()
+            Rectangle().fill(bad ? Theme.err : Theme.control).frame(height: 1)
+        }
+        .frame(width: width, alignment: .leading)
+    }
+}
+
+
 
 /// A number box whose value reaches the setting on Return, on focus loss, when the pane goes
 /// away and when the app quits — `TextField(value:format:)` committed on the first two only, so
@@ -212,9 +350,8 @@ struct CommitNumberField: View {
 
     var body: some View {
         TextField("", text: $text)
-            .textFieldStyle(.roundedBorder)
-            .valueNumber()
             .focused($focused)
+            .modifier(UnderlinedBox())
             .onAppear { text = Self.text(value, integer: integer) }
             .onChange(of: value) { _, v in if !focused { text = Self.text(v, integer: integer) } }
             .onSubmit { commit() }
@@ -256,9 +393,8 @@ struct PortField: View {
 
     var body: some View {
         TextField("", text: $text)
-            .textFieldStyle(.roundedBorder)
-            .valueNumber()
-            .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(bad ? Theme.err : .clear, lineWidth: 1))
+            .focused($focused)
+            .modifier(UnderlinedBox(bad: bad))
             .help(bad ? "A port is a number from 0 to 65535" : "")
             .onAppear { text = String(value) }
             .onChange(of: value) { _, v in if UInt16(text) != v { text = String(v) } }
@@ -268,7 +404,6 @@ struct PortField: View {
             }
             .onSubmit { commit() }
             .onChange(of: focused) { _, f in if !f { commit() } }
-            .focused($focused)
     }
 
     @FocusState private var focused: Bool

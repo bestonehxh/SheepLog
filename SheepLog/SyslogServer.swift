@@ -255,16 +255,29 @@ nonisolated enum SocketFactory {
         }
     }
 
-    private static func configure(_ fd: Int32) {
+    /// The receive buffer of every syslog TCP connection (an accepted socket takes the
+    /// listening socket's). TCP loses nothing to a full buffer — the device is held back by its
+    /// window — so a larger one only adds to what Stop and Apply ports must read before they
+    /// return (everything the sockets hold is read: 8 flooding clients with the UDP socket's
+    /// 7 MB each held 59 MB, 1.3 s of reading in Debug). 1 MB still carries 10 MB/s per device
+    /// over a 100 ms round trip. Set explicitly, it is not auto-sized past this either.
+    static let tcpReceiveBuffer = 1024 * 1024
+
+    private static func configure(_ fd: Int32, type: Int32) {
         var one: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, socklen_t(MemoryLayout<Int32>.size))
         setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
-        // As large a receive buffer as the kernel allows (the default 8 MB kern.ipc.maxsockbuf
-        // admits ~7 MB): a burst is queued in the kernel instead of dropped while the parser
-        // catches up.
-        for mb in [7, 4, 1] {
-            var size = Int32(mb * 1024 * 1024)
-            if setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, socklen_t(MemoryLayout<Int32>.size)) == 0 { break }
+        if type == SOCK_STREAM {
+            var size = Int32(tcpReceiveBuffer)
+            setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, socklen_t(MemoryLayout<Int32>.size))
+        } else {
+            // UDP: as large a receive buffer as the kernel allows (the default 8 MB
+            // kern.ipc.maxsockbuf admits ~7 MB): a burst is queued in the kernel instead of
+            // dropped while the parser catches up.
+            for mb in [7, 4, 1] {
+                var size = Int32(mb * 1024 * 1024)
+                if setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, socklen_t(MemoryLayout<Int32>.size)) == 0 { break }
+            }
         }
         let flags = fcntl(fd, F_GETFL, 0)
         _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
@@ -284,7 +297,7 @@ nonisolated enum SocketFactory {
         guard fd >= 0 else { return .failure(SocketError(errno: errno)) }
         var zero: Int32 = 0
         setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &zero, socklen_t(MemoryLayout<Int32>.size))
-        configure(fd)
+        configure(fd, type: type)
         var addr = sockaddr_in6()
         addr.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
         addr.sin6_family = sa_family_t(AF_INET6)
@@ -333,7 +346,7 @@ nonisolated enum SocketFactory {
     private static func bind4(type: Int32, port: UInt16) -> Result<Int32, SocketError> {
         let fd = socket(AF_INET, type, 0)
         guard fd >= 0 else { return .failure(SocketError(errno: errno)) }
-        configure(fd)
+        configure(fd, type: type)
         guard bindAny4(fd, port: port) == 0 else {
             let e = errno
             close(fd)
@@ -484,6 +497,16 @@ nonisolated enum SyslogFraming {
 
     /// Removes and returns every complete message at the front of `buffer`.
     static func split(buffer: inout Data) -> [Data] {
+        var scanned = 0, examined = 0
+        return split(buffer: &buffer, scanned: &scanned, examined: &examined)
+    }
+
+    /// `split`, resuming a newline search: `scanned` bytes at the front of `buffer` are known
+    /// to be the start of a newline-delimited line with no delimiter in them (from the last
+    /// call; set again for the tail left). `examined` counts the bytes the search read (tests).
+    static func split(buffer: inout Data, scanned: inout Int, examined: inout Int) -> [Data] {
+        let resume = scanned
+        scanned = 0
         var out: [Data] = []
         var consumed = 0
         buffer.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
@@ -509,10 +532,15 @@ nonisolated enum SyslogFraming {
                     consumed = p
                     continue
                 }
-                // Newline-delimited (an unterminated tail waits; `SyslogFramer` caps it).
-                var e = p
+                // Newline-delimited (an unterminated tail waits; `SyslogFramer` caps it). The
+                // tail held from the last call starts at 0 and was searched up to `resume`
+                // already (its octet-count test above has the same answer as then): searched
+                // from 0 on every read, a 1 MB line in 1,460-byte segments read 360 MB.
+                var e = p == 0 ? min(resume, n) : p
+                let from = e
                 while e < n, b[e] != 0x0A, b[e] != 0x00 { e += 1 }
-                if e == n { break }
+                examined += e - from
+                if e == n { scanned = n - p; break }
                 out.append(trimmed(b, p, e))
                 p = e + 1
                 consumed = p
@@ -564,6 +592,10 @@ nonisolated struct SyslogFramer {
     private(set) var droppedBytes = 0
     /// Lines thrown away (over `maxFrame`, or partial ones dropped for the shared budget).
     private(set) var droppedLines = 0
+    /// How much of `buffer` the newline search has read already (it resumes there).
+    private var scanned = 0
+    /// Bytes the newline search has read in all (tests: linear in what was fed).
+    private(set) var examinedBytes = 0
 
     var bufferedBytes: Int { buffer.count }
 
@@ -582,13 +614,14 @@ nonisolated struct SyslogFramer {
         }
         guard start < bytes.count else { return [] }
         buffer.append(base.advanced(by: start).assumingMemoryBound(to: UInt8.self), count: bytes.count - start)
-        let frames = SyslogFraming.split(buffer: &buffer)
+        let frames = SyslogFraming.split(buffer: &buffer, scanned: &scanned, examined: &examinedBytes)
         // What is left is one incomplete message; octet-counted frames up to maxFrame fit,
         // with room for their length prefix.
         if buffer.count > SyslogFraming.maxFrame + 16 {
             droppedBytes += buffer.count
             droppedLines += 1
             buffer = Data()
+            scanned = 0
             discarding = true
         }
         return frames
@@ -601,12 +634,13 @@ nonisolated struct SyslogFramer {
         droppedBytes += buffer.count
         droppedLines += 1
         buffer = Data()
+        scanned = 0
         discarding = true
     }
 
     /// The peer closed: the last unterminated message, unless it was being dropped.
     mutating func finish() -> [Data] {
-        defer { buffer = Data(); discarding = false }
+        defer { buffer = Data(); scanned = 0; discarding = false }
         if discarding { return [] }
         return SyslogFraming.drain(buffer: &buffer)
     }
@@ -642,9 +676,10 @@ nonisolated final class SyslogListener: @unchecked Sendable {
     /// backlog gate.
     static let parseAhead = 4
     private let parseSlots = DispatchSemaphore(value: SyslogListener.parseAhead)
-    /// Stop / Apply ports is waiting for `queue`: read events already queued return at once
-    /// (the socket still holds their data — the drain reads it, or the source fires again), and
-    /// a flush does not wait for a parse slot.
+    /// Stop / Apply ports is waiting for `queue`: read events already queued return at once,
+    /// one already running returns after its current read (the socket still holds the rest —
+    /// the drain reads it, or the source fires again), and a flush does not wait for a parse
+    /// slot (it waited 5 ms for one per 5,000 lines: 1.6 s of a 2.9 s Stop with full sockets).
     private let urgent = Atomic<Int>(0)
     private var isUrgent: Bool { urgent.load(ordering: .relaxed) > 0 }
 
@@ -814,16 +849,25 @@ nonisolated final class SyslogListener: @unchecked Sendable {
     /// A drain always reads what a socket held when it began (the kernel's buffer: at most a
     /// few MB each, `drainOwedCap` in all) however long parsing it takes — a time limit alone
     /// lost a burst on a slow Mac (under TSan, 12,000 of 15,000 lines per client). What arrives
-    /// after that is read only for `drainSeconds`: devices that keep flooding would be read
-    /// for as long as they send, and the main thread waits for a stop (45 s under an 8-client
-    /// flood before this bound).
+    /// after that — a sender's last datagrams / segments still on their way — is read while it
+    /// keeps coming for `drainTail` after the owed bytes are read, and never past
+    /// `drainSeconds` from the start of the drain (one Stop drains UDP and TCP within it):
+    /// devices that keep flooding would be read for as long as they send, and the main thread
+    /// waits for a stop (45 s under an 8-client flood before any bound).
     static let drainSeconds = 0.5
+    /// The tail was `drainSeconds` (0.5 s from the start, fresh for each socket Apply ports
+    /// let go): a flood that never paused was read for all of it — up to 460 ms of the
+    /// 556 ms an Apply (TCP off) took under an 8-client flood — and nothing it reads was owed:
+    /// what a device sends after Stop began is beyond the account (and lost to the close for
+    /// whatever the tail does not reach).
+    static let drainTail = 0.05
     static let drainOwedCap = 256 * 1024 * 1024
     static let drainPasses = 64
-    /// queue-confined: when the drain under way stops reading what arrived after it began.
+    /// queue-confined: the latest any tail of the drain under way may read until.
     private var drainDeadline = 0.0
 
-    private var drainTimeLeft: Bool { Monotonic.now() < drainDeadline }
+    /// queue-confined: the end of a tail that starts now (never past `drainDeadline`).
+    private func tailEnd() -> Double { min(drainDeadline, Monotonic.now() + Self.drainTail) }
 
     private static func pending(_ fd: Int32) -> Int { SocketFactory.pendingBytes(fd) }
 
@@ -841,10 +885,13 @@ nonisolated final class SyslogListener: @unchecked Sendable {
     private func drainUDP(_ fd: Int32, fresh: Bool = true) {
         if fresh { drainDeadline = Monotonic.now() + Self.drainSeconds }
         var owed = min(Self.pending(fd), Self.drainOwedCap)
+        var until = owed > 0 ? Double.infinity : tailEnd()
         var quiet = 0
-        while quiet < 2, owed > 0 || drainTimeLeft {
+        while quiet < 2 {
+            if owed <= 0, until == .infinity { until = tailEnd() }
+            guard owed > 0 || Monotonic.now() < until else { break }
             var bytes = 0
-            let n = readUDP(fd, limit: 5_000, bytes: &bytes)
+            let n = readUDP(fd, limit: 5_000, bytes: &bytes, yielding: false)
             owed -= bytes
             if n > 0 { quiet = 0; continue }
             owed = 0                                   // nothing left of it
@@ -863,6 +910,8 @@ nonisolated final class SyslogListener: @unchecked Sendable {
 
     /// queue-confined: every client's bytes, pass after pass while any arrive (reading opens
     /// the sender's window, and its next segments follow), then once more after a short wait.
+    /// Until the owed bytes are read only the clients that owe are read; the others' flood
+    /// waits for the tail.
     private func drainClients(fresh: Bool = true) {
         if fresh { drainDeadline = Monotonic.now() + Self.drainSeconds }
         var owed: [Int32: Int] = [:]
@@ -872,19 +921,21 @@ nonisolated final class SyslogListener: @unchecked Sendable {
             budget -= n
             if n > 0 { owed[fd] = n }
         }
+        var until = owed.isEmpty ? tailEnd() : Double.infinity
         var quiet = 0
         while !clients.isEmpty {
-            let late = !drainTimeLeft
+            if owed.isEmpty, until == .infinity { until = tailEnd() }
+            let tail = owed.isEmpty
+            if tail, Monotonic.now() >= until { break }
             var got = 0
             for fd in Array(clients.keys) {
                 let due = owed[fd] ?? 0
-                guard due > 0 || !late else { continue }
-                let n = readTCP(fd, maxReads: 2)
+                guard due > 0 || tail else { continue }
+                let n = readTCP(fd, maxReads: 2, yielding: false)
                 got += n
                 if due > 0 { owed[fd] = n > 0 && clients[fd] != nil ? max(0, due - n) : 0 }
             }
             owed = owed.filter { $0.value > 0 }
-            if late && owed.isEmpty { break }
             if got > 0 { quiet = 0; continue }
             quiet += 1
             if quiet >= 2 { break }
@@ -984,15 +1035,15 @@ nonisolated final class SyslogListener: @unchecked Sendable {
     @discardableResult
     private func readUDP(_ fd: Int32, limit: Int = 20_000) -> Int {
         var bytes = 0
-        return readUDP(fd, limit: limit, bytes: &bytes)
+        return readUDP(fd, limit: limit, bytes: &bytes, yielding: true)
     }
 
-    /// `readUDP`, adding the datagrams' sizes to `bytes`.
-    private func readUDP(_ fd: Int32, limit: Int, bytes: inout Int) -> Int {
+    /// `readUDP`, adding the datagrams' sizes to `bytes`; `yielding` as in `readTCP`.
+    private func readUDP(_ fd: Int32, limit: Int, bytes: inout Int, yielding: Bool) -> Int {
         var storage = sockaddr_storage()
         var got = 0
         var now = Date()
-        while true {
+        while !(yielding && isUrgent) {
             if got & 63 == 63 { now = Date() }        // one clock read per 64 datagrams
             var len = socklen_t(MemoryLayout<sockaddr_storage>.size)
             let n = withUnsafeMutablePointer(to: &storage) { sp in
@@ -1097,8 +1148,10 @@ nonisolated final class SyslogListener: @unchecked Sendable {
     }
 
     /// Up to `maxReads` reads of one client (the source fires again for the rest); the bytes read.
+    /// `yielding`: a read event, which stops once Stop / Apply waits for the queue (the drain
+    /// reads the rest).
     @discardableResult
-    private func readTCP(_ fd: Int32, maxReads: Int = 64) -> Int {
+    private func readTCP(_ fd: Int32, maxReads: Int = 64, yielding: Bool = true) -> Int {
         guard let client = clients[fd] else { return 0 }
         var closed = false
         var reads = 0
@@ -1110,7 +1163,7 @@ nonisolated final class SyslogListener: @unchecked Sendable {
             let lost = client.framer.droppedLines - droppedBefore
             if lost > 0 { onLinesLost?(lost) }
         }
-        while reads < maxReads {
+        while reads < maxReads, !(yielding && isUrgent) {
             let n = recv(fd, recvBuffer, Self.recvSize, 0)
             if n > 0 {
                 bytes += n
@@ -1209,8 +1262,11 @@ nonisolated final class SyslogListener: @unchecked Sendable {
         // held back by their windows) — unless Stop / Apply is waiting for this queue.
         var slot = false
         while !slot {
+            if isUrgent || stopped {
+                slot = parseSlots.wait(timeout: .now()) == .success
+                break
+            }
             slot = parseSlots.wait(timeout: .now() + .milliseconds(5)) == .success
-            if !slot, isUrgent || stopped { break }
         }
         let overrides = self.overrides, deliver = self.deliver, slots = parseSlots
         Self.parseQueue.async {

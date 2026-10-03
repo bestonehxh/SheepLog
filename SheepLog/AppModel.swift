@@ -116,7 +116,7 @@ nonisolated struct AppSettings: Codable, Equatable, Sendable {
         let aside = url.deletingLastPathComponent().appending(path: "settings.corrupt.json")
         try? FileManager.default.removeItem(at: aside)
         try? FileManager.default.copyItem(at: url, to: aside)
-        NSLog("SheepLog: %@ is not valid JSON; starting with default settings (copy kept as %@).",
+        NSLog("UncleSpy: %@ is not valid JSON; starting with default settings (copy kept as %@).",
               url.path, aside.lastPathComponent)
         return AppSettings()
     }
@@ -230,7 +230,7 @@ final class AppModel: ObservableObject {
         SNMPTestModel.applyDemoArguments()
         mibs.loadAll()                  // parses on a background queue; the sidebar count follows
         guard !AppSettings.isRunningTests else { return }
-        // `-demoNoServices 1`: screenshots and tests while another SheepLog holds the ports.
+        // `-demoNoServices 1`: screenshots and tests while another UncleSpy holds the ports.
         guard CommandLine.value(after: "-demoNoServices") == nil else { return }
         if settings.syslogAutoStart { startSyslog() }
         if settings.trapAutoStart { startTraps() }
@@ -352,7 +352,7 @@ final class AppModel: ObservableObject {
     }
 
     /// What to tell the user when the syslog listener (or, with `traps`, the trap receiver)
-    /// could not open Settings' ports: SheepLog's own other listener on that UDP port, or the
+    /// could not open Settings' ports: UncleSpy's own other listener on that UDP port, or the
     /// error itself with how to find the program that holds it.
     private func bindFailure(_ error: String, traps isTraps: Bool) -> (message: String, detail: String?, ownClash: Bool) {
         let clash = isTraps
@@ -374,13 +374,13 @@ final class AppModel: ObservableObject {
                             : [why.message, why.detail].compactMap { $0 }.joined(separator: "\n\n")
     }
 
-    /// The port is "in use" because SheepLog's other UDP listener holds it (the trap port set
+    /// The port is "in use" because UncleSpy's other UDP listener holds it (the trap port set
     /// to the syslog port, or the other way round) — not another program, which is what
     /// `portConflictDetail` would send the user looking for with lsof.
     static func ownPortClash(_ error: String, port: UInt16, heldBy other: UInt16, starting: String,
                              holder: String) -> (message: String, detail: String)? {
         guard error.contains("EADDRINUSE"), port > 0, port == other else { return nil }
-        return ("The \(starting) cannot use UDP \(port): SheepLog’s own \(holder) is listening there.",
+        return ("The \(starting) cannot use UDP \(port): UncleSpy’s own \(holder) is listening there.",
                 "Syslog and SNMP traps need different UDP ports (usually 514 and 162). Change one of them in Settings and press Apply ports.")
     }
 
@@ -392,12 +392,12 @@ final class AppModel: ObservableObject {
         let commands = udp.filter { $0 > 0 }.map { "sudo lsof -nP -iUDP:\($0)" }
             + tcp.filter { $0 > 0 }.map { "sudo lsof -nP -iTCP:\($0) -sTCP:LISTEN" }
         return """
-            Another program is bound to the port — often a second copy of SheepLog, or another \
+            Another program is bound to the port — often a second copy of UncleSpy, or another \
             syslog / SNMP tool. To see which one, run in Terminal:
 
             \(commands.joined(separator: "\n"))
 
-            Quit that program and flip the switch in the sidebar again, or choose another port in \
+            Quit that program and press Start on the Status page again, or choose another port in \
             Settings and press Apply ports.
             """
     }
@@ -561,7 +561,7 @@ final class AppModel: ObservableObject {
             guard !settingsSaveFailing else { return }
             settingsSaveFailing = true
             report("Settings could not be saved.",
-                   detail: "\(url.path(percentEncoded: false)): \(failure) The changes apply until SheepLog quits; they are saved again with the next change.")
+                   detail: "\(url.path(percentEncoded: false)): \(failure) The changes apply until UncleSpy quits; they are saved again with the next change.")
         } else {
             settingsSaveFailing = false
         }

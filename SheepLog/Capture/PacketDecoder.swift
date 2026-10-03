@@ -46,16 +46,20 @@ nonisolated struct PacketBytes {
         return true
     }
 
-    /// PacketBytes [a, b) clamped, as text; control characters become spaces.
+    /// PacketBytes [a, b) clamped, as text; control characters become spaces — C1 controls and
+    /// bidi / format characters too (`PacketText`), else an SNI with U+202E shows reversed.
     func text(_ a: Int, _ b: Int, max: Int = 256) -> String {
         let lo = Swift.max(0, a), hi = Swift.min(p.count, b, lo + max)
         guard hi > lo else { return "" }
         var out = [UInt8](repeating: 0, count: hi - lo)
+        var high = false
         for i in lo..<hi {
             let c = p[i]
             out[i - lo] = (c < 0x20 || c == 0x7f) ? 0x20 : c
+            high = high || c >= 0x80
         }
-        return String(decoding: out, as: UTF8.self)
+        let s = String(decoding: out, as: UTF8.self)
+        return high ? PacketText.neutralised(s, with: " ") : s
     }
 
     /// Index of the first CR or LF in [a, b), or b.
@@ -68,6 +72,32 @@ nonisolated struct PacketBytes {
             i += 1
         }
         return hi
+    }
+}
+
+// MARK: - Display-safe text
+
+/// Text from packets shown in Info, the detail tree, copies and Troubleshoot titles: C0 controls
+/// and DEL are replaced where the bytes are read; this replaces what only shows once decoded —
+/// C1 controls (U+0080–009F) and the bidi / format characters that reorder what follows (U+202E
+/// in an SNI or a DNS name shows it reversed: display spoofing).
+nonisolated enum PacketText {
+    static func isUnsafe(_ v: UInt32) -> Bool {
+        switch v {
+        case 0x80...0x9F, 0x061C, 0x200E, 0x200F, 0x2028...0x202E, 0x2066...0x2069: true
+        default: false
+        }
+    }
+
+    /// `s` with every C0 / DEL / C1 control and bidi / format character replaced by `r`. Callers
+    /// skip it for text whose bytes were all ASCII (nothing to find there).
+    static func neutralised(_ s: String, with r: Unicode.Scalar) -> String {
+        guard s.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f || isUnsafe($0.value) }) else { return s }
+        var out = String.UnicodeScalarView()
+        for u in s.unicodeScalars {
+            out.append(u.value < 0x20 || u.value == 0x7f || isUnsafe(u.value) ? r : u)
+        }
+        return String(out)
     }
 }
 
@@ -729,9 +759,9 @@ nonisolated private struct DecodeRun {
         case 17: udp(off, end: end, wire: wire)
         case 1: icmp(off, end: end, ttl: ttl)
         case 58: icmp6(off, end: end, ttl: ttl)
-        case 2: igmp(off)
-        case 89: ospf(off)
-        case 112: vrrp(off)
+        case 2: igmp(off, end: end)
+        case 89: ospf(off, end: end)
+        case 112: vrrp(off, end: end)
         default:
             let name = PacketNames.ipProto(proto)
             d.protocolName = name ?? (v6 ? "IPv6" : "IPv4")
@@ -760,7 +790,9 @@ nonisolated private struct DecodeRun {
         var tsv: UInt32?, tse: UInt32?
         var sackEdges: [UInt32] = []
         var p = off + 20
-        let optEnd = min(off + max(doff, 20), b.count)
+        // Options are part of the header: never read past the datagram's end (a declared header
+        // longer than the datagram carried would otherwise read the Ethernet padding after it).
+        let optEnd = min(off + max(doff, 20), end, b.count)
         var n = 0
         while p < optEnd, n < 40 {
             n += 1
@@ -811,7 +843,10 @@ nonisolated private struct DecodeRun {
 
     mutating func udp(_ off: Int, end: Int, wire: Int) {
         d.protocolName = "UDP"
-        guard b.has(off, 8) else { d.info = "Truncated UDP header"; return }
+        // The header must lie within the IP datagram, not in the Ethernet padding after it —
+        // a datagram whose total length covers only the IP header has no UDP header at all
+        // (TCP's guard has required this all along).
+        guard b.has(off, 8), off + 8 <= end else { d.info = "Truncated UDP header"; return }
         let sp = b.u16(off), dp = b.u16(off + 2), len = Int(b.u16(off + 4))
         let payloadLength = len >= 8 ? len - 8 : max(0, wire - 8)
         d.payloadOffset = min(off + 8, b.count)
@@ -827,14 +862,23 @@ nonisolated private struct DecodeRun {
         if payEnd > payStart { udpApp(sp, dp, payStart, payEnd) }
     }
 
+    /// `n` bytes at `o` were captured and lie inside the IP datagram (which ends at `end`): not
+    /// in the Ethernet padding after a datagram that is only an IP header. `end` is the buffer's
+    /// end for TSO (total length 0) and for a frame cut by the snap length, so those read as far
+    /// as they were captured, as before.
+    func inDatagram(_ o: Int, _ n: Int, end: Int) -> Bool {
+        b.has(o, n) && o + n <= end
+    }
+
     mutating func icmp(_ off: Int, end: Int, ttl: UInt8) {
         d.protocolName = "ICMP"
-        guard b.has(off, 4) else { d.info = "Truncated ICMP"; return }
+        // As for TCP / UDP: 20 zero padding bytes after a 20-byte datagram are no echo reply.
+        guard inDatagram(off, 4, end: end) else { d.info = "Truncated ICMP"; return }
         let type = b.u8(off), code = b.u8(off + 1)
         var id: UInt16?, seq: UInt16?
         switch type {
         case 0, 8, 13, 14, 15, 16, 17, 18:
-            if b.has(off, 8) { id = b.u16(off + 4); seq = b.u16(off + 6) }
+            if inDatagram(off, 8, end: end) { id = b.u16(off + 4); seq = b.u16(off + 6) }
         default: break
         }
         d.icmp = ICMPHeader(type: type, code: code, identifier: id, sequence: seq)
@@ -842,9 +886,9 @@ nonisolated private struct DecodeRun {
         switch type {
         case 0: d.info = Self.echo("reply", id, seq) + " ttl=\(ttl)"
         case 8: d.info = Self.echo("request", id, seq) + " ttl=\(ttl)"
-        case 3: d.info = "Destination unreachable (\(PacketNames.icmpUnreachable(code)))" + embedded(off + 8)
+        case 3: d.info = "Destination unreachable (\(PacketNames.icmpUnreachable(code)))" + embedded(off + 8, end: end)
         case 11:
-            d.info = "Time exceeded (\(code == 0 ? "TTL exceeded in transit" : code == 1 ? "Fragment reassembly time exceeded" : "Code \(code)"))" + embedded(off + 8)
+            d.info = "Time exceeded (\(code == 0 ? "TTL exceeded in transit" : code == 1 ? "Fragment reassembly time exceeded" : "Code \(code)"))" + embedded(off + 8, end: end)
         case 5:
             let what = switch code {
             case 0: "Redirect for network"
@@ -853,7 +897,7 @@ nonisolated private struct DecodeRun {
             case 3: "Redirect for TOS and host"
             default: "Code \(code)"
             }
-            d.info = "Redirect (\(what))" + (b.has(off + 4, 4) ? " gateway \(PacketFormat.ipv4(b, off + 4))" : "")
+            d.info = "Redirect (\(what))" + (inDatagram(off + 4, 4, end: end) ? " gateway \(PacketFormat.ipv4(b, off + 4))" : "")
         case 4: d.info = "Source quench"
         case 9: d.info = "Router advertisement"
         case 10: d.info = "Router solicitation"
@@ -872,18 +916,18 @@ nonisolated private struct DecodeRun {
     }
 
     /// The original datagram quoted inside an ICMP error.
-    func embedded(_ off: Int) -> String {
-        guard b.has(off, 20), b.u8(off) >> 4 == 4 else { return "" }
+    func embedded(_ off: Int, end: Int) -> String {
+        guard inDatagram(off, 20, end: end), b.u8(off) >> 4 == 4 else { return "" }
         let ihl = Int(b.u8(off) & 0x0F) * 4
         guard ihl >= 20 else { return "" }
         let proto = b.u8(off + 9)
         let src = PacketFormat.ipv4(b, off + 12), dst = PacketFormat.ipv4(b, off + 16)
         let name = PacketNames.ipProto(proto) ?? "proto \(proto)"
-        if (proto == 6 || proto == 17), b.has(off + ihl, 4) {
+        if (proto == 6 || proto == 17), inDatagram(off + ihl, 4, end: end) {
             return " for \(src):\(b.u16(off + ihl)) → \(dst):\(b.u16(off + ihl + 2)) \(name)"
         }
         // An ICMP traceroute's probe: which echo (id / seq) this hop answered.
-        if proto == 1, b.has(off + ihl, 8), b.u8(off + ihl) == 8 {
+        if proto == 1, inDatagram(off + ihl, 8, end: end), b.u8(off + ihl) == 8 {
             return " for \(src) → \(dst) ICMP echo id=\(PacketFormat.hex4(b.u16(off + ihl + 4))) seq=\(b.u16(off + ihl + 6))"
         }
         return " for \(src) → \(dst) \(name)"
@@ -891,30 +935,30 @@ nonisolated private struct DecodeRun {
 
     mutating func icmp6(_ off: Int, end: Int, ttl: UInt8) {
         d.protocolName = "ICMPv6"
-        guard b.has(off, 4) else { d.info = "Truncated ICMPv6"; return }
+        guard inDatagram(off, 4, end: end) else { d.info = "Truncated ICMPv6"; return }
         let type = b.u8(off), code = b.u8(off + 1)
         var id: UInt16?, seq: UInt16?
-        if type == 128 || type == 129, b.has(off, 8) { id = b.u16(off + 4); seq = b.u16(off + 6) }
+        if type == 128 || type == 129, inDatagram(off, 8, end: end) { id = b.u16(off + 4); seq = b.u16(off + 6) }
         d.icmp = ICMPHeader(type: type, code: code, identifier: id, sequence: seq)
         d.payloadOffset = min(off + 8, b.count)
         switch type {
         case 128: d.info = Self.echo("request", id, seq) + " hlim=\(ttl)"
         case 129: d.info = Self.echo("reply", id, seq) + " hlim=\(ttl)"
         case 1: d.info = "Destination Unreachable (\(PacketNames.icmp6Unreachable(code)))"
-        case 2: d.info = "Packet Too Big" + (b.has(off + 4, 4) ? " (MTU=\(b.u32(off + 4)))" : "")
+        case 2: d.info = "Packet Too Big" + (inDatagram(off + 4, 4, end: end) ? " (MTU=\(b.u32(off + 4)))" : "")
         case 3: d.info = "Time Exceeded (\(code == 0 ? "hop limit exceeded in transit" : "fragment reassembly time exceeded"))"
         case 4: d.info = "Parameter Problem"
-        case 130: d.info = "Multicast Listener Query" + (b.has(off + 8, 16) ? " \(PacketFormat.ipv6(b, off + 8))" : "")
-        case 131: d.info = "Multicast Listener Report" + (b.has(off + 8, 16) ? " \(PacketFormat.ipv6(b, off + 8))" : "")
-        case 132: d.info = "Multicast Listener Done" + (b.has(off + 8, 16) ? " \(PacketFormat.ipv6(b, off + 8))" : "")
+        case 130: d.info = "Multicast Listener Query" + (inDatagram(off + 8, 16, end: end) ? " \(PacketFormat.ipv6(b, off + 8))" : "")
+        case 131: d.info = "Multicast Listener Report" + (inDatagram(off + 8, 16, end: end) ? " \(PacketFormat.ipv6(b, off + 8))" : "")
+        case 132: d.info = "Multicast Listener Done" + (inDatagram(off + 8, 16, end: end) ? " \(PacketFormat.ipv6(b, off + 8))" : "")
         case 143: d.info = "Multicast Listener Report Message v2"
         case 133: d.info = "Router Solicitation"
         case 134: d.info = "Router Advertisement" + (d.ip.map { " from \($0.source)" } ?? "")
-        case 135: d.info = "Neighbor Solicitation" + (b.has(off + 8, 16) ? " for \(PacketFormat.ipv6(b, off + 8))" : "")
+        case 135: d.info = "Neighbor Solicitation" + (inDatagram(off + 8, 16, end: end) ? " for \(PacketFormat.ipv6(b, off + 8))" : "")
         case 136:
             var s = "Neighbor Advertisement"
-            if b.has(off + 8, 16) { s += " \(PacketFormat.ipv6(b, off + 8))" }
-            let f = b.u8(off + 4)
+            if inDatagram(off + 8, 16, end: end) { s += " \(PacketFormat.ipv6(b, off + 8))" }
+            let f = inDatagram(off + 4, 1, end: end) ? b.u8(off + 4) : 0
             var fl: [String] = []
             if f & 0x80 != 0 { fl.append("rtr") }
             if f & 0x40 != 0 { fl.append("sol") }
@@ -926,11 +970,11 @@ nonisolated private struct DecodeRun {
         }
     }
 
-    mutating func igmp(_ off: Int) {
+    mutating func igmp(_ off: Int, end: Int) {
         d.protocolName = "IGMP"
-        guard b.has(off, 1) else { d.info = "Truncated IGMP"; return }
+        guard inDatagram(off, 1, end: end) else { d.info = "Truncated IGMP"; return }
         let type = b.u8(off)
-        let group = b.has(off + 4, 4) ? PacketFormat.ipv4(b, off + 4) : ""
+        let group = inDatagram(off + 4, 4, end: end) ? PacketFormat.ipv4(b, off + 4) : ""
         switch type {
         case 0x11: d.info = "Membership Query" + (group.isEmpty || group == "0.0.0.0" ? ", general" : ", specific for group \(group)")
         case 0x12: d.info = "Membership Report (v1) group \(group)"
@@ -941,9 +985,9 @@ nonisolated private struct DecodeRun {
         }
     }
 
-    mutating func ospf(_ off: Int) {
+    mutating func ospf(_ off: Int, end: Int) {
         d.protocolName = "OSPF"
-        guard b.has(off, 2) else { d.info = "Truncated OSPF"; return }
+        guard inDatagram(off, 2, end: end) else { d.info = "Truncated OSPF"; return }
         let t = b.u8(off + 1)
         d.info = switch t {
         case 1: "Hello Packet"
@@ -955,9 +999,9 @@ nonisolated private struct DecodeRun {
         }
     }
 
-    mutating func vrrp(_ off: Int) {
+    mutating func vrrp(_ off: Int, end: Int) {
         d.protocolName = "VRRP"
-        guard b.has(off, 4) else { d.info = "Truncated VRRP"; return }
+        guard inDatagram(off, 4, end: end) else { d.info = "Truncated VRRP"; return }
         let v = b.u8(off) >> 4
         d.info = "Announcement (v\(v)) VRID=\(b.u8(off + 1)) Prio=\(b.u8(off + 2))"
     }
@@ -1330,6 +1374,7 @@ nonisolated private struct DecodeRun {
         var p = q
         var after: Int?
         var jumps = 0
+        var high = false
         while true {
             guard p < end, b.has(p, 1) else { return nil }
             let len = Int(b.u8(p))
@@ -1351,11 +1396,13 @@ nonisolated private struct DecodeRun {
             for i in 0..<len {
                 let c = b.p[p + 1 + i]
                 out.append(c < 0x20 || c == 0x7f ? 0x3f : c)
+                high = high || c >= 0x80
             }
             guard out.count <= 255 else { return nil }
             p += 1 + len
         }
-        let name = out.isEmpty ? "<Root>" : String(decoding: out, as: UTF8.self)
+        var name = out.isEmpty ? "<Root>" : String(decoding: out, as: UTF8.self)
+        if high { name = PacketText.neutralised(name, with: "?") }
         return (name, after ?? p + 1)
     }
 

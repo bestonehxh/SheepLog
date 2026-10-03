@@ -26,6 +26,8 @@ enum DemoFlags {
     static let snmpUser = CommandLine.value(after: "-demoSNMPUser")
     /// `quick|walk|interfaces`.
     static let snmpAction = CommandLine.value(after: "-demoSNMPAction")
+    /// `-demoSNMPSelect <n>`: select the n-th var-bind row (1-based) once the result has it.
+    static let snmpSelect = CommandLine.value(after: "-demoSNMPSelect").flatMap { Int($0) }
     /// `-demoMIBs <object>`: open the MIBs pane with that object revealed.
     static let mibs = CommandLine.value(after: "-demoMIBs")
     /// `-demoMIBFolder <dir>` · `-demoMIBImport <file or folder>`.

@@ -454,7 +454,7 @@ nonisolated final class CaptureReader: Sendable {
         /// The packet `pcap_next_ex` just returned, into `batch`.
         func take(_ h: pcap_pkthdr, _ bytes: UnsafePointer<UInt8>) {
             id += 1
-            let ts = Double(h.ts.tv_sec) + Double(h.ts.tv_usec) / 1_000_000
+            let ts = PacketTime.seconds(h.ts.tv_sec, h.ts.tv_usec)   // clamped, as a file's
             if first == nil { first = ts }
             let caplen = Int(h.caplen)
             let raw = UnsafeRawBufferPointer(start: bytes, count: caplen)

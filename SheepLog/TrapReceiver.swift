@@ -395,6 +395,12 @@ nonisolated final class TrapListener: @unchecked Sendable {
             let oldFD = fd, oldSource = source, oldClosed = closed
             install(newFD)
             drainSocket(oldFD)
+            // Only readAvailable schedules a flush, and nothing may ever arrive on the new
+            // socket — the exact case the drain exists for (a sender that has just stopped):
+            // the traps it read would sit in `pending` until the next datagram or ⌘Q. A batch
+            // whose flush was already scheduled is flushed here instead; the scheduled flush
+            // then finds `pending` empty.
+            flush()
             guard let oldSource else { Darwin.close(oldFD); return nil }   // bound, never resumed
             oldSource.cancel()
             return oldClosed

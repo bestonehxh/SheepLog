@@ -13,7 +13,7 @@ nonisolated enum KeychainStore {
     static let service = "Bestchaan.SheepLog"
 
     /// Tests and demo/screenshot runs never touch the real Keychain: every Debug build is signed
-    /// differently, so each one would raise a "SheepLog wants to use your confidential
+    /// differently, so each one would raise a "UncleSpy wants to use your confidential
     /// information" prompt for the items an earlier build saved — the owner once found a stack
     /// of them on screen. Those runs keep credentials in memory for the process's lifetime.
     static var isolated: Bool { AppSettings.isRunningTests || ephemeral }
@@ -826,7 +826,7 @@ final class SNMPTestModel: ObservableObject {
             "Clear the Context field, or use a context the device defines (a VRF or VLAN instance name)."
         case .decode(let text) where text.hasSuffix("report)"):
             "The agent turned the request down before reading it — check the SNMP version and security settings."
-        case .decode: "The agent sent something SheepLog could not read — try another SNMP version."
+        case .decode: "The agent sent something UncleSpy could not read — try another SNMP version."
         case .unknownUser: "The user name is case-sensitive and must exist in the device’s SNMPv3 user table."
         case .wrongDigest: "The device knows this user, but the auth key does not match — check the auth protocol (MD5 / SHA-1 / SHA-2) and the auth password."
         case .unknownEngineID: "The device’s engine ID changed during the test — run it again."
@@ -1045,6 +1045,9 @@ final class SNMPTestModel: ObservableObject {
 
 // MARK: - View
 
+/// SNMP ▸ Test, the LabDC way: the page header says what happened ("Ready", "Asking 10.1.0.1…",
+/// "core-sw1 answered in 3.2 ms", the error in red) with the actions on its status line; then a
+/// label-above form (Target, Object), the result as words, and the tables in the page column.
 struct SNMPTestView: View {
     @ObservedObject private var model = SNMPTestModel.shared
     @ObservedObject private var app = AppModel.shared
@@ -1054,50 +1057,66 @@ struct SNMPTestView: View {
     @State private var selection = Set<VarBindRow.ID>()
     @State private var suggestions: [String] = []
 
+    /// The model's heading before the first run (a slogan the page no longer shows).
+    private static let idleHeading = "Ask a device."
+
     var body: some View {
         let _ = PaneProbe.ran("body.snmpTest")
         VStack(spacing: 0) {
-            PaneHeader(eyebrow: "SNMP", heading: model.heading, subtitle: model.subtitle) {
-                recentMenu
+            PaneHeader(pane: .snmpTest, status: headerStatus, detail: headerDetail, problem: headerProblem) {
+                headerActions
             }
             .paneColumn()
             .padding(.top, Metrics.headerTop)
-            .padding(.bottom, 12)
+            .padding(.bottom, 14)
 
-            PaneStrip { strip }
-
-            PaneBody {
-                targetGroup
-                objectGroup
-                if let outcome = model.outcome { resultCard(outcome) }
+            PaneBody(spacing: 28) {
+                targetSection
+                objectSection
+                outcomeSection
                 results
             }
         }
     }
 
-    // MARK: Strip
+    // MARK: Header
+
+    /// The state as a sentence, without the model's trailing period ("Stopped", "10.1.0.1 did
+    /// not answer"); "Ready" before the first run.
+    private var headerStatus: String {
+        let h = model.heading
+        if h == Self.idleHeading { return "Ready" }
+        return h.hasSuffix(".") && !h.hasSuffix("…") ? String(h.dropLast()) : h
+    }
+
+    /// While a run is under way: what it is and how far a walk got.
+    private var headerDetail: String {
+        guard let running = model.running else { return "" }
+        return running == "Walk" || running == "Interfaces" ? "\(running) · \(Format.count(model.rows.count)) var-binds" : running
+    }
+
+    private var headerProblem: Bool {
+        if case .failure? = model.outcome { return true }
+        return false
+    }
 
     @ViewBuilder
-    private var strip: some View {
-        Button("Quick test") { model.quickTest() }
-            .buttonStyle(.borderedProminent)
-            .tint(Theme.accent)
-            .keyboardShortcut(.return, modifiers: .command)
-            .disabled(!model.canRun)
-        Button("Get") { model.get() }.disabled(!model.canRun)
-        Button("Get next") { model.getNext() }.disabled(!model.canRun)
-        Button("Walk") { model.walk() }.disabled(!model.canRun)
-        Button("Interfaces") { model.walkInterfaces() }.disabled(!model.canRun)
-        Spacer(minLength: 0)
-        if let running = model.running {
-            ProgressView().controlSize(.small)
-            Text(running == "Walk" || running == "Interfaces" ? "\(running) · \(Format.count(model.rows.count))" : running)
-                .font(.system(size: 12))
-                .foregroundStyle(Theme.dimText)
-                .monospacedDigit()
-            Button("Cancel") { model.cancel() }
+    private var headerActions: some View {
+        if model.isRunning {
+            Button("Stop") { model.cancel() }
+                .buttonStyle(.quietLink)
+                .fixedSize()
                 .keyboardShortcut(.cancelAction)
         }
+        Button("Get") { model.get() }.buttonStyle(.quietLink).fixedSize().disabled(!model.canRun)
+        Button("Get next") { model.getNext() }.buttonStyle(.quietLink).fixedSize().disabled(!model.canRun)
+        Button("Walk") { model.walk() }.buttonStyle(.quietLink).fixedSize().disabled(!model.canRun)
+        Button("Interfaces") { model.walkInterfaces() }.buttonStyle(.quietLink).fixedSize().disabled(!model.canRun)
+        Button("Quick test") { model.quickTest() }
+            .buttonStyle(.quietPrimary)
+            .fixedSize()
+            .keyboardShortcut(.return, modifiers: .command)
+            .disabled(!model.canRun)
     }
 
     private var recentMenu: some View {
@@ -1109,7 +1128,14 @@ struct SNMPTestView: View {
                 Button(SNMPTestModel.display(host: t.host, port: t.port)) { model.fill(from: t) }
             }
         }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.visible)
         .fixedSize()
+    }
+
+    /// A field's placeholder in the faint ink (the quiet field draws it as dark as a value).
+    private static func prompt(_ text: String) -> Text {
+        Text(text).foregroundStyle(Theme.faintText)
     }
 
     // MARK: Target
@@ -1118,117 +1144,133 @@ struct SNMPTestView: View {
     static let privHelp = "AES-192 and AES-256 keys are extended two ways. Cisco, Palo Alto, Fortinet, Aruba: AES-192 / AES-256 "
         + "(the Reeder/Cisco extension, net-snmp's AES192C / AES256C). net-snmp/Linux agents built with AES192 / AES256 "
         + "(not AES256C): AES-192 / AES-256 (Blumenthal). AES-128 and DES need no extension. "
-        + "A wrong choice looks like a wrong priv password; SheepLog then tries the other extension once and says which one works."
+        + "A wrong choice looks like a wrong priv password; UncleSpy then tries the other extension once and says which one works."
 
-    private var targetGroup: some View {
-        PaneGroup("Target") {
-            KeyValueRow("Host") {
-                TextField("10.1.0.1 or switch.example.net", text: $model.host)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12, design: .monospaced))
-                    .accessibilityLabel("Host")
-                    .onSubmit { model.quickTest() }        // Return runs Quick test
-                    .valueControl()
-            }
-            KeyValueRow("Port") {
-                TextField("161", text: $model.portText)
-                    .textFieldStyle(.roundedBorder)
-                    .accessibilityLabel("Port")
-                    .onSubmit { model.quickTest() }
-                    .valueNumber()
+    private var targetSection: some View {
+        FormSection("Target", accessory: recentMenu) {
+            HStack(alignment: .top, spacing: 28) {
+                QuietField("Host") {
+                    TextField("Host", text: $model.host, prompt: Self.prompt("10.1.0.1 or switch.example.net"))
+                        .textFieldStyle(.quiet)
+                        .font(Theme.mono)
+                        .accessibilityLabel("Host")
+                        .onSubmit { model.quickTest() }        // Return runs Quick test
+                }
+                .frame(maxWidth: 520, alignment: .leading)
+                QuietField("Port", width: 80) {
+                    TextField("161", text: $model.portText)
+                        .textFieldStyle(.quiet)
+                        .accessibilityLabel("Port")
+                        .onSubmit { model.quickTest() }
+                }
+                QuietField("Timeout (s)", width: 80) {
+                    TextField("", value: $model.timeout, format: .number)
+                        .textFieldStyle(.quiet)
+                        .accessibilityLabel("Timeout in seconds")
+                }
+                QuietField("Retries", width: 80) {
+                    RetriesField(retries: $model.retries)
+                }
+                Spacer(minLength: 0)
             }
             if let problem = model.portProblem {
-                NoteRow(text: problem, systemImage: "exclamationmark.triangle", tint: Theme.warn)
-            }
-            KeyValueRow("Version") {
-                Picker("SNMP version", selection: $model.version) {
-                    ForEach(SNMPVersion.allCases, id: \.self) { Text($0.label).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .tint(Theme.accent)
-                .fixedSize()
-                .accessibilityLabel("SNMP version")
+                FormNote(text: problem, problem: true)
             }
             if model.version == .v3 {
-                KeyValueRow("User") {
-                    TextField("", text: $model.username)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12, design: .monospaced))
-                        .valueControl()
+                HStack(alignment: .top, spacing: 28) {
+                    versionField
+                    QuietField("User") {
+                        TextField("", text: $model.username)
+                            .textFieldStyle(.quiet)
+                            .font(Theme.mono)
+                            .accessibilityLabel("User")
+                    }
+                    .frame(maxWidth: 260, alignment: .leading)
+                    QuietField("Context") {
+                        TextField("Context", text: $model.contextName, prompt: Self.prompt("optional"))
+                            .textFieldStyle(.quiet)
+                            .font(Theme.mono)
+                            .accessibilityLabel("Context")
+                    }
+                    .frame(maxWidth: 200, alignment: .leading)
+                    .help("SNMPv3 context name — empty for the default context. Some devices use it for VRFs or VLAN instances.")
                 }
-                KeyValueRow("Auth") {
-                    HStack(spacing: 8) {
+                HStack(alignment: .top, spacing: 28) {
+                    QuietField("Auth", width: Self.protocolWidth) {
                         Picker("Auth protocol", selection: $model.authProtocol) {
                             ForEach(AuthProtocol.allCases, id: \.self) { Text($0.label).tag($0) }
                         }
                         .labelsHidden()
-                        .frame(width: 170)
+                        .fixedSize()
+                    }
+                    QuietField("Auth password", width: Self.passwordWidth) {
                         SecureField("auth password", text: $model.authPassword)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 200)
+                            .textFieldStyle(.quiet)
                             .disabled(model.authProtocol == .none)
                     }
+                    Spacer(minLength: 0)
                 }
-                KeyValueRow("Priv", help: Self.privHelp) {
-                    HStack(spacing: 8) {
+                HStack(alignment: .top, spacing: 28) {
+                    QuietField("Priv", width: Self.protocolWidth) {
                         Picker("Priv protocol", selection: $model.privProtocol) {
                             ForEach(PrivProtocol.allCases, id: \.self) { Text($0.label).tag($0) }
                         }
                         .labelsHidden()
-                        .frame(width: 170)
+                        .fixedSize()
                         .disabled(model.authProtocol == .none)
+                    }
+                    .help(Self.privHelp)
+                    QuietField("Priv password", width: Self.passwordWidth) {
                         SecureField("priv password", text: $model.privPassword)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 200)
+                            .textFieldStyle(.quiet)
                             .disabled(model.authProtocol == .none || model.privProtocol == .none)
                     }
-                }
-                KeyValueRow("Context", help: "SNMPv3 context name — empty for the default context. Some devices use it for VRFs or VLAN instances.") {
-                    TextField("optional", text: $model.contextName)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12, design: .monospaced))
-                        .valueControl()
+                    .help(Self.privHelp)
+                    Spacer(minLength: 0)
                 }
                 if shortPassword {
-                    NoteRow(text: "SNMPv3 passwords shorter than 8 characters are rejected by most agents (RFC 3414 recommends at least 8).",
-                            systemImage: "exclamationmark.triangle", tint: Theme.warn)
+                    FormNote(text: "SNMPv3 passwords shorter than 8 characters are rejected by most agents (RFC 3414 recommends at least 8).",
+                             problem: true)
                 }
             } else {
-                KeyValueRow("Community") {
-                    HStack(spacing: 6) {
-                        Group {
-                            if revealCommunity {
-                                TextField("", text: $model.community)
-                            } else {
-                                SecureField("", text: $model.community)
+                HStack(alignment: .top, spacing: 28) {
+                    versionField
+                    QuietField("Community") {
+                        HStack(alignment: .firstTextBaseline, spacing: 12) {
+                            Group {
+                                if revealCommunity {
+                                    TextField("", text: $model.community)
+                                } else {
+                                    SecureField("", text: $model.community)
+                                }
                             }
+                            .textFieldStyle(.quiet)
+                            .font(Theme.mono)
+                            .accessibilityLabel("Community")
+                            Button(revealCommunity ? "Hide" : "Show") { revealCommunity.toggle() }
+                                .buttonStyle(QuietLinkStyle(size: 12))
+                                .help(revealCommunity ? "Hide the community" : "Show the community")
+                                .accessibilityLabel(revealCommunity ? "Hide the community" : "Show the community")
                         }
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12, design: .monospaced))
-                        .frame(width: 228)
-                        Button { revealCommunity.toggle() } label: {
-                            Image(systemName: revealCommunity ? "eye.slash" : "eye")
-                        }
-                        .buttonStyle(.borderless)
-                        .help(revealCommunity ? "Hide the community" : "Show the community")
-                        .accessibilityLabel(revealCommunity ? "Hide the community" : "Show the community")
                     }
-                }
-            }
-            KeyValueRow("Timeout / retries") {
-                HStack(spacing: 6) {
-                    TextField("", value: $model.timeout, format: .number)
-                        .textFieldStyle(.roundedBorder)
-                        .valueNumber(60)
-                    Text("s").font(.system(size: 12)).foregroundStyle(Theme.faintText)
-                    Stepper(value: $model.retries, in: 0...10) {
-                        Text(model.retries == 1 ? "1 retry" : "\(model.retries) retries").font(.system(size: 12)).foregroundStyle(Theme.text2)
-                    }
-                    .padding(.leading, 10)
+                    .frame(maxWidth: 320, alignment: .leading)
+                    Spacer(minLength: 0)
                 }
             }
         }
+    }
+
+    /// Wide enough for the longest priv choice ("AES-256 (Blumenthal)") as a system menu.
+    private static let protocolWidth: CGFloat = 200
+    private static let passwordWidth: CGFloat = 240
+
+    private var versionField: some View {
+        QuietField("Version") {
+            QuietTabs(items: SNMPVersion.allCases.map { ($0, $0.label) }, selection: $model.version, spacing: 14, size: 13)
+                .padding(.vertical, 1)
+                .accessibilityLabel("SNMP version")
+        }
+        .fixedSize()
     }
 
     private var shortPassword: Bool {
@@ -1239,15 +1281,15 @@ struct SNMPTestView: View {
 
     // MARK: Object
 
-    private var objectGroup: some View {
-        PaneGroup("Object", accessory: presetsMenu) {
-            KeyValueRow("OID", help: "A name (sysDescr, IF-MIB::ifOperStatus, ifDescr.3) or a numeric OID (1.3.6.1.2.1.1). Get on a scalar name reads its .0 instance.") {
-                VStack(alignment: .leading, spacing: 4) {
-                    TextField("system  ·  ifTable  ·  1.3.6.1.4.1.14823", text: $model.oidText)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12, design: .monospaced))
-                        .frame(width: 420)
+    private var objectSection: some View {
+        FormSection("Object", accessory: presetsMenu) {
+            QuietField("OID") {
+                VStack(alignment: .leading, spacing: 6) {
+                    TextField("OID", text: $model.oidText, prompt: Self.prompt("system  ·  ifTable  ·  1.3.6.1.4.1.14823"))
+                        .textFieldStyle(.quiet)
+                        .font(Theme.mono)
                         .focused($oidFocused)
+                        .accessibilityLabel("OID")
                         .onSubmit {
                             suggestions = []
                             model.get()
@@ -1260,10 +1302,11 @@ struct SNMPTestView: View {
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundStyle(Theme.faintText)
                             .identifierText()
-                            .frame(width: 420, alignment: .leading)
                     }
                 }
             }
+            .frame(maxWidth: 520, alignment: .leading)
+            .help("A name (sysDescr, IF-MIB::ifOperStatus, ifDescr.3) or a numeric OID (1.3.6.1.2.1.1). Get on a scalar name reads its .0 instance.")
         }
         .onChange(of: model.oidText) { _, text in updateSuggestions(text) }
     }
@@ -1283,29 +1326,25 @@ struct SNMPTestView: View {
     }
 
     private var completionList: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        GroupedList {
             ForEach(suggestions, id: \.self) { name in
                 Button {
                     model.oidText = name
                     suggestions = []
                 } label: {
                     HStack {
-                        Text(name).font(.system(size: 12, design: .monospaced)).foregroundStyle(Theme.text)
+                        Text(name).font(Theme.mono).foregroundStyle(Theme.text)
                         Spacer()
                         if let oid = mibs.oid(forName: name) {
-                            Text(oid.dotted).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(Theme.faintText)
+                            Text(oid.dotted).font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.faintText)
                         }
                     }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
+                    .padding(.vertical, 5)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
         }
-        .padding(.vertical, 4)
-        .frame(width: 420, alignment: .leading)
-        .panelCard(cornerRadius: Metrics.field)
     }
 
     private static let presets: [(String, OID)] = [
@@ -1340,60 +1379,66 @@ struct SNMPTestView: View {
                 Button("\(name) — \(oid.dotted)") { model.oidText = oid.dotted }
             }
         }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.visible)
         .fixedSize()
     }
 
-    // MARK: Result card
+    // MARK: Result
 
+    /// What the last run found, as words: the summary and the system facts on success, the
+    /// error and what to check on failure, and the run's own line (target, version, what it
+    /// read) — or only that line after a Stop.
     @ViewBuilder
-    private func resultCard(_ outcome: SNMPTestModel.Outcome) -> some View {
-        switch outcome {
-        case .success(let summary, let facts):
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(spacing: 8) {
-                    Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.ok)
+    private var outcomeSection: some View {
+        if let outcome = model.outcome {
+            FormSection("Result") {
+                switch outcome {
+                case .success(let summary, let facts):
                     Text(summary)
-                        .font(.system(size: 12.5, weight: .semibold))
+                        .font(Theme.body)
                         .foregroundStyle(Theme.text)
                         .textSelection(.enabled)
-                        .identifierText()
-                    Spacer(minLength: 0)
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 11)
-                ForEach(Array(facts.enumerated()), id: \.offset) { _, fact in
-                    Rectangle().fill(Theme.hairlineSoft).frame(height: 0.5)
-                    // Values on the Target / Object groups' value column (key 200 + 12 there,
-                    // 196 + 16 here); sysDescr may wrap (one line would cut it to "Kernel…13432").
-                    FactRow(key: fact.0, value: fact.1, keyWidth: Metrics.key - 4, monoLines: 3)
-                }
-            }
-            .background(Theme.ok.opacity(0.07))
-            .panelCard()
-        case .failure(_, _, let title, let hint):
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Image(systemName: "xmark.octagon.fill").foregroundStyle(Theme.err)
+                        .fixedSize(horizontal: false, vertical: true)
+                    runLine
+                    if !facts.isEmpty {
+                        GroupedList {
+                            ForEach(Array(facts.enumerated()), id: \.offset) { _, fact in
+                                // sysDescr may wrap (one line would cut it to "Kernel…13432").
+                                ResultFactRow(key: fact.0, value: fact.1)
+                            }
+                        }
+                        .padding(.top, 6)
+                    }
+                case .failure(_, _, let title, let hint):
                     Text(title)
-                        .font(.system(size: 12.5, weight: .semibold))
-                        .foregroundStyle(Theme.text)
+                        .font(Theme.body)
+                        .foregroundStyle(Theme.err)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
-                }
-                if !hint.isEmpty {
-                    Text(hint)
-                        .font(.system(size: 12))
-                        .foregroundStyle(Theme.text2)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(.leading, 24)
+                    if !hint.isEmpty {
+                        Text(hint)
+                            .font(Theme.body)
+                            .foregroundStyle(Theme.text2)
+                            .lineSpacing(2)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: 720, alignment: .leading)
+                    }
+                    runLine
                 }
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Theme.err.opacity(0.08))
-            .panelCard()
+        } else if !model.isRunning, model.heading != Self.idleHeading, !model.subtitle.isEmpty {
+            FormSection("Result") { runLine }
         }
+    }
+
+    private var runLine: some View {
+        Text(model.subtitle)
+            .font(Theme.detail)
+            .foregroundStyle(Theme.faintText)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     // MARK: Results
@@ -1401,41 +1446,41 @@ struct SNMPTestView: View {
     @ViewBuilder
     private var results: some View {
         if !model.rows.isEmpty || model.isRunning || !model.interfaces.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 10) {
+            let showsInterfaces = model.resultView == .interfaces && !model.interfaces.isEmpty
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .firstTextBaseline, spacing: 20) {
                     if !model.interfaces.isEmpty {
-                        Picker("Results as", selection: $model.resultView) {
-                            ForEach(SNMPTestModel.ResultView.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-                        }
-                        .pickerStyle(.segmented)
-                        .labelsHidden()
-                        .frame(width: 200)
+                        QuietTabs(items: SNMPTestModel.ResultView.allCases.map { ($0, $0.rawValue) },
+                                  selection: $model.resultView, spacing: 18, size: 13)
+                            .accessibilityLabel("Results as")
                     } else {
-                        Text("Results").font(.system(size: 16.5, weight: .semibold)).foregroundStyle(Theme.text)
+                        Text("Results").font(Theme.emphasis).foregroundStyle(Theme.text)
+                            .accessibilityAddTraits(.isHeader)
                     }
                     Spacer(minLength: 0)
-                    TextField(model.resultView == .interfaces && !model.interfaces.isEmpty
-                              ? "Filter name, alias, type or status" : "Filter name or value", text: $model.filter)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 220)
-                        .controlSize(.small)
                 }
-                if model.resultView == .interfaces && !model.interfaces.isEmpty {
+                HStack(alignment: .firstTextBaseline, spacing: 20) {
+                    TextField(showsInterfaces ? "Filter name, alias, type or status" : "Filter name or value", text: $model.filter)
+                        .textFieldStyle(.quiet)
+                        .frame(maxWidth: 300)
+                        .accessibilityLabel("Filter results")
+                    Spacer(minLength: 12)
+                    Text(model.footer)
+                        .font(Theme.detail)
+                        .foregroundStyle(Theme.faintText)
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    CopyButton("Copy", value: model.tsv(model.displayed), bordered: true,
+                               help: "Copy the rows shown, tab-separated")
+                    Button("Export CSV…") { model.exportCSV() }
+                        .buttonStyle(.quietLink)
+                        .disabled(model.displayed.isEmpty)
+                }
+                if showsInterfaces {
                     interfaceTable
                 } else {
                     varBindTable
-                }
-                HStack(spacing: 8) {
-                    Text(model.footer)
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(Theme.faintText)
-                        .monospacedDigit()
-                    Spacer(minLength: 0)
-                    CopyButton("Copy", value: model.tsv(model.displayed), bordered: true)
-                        .controlSize(.small)
-                    Button("Export CSV…") { model.exportCSV() }
-                        .controlSize(.small)
-                        .disabled(model.displayed.isEmpty)
                 }
             }
         }
@@ -1481,12 +1526,21 @@ struct SNMPTestView: View {
                 TableEmptyOverlay(text: model.isRunning ? "Waiting for the agent…" : (model.filter.isEmpty ? "No var-binds. Walk a parent OID (system, ifTable) to list what is under it." : "Nothing matches the filter."))
             }
         }
+        .quietTable(selection: selection)
+        .onChange(of: model.rows.count, initial: true) { _, n in
+            // Screenshots of a selected var-bind row (`-demoSNMPSelect n`).
+            #if DEBUG
+            if let want = DemoFlags.snmpSelect, n >= want, selection.isEmpty, DemoFlags.firstRun("snmpSelect") {
+                selection = [model.rows[want - 1].id]
+            }
+            #endif
+        }
         .tablePanel(minHeight: 320)
         .frame(height: 460)
     }
 
     /// Every column fits the 1000 pt window. The pane's table is ~720 pt there and
-    /// SwiftUI's inset table puts ~17 pt between columns, so eleven columns cannot fit at any
+    /// the Quiet table puts 12 pt between columns, so eleven columns cannot fit at any
     /// readable width: Admin and Oper share "Status", the two error counters share "Errors",
     /// Type shows a short name and Since change the age of the last change (full values in the tooltips).
     private var interfaceTable: some View {
@@ -1496,28 +1550,29 @@ struct SNMPTestView: View {
                     Text(String(r.index)).font(.system(size: 11.5, design: .monospaced)).foregroundStyle(Theme.dimText)
                         .help("ifIndex \(r.index)")
                 }
-                .width(30)
+                .width(28)
                 TableColumn("Name", value: \InterfaceRow.name) { r in
                     Text(r.name).font(.system(size: 12, design: .monospaced)).identifierText()
                         .help(r.descr.isEmpty || r.descr == r.name ? r.name : "\(r.name) — ifDescr \(r.descr)")
                 }
-                .width(min: 64, ideal: 76, max: 200)
+                .width(min: 56, ideal: 64, max: 200)
                 TableColumn("Alias", value: \InterfaceRow.alias) { r in
                     Text(r.alias).font(.system(size: 12)).foregroundStyle(Theme.text2).proseText().help(r.alias)
                 }
-                .width(min: 50, ideal: 50)
+                .width(min: 30, ideal: 36)
                 TableColumn("Type", value: \InterfaceRow.type) { r in
                     Text(Self.shortType(r.type)).font(.system(size: 11.5)).foregroundStyle(Theme.dimText).proseText()
                         .help(r.type)
                 }
-                .width(52)
+                .width(50)
                 TableColumn("Status", value: \InterfaceRow.oper) { r in
-                    Text(Self.statusText(admin: r.admin, oper: r.oper)).font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(r.oper == "up" ? Theme.ok : (r.admin == "down" ? Theme.faintText : Theme.err))
+                    // A word; red only for a port that should be up and is not.
+                    Text(Self.statusText(admin: r.admin, oper: r.oper)).font(.system(size: 12))
+                        .foregroundStyle(r.oper == "up" ? Theme.text : (r.admin == "down" ? Theme.faintText : Theme.err))
                         .proseText()
                         .help("Admin \(r.admin.isEmpty ? "—" : r.admin) · oper \(r.oper.isEmpty ? "—" : r.oper)")
                 }
-                .width(76)
+                .width(74)
             }
             Group {
                 TableColumn("Speed", value: \InterfaceRow.speedBits) { r in
@@ -1529,16 +1584,16 @@ struct SNMPTestView: View {
                     Text(Format.bytes(Int(clamping: r.inOctets))).font(.system(size: 12)).monospacedDigit()
                         .frame(maxWidth: .infinity, alignment: .trailing)
                 }
-                .width(58)
+                .width(54)
                 TableColumn("Out", value: \InterfaceRow.outOctets) { r in
                     Text(Format.bytes(Int(clamping: r.outOctets))).font(.system(size: 12)).monospacedDigit()
                         .frame(maxWidth: .infinity, alignment: .trailing)
                 }
-                .width(58)
+                .width(54)
                 TableColumn("Errors", value: \InterfaceRow.totalErrors) { r in
                     Text("\(Format.count(Int(clamping: r.inErrors))) / \(Format.count(Int(clamping: r.outErrors)))")
                         .font(.system(size: 12)).monospacedDigit()
-                        .foregroundStyle(r.totalErrors > 0 ? Theme.warn : Theme.dimText)
+                        .foregroundStyle(r.totalErrors > 0 ? Theme.err : Theme.dimText)
                         .frame(maxWidth: .infinity, alignment: .trailing)
                         .help("In errors / out errors (ifInErrors / ifOutErrors)")
                 }
@@ -1552,9 +1607,11 @@ struct SNMPTestView: View {
         } rows: {
             ForEach(model.shownInterfaces) { TableRow($0) }
         }
+        .quietTable()
         .tablePanel(minHeight: 320)
         .frame(height: 460)
     }
+
 
     /// "up", "down", "admin down" (admin down wins: the port is shut, not broken).
     static func statusText(admin: String, oper: String) -> String {
@@ -1610,6 +1667,113 @@ struct SNMPTestView: View {
         NSPasteboard.general.setString(s, forType: .string)
     }
 }
+
+// MARK: - Form shapes (private to the SNMP pages)
+
+/// A form section the LabDC way: a 13 pt semibold title with an optional system menu at its
+/// right ("Target · Recent", "Object · Presets"), then rows of label-above fields 14 pt apart —
+/// no hairlines between them (that is `PaneGroup`, for lists).
+private struct FormSection<Content: View>: View {
+    let title: String
+    var accessory: AnyView?
+    @ViewBuilder var content: Content
+
+    init(_ title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.accessory = nil
+        self.content = content()
+    }
+
+    init(_ title: String, accessory: some View, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.accessory = AnyView(accessory)
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline, spacing: 16) {
+                Text(title)
+                    .font(Theme.emphasis)
+                    .foregroundStyle(Theme.text)
+                    .accessibilityAddTraits(.isHeader)
+                if let accessory { accessory.controlSize(.small) }
+                Spacer(minLength: 0)
+            }
+            content
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// One system fact of a Quick test: the name muted at the left, the value in mono (it may
+/// wrap to three lines — sysDescr), Copy at the row's right end so every Copy lines up.
+private struct ResultFactRow: View {
+    let key: String
+    let value: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 16) {
+            Text(key)
+                .font(Theme.body)
+                .foregroundStyle(Theme.text2)
+                .frame(width: 124, alignment: .leading)
+            Text(value)
+                .font(Theme.mono)
+                .foregroundStyle(Theme.text)
+                .textSelection(.enabled)
+                .lineLimit(3)
+                .truncationMode(.middle)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .help(value)
+            CopyButton(value: value, help: "Copy \(value)")
+        }
+        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// A one-line note under a form row (11 pt): red when it says what is wrong with the form.
+private struct FormNote: View {
+    let text: String
+    var problem = false
+
+    var body: some View {
+        Text(text)
+            .font(Theme.caption)
+            .foregroundStyle(problem ? Theme.err : Theme.faintText)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: Metrics.prose, alignment: .leading)
+    }
+}
+
+/// The retry count as a quiet field: the number over the field line, a small stepper at its
+/// right end (0 … 10, the range a run is clamped to).
+private struct RetriesField: View {
+    @Binding var retries: Int
+
+    var body: some View {
+        VStack(spacing: 4) {
+            HStack(spacing: 4) {
+                Text(String(retries))
+                    .font(.system(size: 13))
+                    .foregroundStyle(Theme.text)
+                    .monospacedDigit()
+                Spacer(minLength: 0)
+                Stepper("Retries", value: $retries, in: SNMPTestModel.retryRange)
+                    .labelsHidden()
+                    .controlSize(.mini)
+            }
+            .frame(height: 16)
+            Rectangle().fill(Theme.control).frame(height: 1)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Retries")
+        .accessibilityValue(retries == 1 ? "1 retry" : "\(retries) retries")
+    }
+}
+
 
 
 /// Collects walk chunks on the socket thread and emits them at most every `interval` seconds

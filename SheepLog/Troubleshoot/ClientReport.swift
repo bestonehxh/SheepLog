@@ -46,7 +46,7 @@ nonisolated enum ClientID: Sendable, Equatable {
 
 // MARK: - The report
 
-/// Everything SheepLog knows about one endpoint, as one narrative: who it is, where it is
+/// Everything UncleSpy knows about one endpoint, as one narrative: who it is, where it is
 /// connected, what the log says, its DHCP / DNS / ARP packets, its TCP conversations, the
 /// findings about it, and what to do next. Built off the main actor.
 nonisolated struct ClientReport: Sendable {
@@ -278,7 +278,7 @@ nonisolated struct ClientReport: Sendable {
             steps.append("Find its switch port: show mac address-table address \(r.macs.first ?? "<its MAC>"), or walk the bridge table (dot1dTpFdbPort) on the SNMP Test pane.")
         }
         if r.logTotal == 0 && r.packetTotal == 0 && r.flowTotal == 0 {
-            steps.append("Nothing SheepLog holds mentions \(text): check the spelling, or capture on its switch port (SPAN) and try again.")
+            steps.append("Nothing UncleSpy holds mentions \(text): check the spelling, or capture on its switch port (SPAN) and try again.")
         }
         r.nextSteps = steps
         let times = input.entries.map { $0.deviceTime ?? $0.received } + input.packets.map(\.timestamp)
@@ -291,7 +291,7 @@ nonisolated struct ClientReport: Sendable {
 
     var markdown: String {
         var md = "# \(title)\n\n"
-        md += "_SheepLog troubleshooting report · \(ReportText.stamp(generated))"
+        md += "_UncleSpy troubleshooting report · \(ReportText.stamp(generated))"
         if let a = dataStart, let b = dataEnd { md += " · data \(ReportText.stamp(a)) – \(ReportText.stamp(b))" }
         md += "_\n\n"
         var also: [String] = []
@@ -464,7 +464,7 @@ nonisolated enum ReportText {
     /// `total`: how many findings the analysis had (the report says how many of them it shows).
     static func findings(_ findings: [Finding], summary: AnalysisSummary, timeline: Timeline, heading: String,
                          scope: String?, generated: Date, total: Int? = nil) -> String {
-        var md = "# SheepLog troubleshooting report\n\n"
+        var md = "# UncleSpy troubleshooting report\n\n"
         md += "_\(stamp(generated))"
         if let a = summary.start, let b = summary.end { md += " · data \(stamp(a)) – \(stamp(b))" }
         md += "_\n\n"
@@ -504,7 +504,7 @@ nonisolated enum ReportText {
         }
         if findings.isEmpty {
             // A filter that hides every finding is not "nothing wrong".
-            md += (total ?? 0) > 0 ? "No finding matches what was shown.\n\n" : "Nothing wrong that SheepLog can see.\n\n"
+            md += (total ?? 0) > 0 ? "No finding matches what was shown.\n\n" : "Nothing wrong that UncleSpy can see.\n\n"
         }
         if !timeline.isEmpty {
             md += "## Timeline\n\n"

@@ -1,7 +1,9 @@
 import AppKit
 import SwiftUI
 
-/// Loaded modules (bundled + user), and a browser over the linked OID tree.
+/// Loaded modules (bundled + user), and a browser over the linked OID tree. SNMP ▸ MIBs, the
+/// LabDC way: the counts as the header's state, the modules table in the column, then the tree
+/// and an inspector of label-above facts divided by one hairline.
 struct MIBsView: View {
     @ObservedObject private var mibs = MIBRegistry.shared
     @State private var selectedModule: MIBModule.ID?
@@ -10,41 +12,36 @@ struct MIBsView: View {
     @State private var selectedNode: OID?
     @State private var expanded: Set<OID> = [OID([1]), OID([1, 3]), OID([1, 3, 6]), OID([1, 3, 6, 1])]
 
+    private static let browseHeight: CGFloat = 440
+    private static let inspectorWidth: CGFloat = 380
+
     var body: some View {
         let _ = PaneProbe.ran("body.mibs")
         VStack(spacing: 0) {
-            PaneHeader(eyebrow: "SNMP",
-                       heading: "\(Format.count(mibs.modules.count)) modules, \(Format.count(mibs.nodeCount)) objects.",
-                       subtitle: subtitle)
-                .paneColumn()
-                .padding(.top, Metrics.headerTop)
-                .padding(.bottom, 12)
-
-            PaneStrip {
-                Button("Add files…") { addFiles() }
-                    .buttonStyle(.borderedProminent)
-                    .tint(Theme.accent)
-                Button("Reveal folder") { revealFolder() }
-                Button("Reload") { mibs.reload() }
-                Spacer(minLength: 0)
-                if mibs.isLoading {
-                    ProgressView().controlSize(.small)
-                    Text("Linking…").font(.system(size: 12)).foregroundStyle(Theme.dimText)
-                }
+            PaneHeader(pane: .mibs,
+                       status: "\(Format.count(mibs.modules.count)) modules, \(Format.count(mibs.nodeCount)) objects",
+                       detail: headerDetail, problem: badModules > 0) {
+                Button("Reveal folder") { revealFolder() }.buttonStyle(.quietLink).fixedSize()
+                Button("Reload") { mibs.reload() }.buttonStyle(.quietLink).fixedSize()
+                Button("Add files…") { addFiles() }.buttonStyle(.quietPrimary).fixedSize()
             }
+            .paneColumn()
+            .padding(.top, Metrics.headerTop)
+            .padding(.bottom, 14)
 
-            PaneBody {
+            PaneBody(spacing: 28) {
                 moduleTable
                 if let m = selectedModuleValue, !m.errors.isEmpty {
                     PaneGroup("Errors in \(m.name)") {
                         ForEach(Array(m.errors.prefix(20).enumerated()), id: \.offset) { _, e in
-                            NoteRow(text: e, systemImage: "exclamationmark.triangle", tint: Theme.warn)
+                            NoteRow(text: e, tint: Theme.warn)
                         }
                     }
                 }
-                PaneSection("Browse", note: "the linked OID tree") {
-                    HStack(alignment: .top, spacing: 14) {
+                PaneSection("Browse") {
+                    HStack(alignment: .top, spacing: 0) {
                         browser
+                        Rectangle().fill(Theme.hairline).frame(width: 1, height: Self.browseHeight)
                         detail
                     }
                 }
@@ -56,6 +53,13 @@ struct MIBsView: View {
 
     /// `-demoMIBs ifOperStatus`: open the tree down to that object and select it.
     private func revealDemoNode() {
+        #if DEBUG
+        // `-demoMIBModule IF-MIB` (Debug): select that module's row (screenshots of the table).
+        if selectedModule == nil, let module = CommandLine.value(after: "-demoMIBModule"),
+           mibs.modules.contains(where: { $0.id == module }) {
+            selectedModule = module
+        }
+        #endif
         guard selectedNode == nil, let name = DemoFlags.mibs,
               let oid = mibs.oid(forName: name) else { return }
         var parts = oid.parts
@@ -77,13 +81,19 @@ struct MIBsView: View {
         }.map(\.element)
     }
 
-    private var subtitle: String {
-        let mine = mibs.modules.filter { !$0.builtIn }
-        guard !mine.isEmpty else { return "Bundled standard MIBs plus what you add" }
-        let bad = mine.filter { !$0.errors.isEmpty || !$0.missingImports.isEmpty }.count
-        let yours = "\(Format.count(mine.count)) of yours"
-        return bad == 0 ? "Bundled standard MIBs plus \(yours), all linked"
-            : "Bundled standard MIBs plus \(yours) — \(bad) with errors or missing imports (listed first)"
+    /// Your modules with errors or missing imports (listed first in the table).
+    private var badModules: Int {
+        mibs.modules.filter { !$0.builtIn && (!$0.errors.isEmpty || !$0.missingImports.isEmpty) }.count
+    }
+
+    /// The facts after the counts: linking, what you added and how it linked.
+    private var headerDetail: String {
+        if mibs.isLoading { return "Linking…" }
+        let mine = mibs.modules.filter { !$0.builtIn }.count
+        guard mine > 0 else { return "the bundled standard MIBs" }
+        let yours = "\(Format.count(mine)) of yours"
+        let bad = badModules
+        return bad == 0 ? "\(yours), all linked" : "\(yours) · \(bad) with errors or missing imports, listed first"
     }
 
     private var selectedModuleValue: MIBModule? {
@@ -98,7 +108,7 @@ struct MIBsView: View {
             TableColumn("Name") { m in
                 Text(m.name).font(.system(size: 12, design: .monospaced))
             }
-            .width(min: 160, ideal: 240)
+            .width(min: 150, ideal: 220)
             TableColumn("Objects") { m in
                 Text(Format.count(m.nodeCount)).font(.system(size: 12)).monospacedDigit()
             }
@@ -106,16 +116,16 @@ struct MIBsView: View {
             TableColumn("Source") { m in
                 Text(m.builtIn ? "Bundled" : "Your files")
                     .font(.system(size: 12))
-                    .foregroundStyle(m.builtIn ? Theme.dimText : Theme.accent)
+                    .foregroundStyle(m.builtIn ? Theme.dimText : Theme.text)
             }
             .width(min: 60, ideal: 80, max: 100)
             TableColumn("Missing imports") { m in
                 Text(m.missingImports.joined(separator: ", "))
                     .font(.system(size: 12))
-                    .foregroundStyle(Theme.warn)
+                    .foregroundStyle(Theme.err)
                     .help(m.missingImports.joined(separator: ", "))
             }
-            .width(min: 100, ideal: 220)
+            .width(min: 90, ideal: 160)
             TableColumn("Errors") { m in
                 Text(m.errors.isEmpty ? "0" : String(m.errors.count))
                     .font(.system(size: 12))
@@ -140,6 +150,7 @@ struct MIBsView: View {
                 TableEmptyOverlay(text: mibs.isLoading ? "Loading MIBs…" : "No modules loaded. Press Reload, or Add files… to import your MIBs.")
             }
         }
+        .quietTable(selection: selectedModule)
         .tablePanel(minHeight: 200)
         .frame(height: 260)
     }
@@ -195,44 +206,47 @@ struct MIBsView: View {
     }
 
     private var browser: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass").font(.system(size: 11)).foregroundStyle(Theme.faintText)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
                 TextField("Search names", text: $search)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 12))
+                    .textFieldStyle(.quiet)
                     .focused($searchFocused)
                     .onExitCommand { search = "" }
                     .help("Object names, e.g. ifOperStatus or sysDescr. ⌘F to focus, Esc to clear")
                     .accessibilityLabel("Search names")
                 if !search.isEmpty {
-                    Button { search = "" } label: { Image(systemName: "xmark.circle.fill") }
-                        .buttonStyle(.borderless)
-                        .foregroundStyle(Theme.faintText)
+                    Button { search = "" } label: { Text("Clear").font(Theme.caption) }
+                        .buttonStyle(.quietLink)
                         .help("Clear the search (Esc)")
                         .accessibilityLabel("Clear the search")
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            Rectangle().fill(Theme.hairline).frame(height: 0.5)
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(visibleRows) { row in treeRow(row) }
+            .frame(maxWidth: 320, alignment: .leading)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(visibleRows) { row in treeRow(row).id(row.id) }
+                    }
+                    .padding(.bottom, 4)
                 }
-                .padding(.vertical, 4)
+                // A revealed object (-demoMIBs) is brought into view; a click on a row
+                // already in view does not move the list.
+                .onChange(of: selectedNode, initial: true) { _, oid in
+                    guard let oid else { return }
+                    DispatchQueue.main.async { proxy.scrollTo(oid) }
+                }
             }
         }
-        .frame(minWidth: 320, maxWidth: .infinity)
-        .frame(height: 440)
-        .panelCard()
+        .padding(.trailing, 20)
+        .frame(minWidth: 300, maxWidth: .infinity, alignment: .leading)
+        .frame(height: Self.browseHeight)
     }
 
     private func treeRow(_ row: TreeRow) -> some View {
         let n = row.node
         let isSelected = selectedNode == n.oid
         let searching = !search.trimmingCharacters(in: .whitespaces).isEmpty
-        return HStack(spacing: 5) {
+        return HStack(spacing: 6) {
             if !searching {
                 Button {
                     if expanded.contains(n.oid) { expanded.remove(n.oid) } else { expanded.insert(n.oid) }
@@ -249,23 +263,31 @@ struct MIBsView: View {
                 .accessibilityHidden(!row.hasChildren)
             }
             Text(n.name)
-                .font(.system(size: 12, design: .monospaced))
+                .font(.system(size: 12, weight: isSelected ? .semibold : .regular, design: .monospaced))
                 .foregroundStyle(Theme.text)
             Text(searching ? n.oid.dotted : String(n.oid.parts.last ?? 0))
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(Theme.faintText)
+            Spacer(minLength: 8)
             if n.kind != "node" {
                 Text(n.kind)
-                    .font(.system(size: 10))
-                    .foregroundStyle(kindColor(n.kind))
+                    .font(Theme.caption)
+                    .foregroundStyle(Theme.faintText)
             }
-            Spacer(minLength: 0)
         }
         .lineLimit(1)
-        .padding(.leading, 8 + CGFloat(row.depth) * 14)
+        .padding(.leading, 10 + CGFloat(row.depth) * 14)
         .padding(.trailing, 8)
-        .padding(.vertical, 3)
-        .background(isSelected ? Theme.selectedAccent : Color.clear)
+        .padding(.vertical, 4)
+        // The quiet selection: the tables' fill with a 2 pt ink edge on the left.
+        .background {
+            if isSelected {
+                HStack(spacing: 0) {
+                    Rectangle().fill(Theme.text).frame(width: 2)
+                    Rectangle().fill(Theme.selectedAccent)
+                }
+            }
+        }
         .contentShape(Rectangle())
         .onTapGesture { selectedNode = n.oid }
         .onTapGesture(count: 2) {
@@ -273,65 +295,73 @@ struct MIBsView: View {
                 if expanded.contains(n.oid) { expanded.remove(n.oid) } else { expanded.insert(n.oid) }
             }
         }
-    }
-
-    private func kindColor(_ kind: String) -> Color {
-        switch kind {
-        case "table", "row": Theme.accent
-        case "notification": Theme.warn
-        case "column", "scalar": Theme.ok
-        default: Theme.faintText
-        }
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
     // MARK: Detail
 
+    /// The selected object as LabDC's inspector: the name large, a muted line under it, the one
+    /// action, then label-above rows with hairlines and a Copy on what is worth pasting, and the
+    /// description as plain prose.
     @ViewBuilder
     private var detail: some View {
         if let oid = selectedNode, let n = mibs.exactNode(oid) {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text(n.name).font(.system(size: 15, weight: .semibold, design: .monospaced)).foregroundStyle(Theme.text)
-                        .textSelection(.enabled)
-                    Spacer(minLength: 0)
-                    Button("Use in SNMP test") { useInTest(n) }
-                        .buttonStyle(.borderedProminent)
-                        .tint(Theme.accent)
-                        .controlSize(.small)
-                }
-                GroupedList {
-                    FactRow(key: "Module", value: n.module, keyWidth: 90)
-                    FactRow(key: "OID", value: n.oid.dotted, keyWidth: 90)
-                    FactRow(key: "Kind", value: n.kind, mono: false, copyable: false, keyWidth: 90)
-                    if let s = n.syntax { FactRow(key: "Syntax", value: s, keyWidth: 90) }
-                    if let a = n.access { FactRow(key: "Access", value: a, mono: false, copyable: false, keyWidth: 90) }
-                    if let s = n.status { FactRow(key: "Status", value: s, mono: false, copyable: false, keyWidth: 90) }
-                    if let h = n.displayHint { FactRow(key: "Hint", value: h, keyWidth: 90) }
-                    if let e = n.enums, !e.isEmpty {
-                        FactRow(key: "Values",
-                                value: e.sorted { $0.key < $1.key }.map { "\($0.value)(\($0.key))" }.joined(separator: ", "),
-                                mono: false, keyWidth: 90)
-                    }
-                }
-                if let d = n.description, !d.isEmpty {
-                    ScrollView {
-                        Text(Self.cleanDescription(d))
-                            .font(.system(size: 11.5))
-                            .foregroundStyle(Theme.text2)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(n.name)
+                            .font(Theme.subtitle)
+                            .tracking(-0.4)
+                            .foregroundStyle(Theme.text)
                             .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(10)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityAddTraits(.isHeader)
+                        Text([n.kind == "node" ? nil : n.kind, n.module].compactMap { $0 }.joined(separator: " · "))
+                            .font(Theme.detail)
+                            .foregroundStyle(Theme.text2)
                     }
-                    .frame(maxHeight: 180)
-                    .background(RoundedRectangle(cornerRadius: Metrics.field).fill(Theme.well))
+                    Button("Use in SNMP test") { useInTest(n) }
+                        .buttonStyle(.quietLink)
+                        .padding(.top, 12)
+                        .padding(.bottom, 14)
+                    GroupedList {
+                        InspectorRow(label: "Module", value: n.module, mono: true, copy: true)
+                        InspectorRow(label: "OID", value: n.oid.dotted, mono: true, copy: true)
+                        InspectorRow(label: "Kind", value: n.kind)
+                        if let s = n.syntax { InspectorRow(label: "Syntax", value: s, mono: true, copy: true) }
+                        if let a = n.access { InspectorRow(label: "Access", value: a) }
+                        if let s = n.status { InspectorRow(label: "Status", value: s) }
+                        if let h = n.displayHint { InspectorRow(label: "Display hint", value: h, mono: true, copy: true) }
+                        if let e = n.enums, !e.isEmpty {
+                            InspectorRow(label: "Values",
+                                         value: e.sorted { $0.key < $1.key }.map { "\($0.value)(\($0.key))" }.joined(separator: ", "),
+                                         copy: true)
+                        }
+                    }
+                    if let d = n.description, !d.isEmpty {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Description").font(Theme.caption).foregroundStyle(Theme.text2)
+                            Text(Self.cleanDescription(d))
+                                .font(Theme.body)
+                                .foregroundStyle(Theme.text)
+                                .lineSpacing(2)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding(.top, 18)
+                    }
                 }
-                Spacer(minLength: 0)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, 24)
+                .padding(.trailing, 14)
+                .padding(.bottom, 16)
             }
-            .frame(width: 400, height: 440, alignment: .top)
+            .frame(width: Self.inspectorWidth, height: Self.browseHeight, alignment: .top)
         } else {
             Text("Select an object to see its syntax, access and description.")
                 .hint()
-                .frame(width: 400, height: 440, alignment: .center)
+                .padding(.leading, 24)
+                .frame(width: Self.inspectorWidth, height: Self.browseHeight, alignment: .topLeading)
         }
     }
 
@@ -350,5 +380,31 @@ struct MIBsView: View {
         _ = SNMPTestModel.shared
         NotificationCenter.default.post(name: .sheepLogSNMPOID, object: n.oid.dotted)
         AppModel.shared.mainPane = .snmpTest
+    }
+}
+
+/// One fact of the MIBs inspector (LabDC's InspectorRow): the label above the value, a Copy
+/// word at the right for what is worth pasting.
+private struct InspectorRow: View {
+    let label: String
+    let value: String
+    var mono = false
+    var copy = false
+
+    var body: some View {
+        HStack(alignment: .lastTextBaseline, spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(label).font(Theme.caption).foregroundStyle(Theme.text2)
+                Text(value)
+                    .font(mono ? Theme.mono : Theme.body)
+                    .foregroundStyle(Theme.text)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if copy { CopyButton(value: value, help: "Copy the \(label.lowercased())") }
+        }
+        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

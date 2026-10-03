@@ -250,7 +250,9 @@ nonisolated enum FindingRules {
         ctx.packetStart = pk.start
         if isCancelled() { return TroubleshootResult() }
         findings += dhcpRules(pk, &ctx)
+        if isCancelled() { return TroubleshootResult() }
         findings += dnsRules(pk, &ctx)
+        if isCancelled() { return TroubleshootResult() }
         findings += arpRules(pk, &ctx)
         findings += flowRules(input.flows)
         findings += snmpRules(input.snmp, now: input.now)
@@ -455,7 +457,9 @@ nonisolated struct SourceAcc: Sendable {
     /// Lines per whole second of arrival: (second, count), in arrival order.
     var seconds: [(Int, Int)] = []
 
-    var bestHostname: String? { hostnames.max { $0.value < $1.value }?.key }
+    /// The name it uses most; of names used equally often the first alphabetically (a
+    /// dictionary's order differs from run to run).
+    var bestHostname: String? { hostnames.max { ($0.value, $1.key) < ($1.value, $0.key) }?.key }
 
     mutating func merge(_ o: SourceAcc) {
         count += o.count
@@ -547,6 +551,90 @@ nonisolated final class Needles: @unchecked Sendable {
             ["config", "commit", "write mem", "-111010", "-111008"],
         ]
         groups = words.enumerated().map { i, w in (i, w.map { strdup($0)! }) }
+        // The flat table `screen` walks: per needle its group, its C string and three of its
+        // bigrams (the first, a middle and the last) as a word of the set and a bit in it.
+        var flat: [(group: Int, needle: UnsafeMutablePointer<CChar>)] = []
+        for g in groups { for n in g.needles { flat.append((g.group, n)) } }
+        count = flat.count
+        group = .allocate(capacity: count)
+        needle = .allocate(capacity: count)
+        word = .allocate(capacity: count * 3)
+        mask = .allocate(capacity: count * 3)
+        for (k, f) in flat.enumerated() {
+            group[k] = f.group
+            needle[k] = UnsafePointer(f.needle)
+            let len = strlen(f.needle)
+            // A needle of one character has no bigram: slot 0, which every set holds.
+            let picks = len >= 2 ? [0, (len - 2) / 2, len - 2] : [-1, -1, -1]
+            for (j, i) in picks.enumerated() {
+                let s = i < 0 ? 0 : Self.slot(UInt8(bitPattern: f.needle[i]), UInt8(bitPattern: f.needle[i + 1]))
+                word[k * 3 + j] = s &>> 6
+                mask[k * 3 + j] = UInt64(1) &<< UInt64(s & 63)
+            }
+        }
+    }
+
+    // MARK: The screen
+
+    let count: Int
+    private let group: UnsafeMutablePointer<Int>
+    private let needle: UnsafeMutablePointer<UnsafePointer<CChar>>
+    private let word: UnsafeMutablePointer<Int>
+    private let mask: UnsafeMutablePointer<UInt64>
+
+    /// Words of the screen's bigram set (4,096 bits): a needle can only be in a line whose set
+    /// holds the bigrams of it (hashed, letters folded as `strcasestr` folds them — ASCII: the
+    /// app never sets a locale).
+    static let bigramWords = 64
+
+    static func slot(_ a: UInt8, _ b: UInt8) -> Int {
+        let fa = a >= 65 && a <= 90 ? a | 0x20 : a, fb = b >= 65 && b <= 90 ? b | 0x20 : b
+        return (Int(fa) &* 31 &+ Int(fb)) & 4095
+    }
+
+    /// Adds the bigrams of the C string `c` to `set` (`bigramWords` words). Written for a Debug
+    /// build: no calls, no generic shifts (`slot`, inlined by hand).
+    static func addBigrams(_ c: UnsafePointer<CChar>, to set: UnsafeMutablePointer<UInt64>) {
+        var p = UnsafeRawPointer(c).assumingMemoryBound(to: UInt8.self)
+        var a = Int(p.pointee)
+        if a == 0 { return }
+        if a >= 65 && a <= 90 { a |= 0x20 }
+        while true {
+            p += 1
+            var b = Int(p.pointee)
+            if b == 0 { return }
+            if b >= 65 && b <= 90 { b |= 0x20 }
+            let s = (a &* 31 &+ b) & 4095
+            set[s &>> 6] |= UInt64(1) &<< UInt64(s & 63)
+            a = b
+        }
+    }
+
+    /// The groups (bit n = group n) with a needle in the message, the program or the MSGID —
+    /// the same answer as `strcasestr` of every needle over the three, which it was (70 needles
+    /// × 3 strings per line: a third of the log pass). A needle is looked for only when the
+    /// three strings hold three of its bigrams (a needle in one of them puts all its bigrams
+    /// there), and only until its group has a hit.
+    func screen(_ c: UnsafePointer<CChar>, _ pc: UnsafePointer<CChar>, _ mc: UnsafePointer<CChar>,
+                set: UnsafeMutablePointer<UInt64>) -> UInt8 {
+        set.update(repeating: 0, count: Self.bigramWords)
+        set[0] = 1
+        Self.addBigrams(c, to: set)
+        Self.addBigrams(pc, to: set)
+        Self.addBigrams(mc, to: set)
+        var bits = 0
+        var k = 0
+        while k < count {
+            let g = group[k]
+            let b = k &* 3
+            if bits & (1 &<< g) == 0, set[word[b]] & mask[b] != 0, set[word[b &+ 1]] & mask[b &+ 1] != 0,
+               set[word[b &+ 2]] & mask[b &+ 2] != 0 {
+                let n = needle[k]
+                if CText.find(c, n) != nil || CText.find(pc, n) != nil || CText.find(mc, n) != nil { bits |= 1 &<< g }
+            }
+            k &+= 1
+        }
+        return UInt8(bits)
     }
 }
 
@@ -586,16 +674,26 @@ nonisolated enum LogScan {
 
     private static func scanRange(_ entries: [LogEntry], _ lo: Int, _ hi: Int) -> Output {
         var out = Output()
-        var accs: [String: SourceAcc] = [:]
+        // Each source's counters by address, the current one swapped out into `acc` (and an
+        // empty one in its place): a copy taken out of a dictionary and put back whenever the
+        // address changed (devices take turns line by line) shared its hostnames and seconds
+        // with the stored one, and the next change copied them whole.
+        var accs: [SourceAcc] = []
+        var slot: [String: Int] = [:]
         var lastAddress = ""
+        var cur = -1
         var acc = SourceAcc()
-        func flush() { if !lastAddress.isEmpty { accs[lastAddress] = acc } }
         for i in lo..<hi {
             let e = entries[i]
-            if e.sourceAddress != lastAddress {
-                flush()
+            if cur < 0 || e.sourceAddress != lastAddress {
+                if cur >= 0 { swap(&acc, &accs[cur]) }
                 lastAddress = e.sourceAddress
-                acc = accs[lastAddress] ?? SourceAcc()
+                if let k = slot[lastAddress] { cur = k } else {
+                    cur = accs.count
+                    slot[lastAddress] = cur
+                    accs.append(SourceAcc())
+                }
+                swap(&acc, &accs[cur])
             }
             let isTrap = e.transport == .trap || e.vendor == .snmpTrap
             acc.count += 1
@@ -614,7 +712,7 @@ nonisolated enum LogScan {
                 if e.vendor == .unknown, LineClassifier.looksLikeKnownVendor(e.message) { acc.unknownVendor += 1 }
                 if !e.hostname.isEmpty { acc.hostnames[e.hostname, default: 0] += 1 }
             }
-            let sec = Int(e.received.timeIntervalSinceReferenceDate)
+            let sec = Int(saturating: e.received.timeIntervalSinceReferenceDate)
             if let last = acc.seconds.last, last.0 == sec { acc.seconds[acc.seconds.count - 1].1 += 1 }
             else { acc.seconds.append((sec, 1)) }
             if isTrap || e.severity <= .warning {
@@ -629,8 +727,8 @@ nonisolated enum LogScan {
                                           kind: kind, message: isTrap ? RoutingTrap.summary(e, kind) ?? e.message : e.message))
             }
         }
-        flush()
-        out.sources = accs
+        if cur >= 0 { swap(&acc, &accs[cur]) }
+        for (address, k) in slot { out.sources[address] = accs[k] }
         return out
     }
 }
@@ -680,11 +778,8 @@ nonisolated enum LineClassifier {
             let msgid = e.fields.first.flatMap { $0.key == "msgid" ? $0.value : nil } ?? ""
             e.program.withCString { pc in
                 msgid.withCString { mc in
-                    for g in Needles.shared.groups {
-                        for n in g.needles where strcasestr(c, n) != nil || strcasestr(pc, n) != nil || strcasestr(mc, n) != nil {
-                            bits |= 1 << UInt8(g.group)
-                            break
-                        }
+                    withUnsafeTemporaryAllocation(of: UInt64.self, capacity: Needles.bigramWords) { set in
+                        bits = Needles.shared.screen(c, pc, mc, set: set.baseAddress!)
                     }
                 }
             }
@@ -714,18 +809,18 @@ nonisolated enum LineClassifier {
         // FortiOS: `logdesc="Interface status changed" action="interface-stat-change"
         // status="DOWN"` — the state is a field and the message never says "link".
         if e.vendor == .fortigate,
-           e.field("action") == "interface-stat-change" || (e.field("logdesc")?.lowercased().contains("interface status") ?? false),
-           let status = e.field("status")?.lowercased(), status.hasPrefix("up") || status.hasPrefix("down") {
-            let iface = ["interface", "intf", "ifname", "port"].lazy.compactMap { e.field($0) }.first { !$0.isEmpty }
-                ?? e.field("msg").flatMap { m in FText.token(after: "interface ", in: m) }
+           e.fieldCI("action") == "interface-stat-change" || (e.fieldCI("logdesc")?.lowercased().contains("interface status") ?? false),
+           let status = e.fieldCI("status")?.lowercased(), status.hasPrefix("up") || status.hasPrefix("down") {
+            let iface = ["interface", "intf", "ifname", "port"].lazy.compactMap { e.fieldCI($0) }.first { !$0.isEmpty }
+                ?? e.fieldCI("msg").flatMap { m in FText.token(after: "interface ", in: m) }
             guard let iface else { return nil }
             return .link(iface: iface, up: status.hasPrefix("up"))
         }
         // FortiOS link monitor (`logdesc="Link monitor status"`, msg "Link Monitor changed state
         // from alive to dead"): the gateway beyond the interface stopped answering — FortiOS
         // takes the link as down (its routes are withdrawn) until it is alive again.
-        if e.vendor == .fortigate, e.field("logdesc")?.lowercased().contains("link monitor") ?? false,
-           let msg = e.field("msg")?.lowercased(), let iface = e.field("interface") ?? e.field("name"), !iface.isEmpty {
+        if e.vendor == .fortigate, e.fieldCI("logdesc")?.lowercased().contains("link monitor") ?? false,
+           let msg = e.fieldCI("msg")?.lowercased(), let iface = e.fieldCI("interface") ?? e.fieldCI("name"), !iface.isEmpty {
             if msg.contains("to dead") || msg.contains("to die") { return .link(iface: iface, up: false) }
             if msg.contains("to alive") { return .link(iface: iface, up: true) }
             return nil
@@ -733,7 +828,7 @@ nonisolated enum LineClassifier {
         // PAN-OS SYSTEM `link-change`: "Port ethernet1/3: Down 1Gb/s-full duplex" / "Port
         // ethernet1/3: Up …"; `ha1-link-change` / `ha2-link-change`: "HA2 link down". The state
         // is in the description column, which never says "link down" (never read).
-        if e.vendor == .paloAlto, let ev = e.field("eventid"), ev.hasSuffix("link-change"), let d = e.field("description") {
+        if e.vendor == .paloAlto, let ev = e.fieldCI("eventid"), ev.hasSuffix("link-change"), let d = e.fieldCI("description") {
             return paloLinkChange(d)
         }
         // Junos structured: MSGID SNMP_TRAP_LINK_DOWN / _UP, the port and statuses in the SD
@@ -748,7 +843,7 @@ nonisolated enum LineClassifier {
         if let k = kernelFlagsLink(e, c) { return k.up.map { .link(iface: k.iface, up: $0) } }
         if CText.hasAny(c, errDisableWords) { return errDisabled(e, c) }
         var up: Bool?
-        if let s = e.field("OperStatus") { up = s.uppercased().hasPrefix("UP") }
+        if let s = e.fieldCI("OperStatus") { up = s.uppercased().hasPrefix("UP") }
         // Ruckus ICX: "Interface ethernet 1/1/5, state down"; Meraki MS: "port 3 status changed
         // from 1Gfdx to down" (neither says "link": both were never read).
         else if CText.has(c, ", state down") { up = false }
@@ -851,6 +946,8 @@ nonisolated enum LineClassifier {
     /// Linux `ip monitor link` / `ip link` output relayed to syslog: "3: eth1: <NO-CARRIER,…>
     /// mtu 1500 … state DOWN", "5: vlan10@eth0: <…>". A "Deleted 3: veth…" line is not a port.
     static func ipMonitorInterface(_ m: String) -> String? {
+        // The first word must be a number: an ASCII byte that is no digit ends it unsplit.
+        if let b = m.utf8.first(where: { $0 != 32 }), b < 0x80, !(b >= 48 && b <= 57) { return nil }
         let parts = m.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
         guard parts.count == 3, parts[0].count >= 2, parts[0].hasSuffix(":"), parts[0].dropLast().allSatisfy(\.isNumber),
               parts[1].count >= 2, parts[1].hasSuffix(":"), parts[2].hasPrefix("<") else { return nil }
@@ -869,7 +966,7 @@ nonisolated enum LineClassifier {
         if CText.hasAny(c, recoverWords) { return nil }
         if CText.hasAny(c, ["bpdu", "loop", "storm"]) { return nil }
         let m = e.message
-        let port = e.field("InterfaceName") ?? e.field("ifName")
+        let port = e.fieldCI("InterfaceName") ?? e.fieldCI("ifName")
             ?? FText.token(after: "putting ", in: m) ?? FText.token(after: "detected on ", in: m)
             ?? interfaceName(e) ?? FText.token(after: " on ", in: m)
         guard let port, !port.isEmpty else { return nil }
@@ -878,10 +975,11 @@ nonisolated enum LineClassifier {
 
     static func interfaceName(_ e: LogEntry) -> String? {
         for k in ["ifName", "interface", "intf", "ifDescr", "port", "Interface", "InterfaceName"] {
-            if let v = e.field(k), !v.isEmpty { return v }
+            if let v = e.fieldCI(k), !v.isEmpty { return v }
         }
         let m = e.message
-        for marker in ["interface ", "Interface ", "port ", "Port ", "ifName=", "ifName "] {
+        // `token(after:)` ignores case: "Interface " / "Port " were the same searches again.
+        for marker in ["interface ", "port ", "ifName=", "ifName "] {
             if let t = FText.token(after: marker, in: m), !t.isEmpty, t.lowercased() != "status" {
                 // Ruckus / Brocade: "Interface ethernet 1/1/5" — the type word, then the port.
                 if ["ethernet", "ethe", "ve", "lag", "loopback", "tunnel", "management"].contains(t.lowercased()),
@@ -897,7 +995,7 @@ nonisolated enum LineClassifier {
             if let t = FText.token(after: marker, in: m), !t.isEmpty { return t }
         }
         // "ether1 link down", "eth0 NIC Link is Down"
-        if let r = m.range(of: " link", options: .caseInsensitive) {
+        if let r = FText.rangeCI(of: " link", in: m) {
             let words = m[..<r.lowerBound].split(separator: " ")
             if var w = words.last.map(String.init) {
                 if w.uppercased() == "NIC", words.count >= 2 { w = String(words[words.count - 2]) }
@@ -971,7 +1069,7 @@ nonisolated enum LineClassifier {
         if CText.hasAny(c, errDisableWords), CText.hasAny(c, recoverWords) { return nil }
         // Huawei names the port in a field and says "Notify interface to change status to
         // error-down" ("interface to" made the port "to"): the field first, and a port has a digit.
-        let port = [e.field("InterfaceName"), FText.token(after: "port ", in: e.message),
+        let port = [e.fieldCI("InterfaceName"), FText.token(after: "port ", in: e.message),
                     FText.token(after: "interface ", in: e.message), FText.token(after: "putting ", in: e.message)]
             .lazy.compactMap { $0 }.first { $0.contains { $0.isNumber } }
         if CText.hasWord(c, "loop") && CText.hasAny(c, ["detect", "protect", "found", "block", "disabl", "loop-protect"]) {
@@ -1016,7 +1114,7 @@ nonisolated enum LineClassifier {
         let p = e.program
         if CText.has(c, "notification") || CText.contains(p, "NOTIFICATION"),
            let notice = bgpNotification(e, c) { return notice }
-        if CText.has(c, "ospf") || CText.contains(p, "OSPF") || e.field("module") == "OSPF" { proto = "OSPF" }
+        if CText.has(c, "ospf") || CText.contains(p, "OSPF") || e.fieldCI("module") == "OSPF" { proto = "OSPF" }
         else if CText.has(c, "bgp") || CText.contains(p, "BGP") { proto = "BGP" }
         else if CText.has(c, "eigrp") || CText.contains(p, "EIGRP") || CText.contains(p, "DUAL") { proto = "EIGRP" }
         else if CText.hasAny(c, ["isis", "is-is"]) || CText.contains(p, "ISIS") || CText.contains(p, "CLNS") { proto = "IS-IS" }
@@ -1033,7 +1131,7 @@ nonisolated enum LineClassifier {
         if let change = stateChange(e) {
             guard let u = transitionUp(old: change.old, new: change.new) else {
                 guard change.old != change.new else { return nil }
-                let neighbor = e.field("NeighborAddress") ?? e.field("PeerAddress") ?? neighborAddress(e.message) ?? "?"
+                let neighbor = e.fieldCI("NeighborAddress") ?? e.fieldCI("PeerAddress") ?? neighborAddress(e.message) ?? "?"
                 return neighbor == "?" ? nil : .routingStep(proto: proto, neighbor: neighbor)
             }
             up = u
@@ -1048,7 +1146,7 @@ nonisolated enum LineClassifier {
             up = true
         }
         guard let up else { return nil }
-        let neighbor = e.field("NeighborAddress") ?? e.field("PeerAddress") ?? neighborAddress(e.message) ?? "?"
+        let neighbor = e.fieldCI("NeighborAddress") ?? e.fieldCI("PeerAddress") ?? neighborAddress(e.message) ?? "?"
         // A line that names no neighbor is about one only when it says so ("neighbor down"):
         // "bgpd shutting down" or "OSPF process 1 is down" are no neighbor that went down.
         if neighbor == "?", !CText.hasAny(c, ["neighbo", "nbr", "adjch"]) { return nil }
@@ -1121,32 +1219,33 @@ nonisolated enum LineClassifier {
                                                "init", "attempt", "2way", "exstart", "exchange", "loading", "deleted", "up"]
 
     static func stateWord(_ s: Substring) -> String? {
-        let w = s.drop { !$0.isLetter && !$0.isNumber }.prefix { $0.isLetter || $0.isNumber || $0 == "-" }
-            .lowercased().replacingOccurrences(of: "-", with: "")
+        var w = s.drop { !$0.isLetter && !$0.isNumber }.prefix { $0.isLetter || $0.isNumber || $0 == "-" }.lowercased()
+        // Foundation only when there is a "-" to drop (it ran for every word read).
+        if w.contains("-") { w = w.replacingOccurrences(of: "-", with: "") }
         return adjacencyStates.contains(w) ? w : nil
     }
 
     /// The previous and the new adjacency state a line reports (the previous one may be unknown).
     static func stateChange(_ e: LogEntry) -> (old: String?, new: String)? {
-        if let cur = e.field("NeighborCurrentState"), let new = stateWord(Substring(cur)) {
-            return (e.field("NeighborPreviousState").flatMap { stateWord(Substring($0)) }, new)
+        if let cur = e.fieldCI("NeighborCurrentState"), let new = stateWord(Substring(cur)) {
+            return (e.fieldCI("NeighborPreviousState").flatMap { stateWord(Substring($0)) }, new)
         }
         let m = e.message
-        if let r = m.range(of: "new state ", options: .caseInsensitive), let new = stateWord(m[r.upperBound...]) {
-            let old = m.range(of: "old state ", options: .caseInsensitive).flatMap { stateWord(m[$0.upperBound...]) }
+        if let r = FText.rangeCI(of: "new state ", in: m), let new = stateWord(m[r.upperBound...]) {
+            let old = FText.rangeCI(of: "old state ", in: m).flatMap { stateWord(m[$0.upperBound...]) }
             return (old, new)
         }
         // "from X to Y", both of them states (not "received from neighbor 10.0.0.2 to …").
         var search = m.startIndex..<m.endIndex
-        while let r = m.range(of: "from ", options: .caseInsensitive, range: search) {
+        while let r = FText.rangeCI(of: "from ", in: m[search]) {
             search = r.upperBound..<m.endIndex
             let rest = m[r.upperBound...]
-            guard let old = stateWord(rest), let to = rest.range(of: " to ", options: .caseInsensitive),
+            guard let old = stateWord(rest), let to = FText.rangeCI(of: " to ", in: rest),
                   rest.distance(from: rest.startIndex, to: to.lowerBound) <= 14, let new = stateWord(rest[to.upperBound...]) else { continue }
             return (old, new)
         }
         // ospfd's AdjChg: "… on eth0:10.0.0.1: Full -> Deleted (InactivityTimer)".
-        if let r = m.range(of: " -> ") {
+        if let r = FText.rangeCI(of: " -> ", in: m, caseInsensitive: false) {
             let before = m[..<r.lowerBound].split(separator: " ").last ?? ""
             if let new = stateWord(m[r.upperBound...]), let old = stateWord(before) { return (old, new) }
         }
@@ -1178,10 +1277,10 @@ nonisolated enum LineClassifier {
         // Junos: `bgp_peer_mgmt_clear:6969: NOTIFICATION sent to 10.0.0.2 (External AS 65002):
         // code 6 (Cease) subcode 4 (Administratively Reset), Reason: …` (no "neighbor": it was
         // never read, and the Junos peer's down had no reason).
-        if let r = m.range(of: "sent to neighbor", options: .caseInsensitive) ?? m.range(of: "notification sent to", options: .caseInsensitive) {
+        if let r = FText.rangeCI(of: "sent to neighbor", in: m) ?? FText.rangeCI(of: "notification sent to", in: m) {
             sent = true; after = String(m[r.upperBound...])
-        } else if let r = m.range(of: "received from neighbor", options: .caseInsensitive)
-                    ?? m.range(of: "notification received from", options: .caseInsensitive) {
+        } else if let r = FText.rangeCI(of: "received from neighbor", in: m)
+                    ?? FText.rangeCI(of: "notification received from", in: m) {
             sent = false; after = String(m[r.upperBound...])
         } else { return nil }
         guard let neighbor = FText.firstIPv4(after: "", in: after) ?? FText.token(after: " ", in: after) else { return nil }
@@ -1231,9 +1330,9 @@ nonisolated enum LineClassifier {
         guard failed || ok else { return nil }
         guard CText.hasAny(c, ["login", "logon", "log in", "logging in", "logged in", "password", "authenticat", "user", "ssh", "telnet"]) else { return nil }
         let ip = ["srcip", "src", "UserIp", "UserAddress", "ip", "client_ip", "remote_ip", "rhost", "source", "Ip", "remote-address"]
-            .lazy.compactMap { e.field($0) }.first { FText.isIPv4($0) }
+            .lazy.compactMap { e.fieldCI($0) }.first { FText.isIPv4($0) }
             ?? FText.firstIPv4(after: "from", in: e.message) ?? FText.firstIPv4(after: "", in: e.message, excluding: e.sourceAddress)
-        let user = ["user", "UserName", "username", "usr", "administrator", "srcuser"].lazy.compactMap { e.field($0) }.first
+        let user = ["user", "UserName", "username", "usr", "administrator", "srcuser"].lazy.compactMap { e.fieldCI($0) }.first
             ?? FText.token(after: "user ", in: e.message) ?? FText.token(after: "for ", in: e.message)
         return failed ? .loginFail(ip: ip, user: user) : .loginOK(ip: ip, user: user)
     }
@@ -1242,10 +1341,10 @@ nonisolated enum LineClassifier {
 
     static func config(_ e: LogEntry, _ c: UnsafePointer<CChar>) -> FactKind? {
         let paloConfig = e.vendor == .paloAlto && CText.prefix(e.program, "CONFIG")
-        let fortiConfig = e.vendor == .fortigate && (e.field("cfgpath") != nil || e.field("cfgattr") != nil)
+        let fortiConfig = e.vendor == .fortigate && (e.fieldCI("cfgpath") != nil || e.fieldCI("cfgattr") != nil)
         // Junos: `mgd: UI_COMMIT: User 'netops' requested 'commit' operation` (the structured
         // form carries UI_COMMIT as its MSGID); progress lines are not changes.
-        let msgid = e.field("msgid") ?? ""
+        let msgid = e.fieldCI("msgid") ?? ""
         let junosCommit = ((CText.has(c, "ui_commit") || msgid.hasPrefix("UI_COMMIT"))
                            && !CText.has(c, "ui_commit_progress") && !msgid.hasPrefix("UI_COMMIT_PROGRESS"))
             || (CText.has(c, "requested 'commit'") && !CText.has(c, "commit check"))
@@ -1260,7 +1359,7 @@ nonisolated enum LineClassifier {
             || (CText.has(c, "commit") && CText.hasAny(c, ["success", "complete", "succeeded", " by "]))
         guard change else { return nil }
         if CText.hasAny(c, ["fail", "error", "invalid"]) && !paloConfig { return nil }
-        let user = ["user", "UserName", "username", "admin", "administrator", "srcuser"].lazy.compactMap { e.field($0) }.first
+        let user = ["user", "UserName", "username", "admin", "administrator", "srcuser"].lazy.compactMap { e.fieldCI($0) }.first
             ?? e.fields.first { $0.key.hasSuffix(".username") }?.value
             // IOS XR: "Configuration committed by user 'admin'." (was the user "user").
             ?? FText.token(after: " by user ", in: e.message)
@@ -1289,7 +1388,7 @@ nonisolated enum LineClassifier {
         var name = e.program
         // A name this reads is kept; otherwise the trap's OID says: with only the bundled MIBs
         // an OSPF trap is named "mib-2.14.16.2.6" (RFC1213-MIB names mib-2), no dotted OID.
-        if !trapNames.contains(name), let n = trapOIDs[e.field("trap_oid") ?? name] { name = n }
+        if !trapNames.contains(name), let n = trapOIDs[e.fieldCI("trap_oid") ?? name] { name = n }
         switch name {
         case "ospfIfAuthFailure", "ospfVirtIfAuthFailure", "ospfIfConfigError", "ospfVirtIfConfigError":
             return RoutingTrap.ospfAuth(e.raw, configError: name.hasSuffix("ConfigError"))
@@ -1445,9 +1544,12 @@ nonisolated extension FindingRules {
         // "GigabitEthernet1/0/5" — two ports, so the one that came back stayed "down and has
         // not come back". Every spelling seen goes into the evidence filter.
         var spellings: [Key: Set<String>] = [:]
+        var canonical: [String: String] = [:]
         for f in ctx.facts {
             guard case .link(let iface, let up) = f.kind else { continue }
-            let key = Key(device: ctx.device(f), iface: FText.canonicalInterface(iface))
+            let name: String
+            if let known = canonical[iface] { name = known } else { name = FText.canonicalInterface(iface); canonical[iface] = name }
+            let key = Key(device: ctx.device(f), iface: name)
             groups[key, default: []].append((ctx.time(f), up, f))
             spellings[key, default: []].insert(iface)
         }
@@ -2025,7 +2127,7 @@ nonisolated extension FindingRules {
                 let w = warn[i]
                 guard !w.isTrap, w.severity <= .error else { continue }
                 let t = frozen.time(w.address, received: w.received, device: w.deviceTime)
-                m[w.address, default: [:]][Int(t.timeIntervalSinceReferenceDate / 60), default: 0] += 1
+                m[w.address, default: [:]][Int(saturating: t.timeIntervalSinceReferenceDate / 60), default: 0] += 1
             }
             return m
         }
@@ -2038,13 +2140,14 @@ nonisolated extension FindingRules {
         for (addr, minutes) in perSource {
             guard let lo = minutes.keys.min(), let hi = minutes.keys.max(), hi - lo >= 9 else { continue }
             let total = minutes.values.reduce(0, +)
-            guard let top = minutes.max(by: { $0.value < $1.value }) else { continue }
+            // The busiest minute; of equally busy ones the first (not the dictionary's pick).
+            guard let top = minutes.max(by: { ($0.value, $1.key) < ($1.value, $0.key) }) else { continue }
             let others = Double(total - top.value) / Double(hi - lo)      // per other minute
             let usual = max(others, 0.5)
             guard top.value >= 10, Double(top.value) >= spikeFactor * usual else { continue }
             let ids = warn.filter { w in
                 !w.isTrap && w.severity <= .error && w.address == addr
-                    && Int(ctx.time(w.address, received: w.received, device: w.deviceTime).timeIntervalSinceReferenceDate / 60) == top.key
+                    && Int(saturating: ctx.time(w.address, received: w.received, device: w.deviceTime).timeIntervalSinceReferenceDate / 60) == top.key
             }.map(\.id)
             let peak = (key: top.key, value: ids)
             let name = ctx.nameByAddress[addr] ?? addr
@@ -2081,7 +2184,7 @@ nonisolated extension FindingRules {
         if c.logLost > 0 {
             out.append(Finding(id: "capacity.logLost", rule: "capacity.logLost", severity: .warn, category: .capacity, source: .engine,
                                title: "\(Format.count(c.logLost)) syslog lines were lost before they reached the table.",
-                               detail: "Lines arrived faster than SheepLog could take them in (or past the pause buffer). The findings may miss events from those moments.",
+                               detail: "Lines arrived faster than UncleSpy could take them in (or past the pause buffer). The findings may miss events from those moments.",
                                firstSeen: now, lastSeen: now, count: c.logLost,
                                nextSteps: ["Turn on disk logging in Settings: the disk log keeps every line received.", "Find the chattiest source on the Sources pane."]))
         }
@@ -2318,9 +2421,24 @@ nonisolated extension FindingRules {
         for f in facts where f.type == "Discover" && !f.relayHop { byClient[f.clientMAC, default: []].append(f) }
         struct Stuck { var clients: [String] = []; var discovers: [DHCPFact] = [] }
         var stuck: [UInt16?: Stuck] = [:]
+        // Offers by xid and by client MAC, in time order: each Discover looks up its own (it was
+        // checked against every Offer — Discovers × Offers on a busy segment or a DHCP flood).
+        var offersByXID: [UInt32: [Date]] = [:], offersByMAC: [String: [Date]] = [:]
+        for o in offers {
+            offersByXID[o.xid, default: []].append(o.time)
+            offersByMAC[o.clientMAC, default: []].append(o.time)
+        }
+        /// An Offer in `times` (sorted) within `dhcpOfferWait` from `t` on.
+        func answered(_ times: [Date]?, after t: Date) -> Bool {
+            guard let times else { return false }
+            var lo = 0, hi = times.count
+            while lo < hi { let mid = (lo + hi) / 2; if times[mid] < t { lo = mid + 1 } else { hi = mid } }
+            return lo < times.count && times[lo].timeIntervalSince(t) <= dhcpOfferWait
+        }
         for (mac, ds) in byClient {
+            if Task.isCancelled { return [] }
             let unanswered = ds.filter { d in
-                !offers.contains { o in (o.xid == d.xid || o.clientMAC == mac) && o.time >= d.time && o.time.timeIntervalSince(d.time) <= dhcpOfferWait }
+                !answered(offersByXID[d.xid], after: d.time) && !answered(offersByMAC[mac], after: d.time)
             }
             // A Discover in the capture's last 10 s may still get its Offer.
             let settled = unanswered.filter { d in pk.end.map { e in e.timeIntervalSince(d.time) >= dhcpOfferWait } ?? true }
@@ -2395,6 +2513,23 @@ nonisolated extension FindingRules {
         return out
     }
 
+    /// How many of `names` are no other name's search-domain variant (`host` and
+    /// `host.corp.example` are one typo): a name counts unless one of its dot-ended prefixes is
+    /// in the set. Linear in the names' total length — testing every pair was quadratic (10,000
+    /// NXDOMAIN names, what a DGA produces, took 6 s optimised).
+    static func nxRootCount(_ names: Set<String>) -> Int {
+        var roots = 0
+        for (k, n) in names.enumerated() {
+            if k & 1023 == 1023, Task.isCancelled { return roots }
+            var isVariant = false
+            for i in n.indices where n[i] == "." {
+                if names.contains(String(n[..<i])) { isVariant = true; break }
+            }
+            if !isVariant { roots += 1 }
+        }
+        return roots
+    }
+
     static func dnsRules(_ pk: PacketScan.Output, _ ctx: inout RuleContext) -> [Finding] {
         guard !pk.dns.isEmpty else { return [] }
         struct QKey: Hashable { let client: String; let port: UInt16; let server: String; let txid: UInt16 }
@@ -2417,6 +2552,7 @@ nonisolated extension FindingRules {
         for q in queries where q.answered || end.timeIntervalSince(q.f.time) >= dnsAnswerWait { byServer[q.f.server, default: []].append(q) }
         var out: [Finding] = []
         for (server, list) in byServer {
+            if Task.isCancelled { return out }
             let clients = Array(Set(list.map(\.f.client))).sorted()
             let answered = list.filter(\.answered)
             let noAnswer = list.count - answered.count
@@ -2424,8 +2560,7 @@ nonisolated extension FindingRules {
             // NXDOMAIN for one mistyped name (and its search-domain variants) is the typo; for
             // many different names it is a zone the resolver lost.
             let nxQueried = Set(answered.filter { $0.rcode == 3 }.map { $0.f.name.lowercased() })
-            let nxRoots = nxQueried.filter { n in !nxQueried.contains { m in m != n && n.hasPrefix(m + ".") } }
-            let nxCounts = nxRoots.count >= nxNames
+            let nxCounts = Self.nxRootCount(nxQueried) >= nxNames
             let nx = nxCounts ? answered.filter { $0.rcode == 3 }.count : 0
             let refused = answered.filter { $0.rcode == 5 }.count
             func bad(_ q: Q1) -> Bool { !q.answered || q.rcode == 2 || q.rcode == 5 || (q.rcode == 3 && nxCounts) }
@@ -2448,12 +2583,15 @@ nonisolated extension FindingRules {
             // The worst minute, and the whole capture.
             var minutes: [Int: (n: Int, bad: Int)] = [:]
             for q in list {
-                let m = Int(q.f.time.timeIntervalSinceReferenceDate / 60)
+                let m = Int(saturating: q.f.time.timeIntervalSinceReferenceDate / 60)
                 minutes[m, default: (0, 0)].n += 1
                 if bad(q) { minutes[m, default: (0, 0)].bad += 1 }
             }
             let share = Double(failed.count) / Double(list.count)
-            let worst = minutes.filter { $0.value.n >= dnsMinQueries }.max { Double($0.value.bad) / Double($0.value.n) < Double($1.value.bad) / Double($1.value.n) }
+            // Of minutes failing equally the first (not the dictionary's pick).
+            let worst = minutes.filter { $0.value.n >= dnsMinQueries }.max {
+                (Double($0.value.bad) / Double($0.value.n), $1.key) < (Double($1.value.bad) / Double($1.value.n), $0.key)
+            }
             let worstShare = worst.map { Double($0.value.bad) / Double($0.value.n) } ?? 0
             guard share >= dnsFailShare || worstShare >= dnsFailShare else { continue }
             let hard = Double(noAnswer + servfail + refused) / Double(list.count)
@@ -2464,7 +2602,8 @@ nonisolated extension FindingRules {
             if noAnswer > 0 { parts.append("no answer \(noAnswer)") }
             var names: [String: Int] = [:]
             for q in failed where !q.f.name.isEmpty { names[q.f.name, default: 0] += 1 }
-            let top = names.sorted { $0.value > $1.value }.prefix(3).map { "\($0.key) (\($0.value))" }
+            let ranked = Self.byCount(names)
+            let top = ranked.prefix(3).map { "\($0.key) (\($0.value))" }
             let whole = share >= dnsFailShare
             let windowText = whole ? "" : " in the minute at \(FText.clock(Date(timeIntervalSinceReferenceDate: Double(worst!.key) * 60)))"
             let shown = whole ? share : worstShare
@@ -2477,11 +2616,17 @@ nonisolated extension FindingRules {
                                evidence: [packetEvidence(ids, fallback: "port:53 ip:\(server)")],
                                firstSeen: failed.first?.f.time ?? list[0].f.time, lastSeen: failed.last?.f.time ?? list.last!.f.time, count: failed.count,
                                client: one ? clients[0] : nil,
-                               nextSteps: ["Query \(server) directly for a failing name: dig @\(server) \(names.max { $0.value < $1.value }?.key ?? "example.com").",
+                               nextSteps: ["Query \(server) directly for a failing name: dig @\(server) \(ranked.first?.key ?? "example.com").",
                                            "Check \(server)'s forwarders / root hints and its reachability to the Internet.",
                                            "Show the failed DNS packets."]))
         }
         return out
+    }
+
+    /// Counts most first, equal counts by name: a dictionary's order differs from run to run,
+    /// and a top-N printed from it listed tied names differently every time.
+    static func byCount(_ counts: [String: Int]) -> [(key: String, value: Int)] {
+        counts.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
     }
 
     static func arpRules(_ pk: PacketScan.Output, _ ctx: inout RuleContext) -> [Finding] {
@@ -2926,8 +3071,8 @@ nonisolated extension FindingRules {
                 } else if !totals.isEmpty {
                     let top = totals.sorted { $0.1 > $1.1 }
                     let since = restarted
-                        ? "These are counts since \(name) restarted (\(FText.duration(Double(s.sysUpTime ?? 0) / 100)) before the walk): SheepLog cannot tell whether they came with the restart or after it. Walk the Interfaces table again in a few minutes: SheepLog compares the two walks and says whether they grow."
-                        : "These are totals since the counters were last cleared, so they may be old. Walk the Interfaces table again in a few minutes: SheepLog compares the two walks and says whether they grow."
+                        ? "These are counts since \(name) restarted (\(FText.duration(Double(s.sysUpTime ?? 0) / 100)) before the walk): UncleSpy cannot tell whether they came with the restart or after it. Walk the Interfaces table again in a few minutes: UncleSpy compares the two walks and says whether they grow."
+                        : "These are totals since the counters were last cleared, so they may be old. Walk the Interfaces table again in a few minutes: UncleSpy compares the two walks and says whether they grow."
                     out.append(base("errors", "snmp.errors", .info,
                                     "\(top.count) interface\(top.count == 1 ? "" : "s") on \(name) \(top.count == 1 ? "has" : "have") error counts: \(top.prefix(4).map { "\($0.0) \(Format.count(Int(clamping: $0.1)))" }.joined(separator: ", ")).",
                                     since, ["Run Interfaces again on the SNMP Test pane in a few minutes."], count: top.count, taken: s.taken))
@@ -2974,7 +3119,9 @@ nonisolated extension FindingRules {
         /// Ports whose one-walk rate is taken over 32-bit packet counters that may have started
         /// again since the clear (the port can wrap one faster than the device has been up).
         var wrapped32: [(name: String, wrap: Double)] = []
-        for (idx, flows) in now {
+        // In ifIndex order (a dictionary's differs from run to run: ports of equal rates, and
+        // the 32-bit ports named, came out in another order every time).
+        for (idx, flows) in now.sorted(by: { $0.key < $1.key }) {
             let n = names[idx] ?? "ifIndex \(idx)"
             for dir in 0..<2 {
                 guard let disc = flows[dir].discards, disc > 0 else { continue }
@@ -3015,7 +3162,7 @@ nonisolated extension FindingRules {
             }
         }
         if !growing.isEmpty, let p = prev {
-            let top = growing.sorted { $0.weight > $1.weight }
+            let top = growing.sorted { $0.weight != $1.weight ? $0.weight > $1.weight : $0.text < $1.text }
             return [base("discards", "snmp.discardsGrowing", .warn,
                          "Discards are growing on \(name): \(top.prefix(4).map(\.text).joined(separator: ", ")) in \(FText.duration(cur.taken.timeIntervalSince(p.taken))).",
                          "Between two walks the port dropped good frames at over \(Int(discardRate)) in 10,000 (\(String(format: "%.1f", discardRate / 100)) %) — usually full output buffers (congestion, a fast port feeding a slow one, microbursts) or frames for a VLAN the port does not carry.",
@@ -3023,10 +3170,10 @@ nonisolated extension FindingRules {
                          top.count, cur.taken)]
         }
         if !totals.isEmpty {
-            let top = totals.sorted { $0.weight > $1.weight }
+            let top = totals.sorted { $0.weight != $1.weight ? $0.weight > $1.weight : $0.text < $1.text }
             return [base("discards", "snmp.discards", .info,
                          "\(top.count) interface\(top.count == 1 ? "" : "s") on \(name) dropped over \(String(format: "%.1f", discardRate / 100)) % of \(top.count == 1 ? "its" : "their") packets since the counters were cleared: \(top.prefix(4).map(\.text).joined(separator: ", ")).",
-                         "Discards are good frames the switch dropped — full buffers or unwanted VLANs. These are totals since the counters were last cleared, so they may be old: walk the Interfaces table again in a few minutes and SheepLog says whether they still grow."
+                         "Discards are good frames the switch dropped — full buffers or unwanted VLANs. These are totals since the counters were last cleared, so they may be old: walk the Interfaces table again in a few minutes and UncleSpy says whether they still grow."
                             + (wrapped32.isEmpty ? "" : " The packet counts of \(FText.list(wrapped32.map(\.name), max: 4)) come from 32-bit counters (ifTable), which start again past 4,294,967,295 — at full rate every \(FText.duration(wrapped32.map(\.wrap).min() ?? 0)) on \(wrapped32.count == 1 ? "that port" : "the fastest of them") — so these totals may be understated and the rate may be far off. An agent with ifXTable (ifHCInUcastPkts) gives the true count; two walks a few minutes apart give the rate between them."),
                          ["Run Interfaces again on the SNMP Test pane in a few minutes."], top.count, cur.taken)]
         }
@@ -3037,11 +3184,62 @@ nonisolated extension FindingRules {
 // MARK: - Text helpers
 
 /// C-string tests over one line (the log pass runs them on every core).
+nonisolated extension LogEntry {
+    /// `field(key)` — the first field whose key equals `key` ignoring case — without Foundation
+    /// for ASCII keys: `caseInsensitiveCompare` on every field for every key asked was a fifth
+    /// of the classifiers (a link line asks for up to a dozen keys). Two ASCII keys are equal
+    /// ignoring case exactly when they have the same length and `strncasecmp` says so; a
+    /// non-ASCII key is still compared by Foundation, so the answer is `field(key)`'s.
+    func fieldCI(_ key: String) -> String? {
+        let n = key.utf8.count
+        guard n == key.utf16.count else { return field(key) }
+        for f in fields {
+            let k = f.key
+            let kn = k.utf8.count
+            if kn == k.utf16.count {
+                if kn == n, k.withCString({ a in key.withCString { b in strncasecmp(a, b, n) == 0 } }) { return f.value }
+            } else if k.caseInsensitiveCompare(key) == .orderedSame {
+                return f.value
+            }
+        }
+        return nil
+    }
+}
+
 nonisolated enum CText {
-    @inline(__always) static func has(_ c: UnsafePointer<CChar>, _ n: String) -> Bool { strcasestr(c, n) != nil }
+    /// `strcasestr(c, n)`: the first place `n` starts in `c`, ignoring ASCII case (the C locale:
+    /// the app never sets one). libc's walks every byte through `tolower_l`; this jumps between
+    /// the places the first letter stands (in either case) with `strchr` and compares the rest
+    /// there with `strncasecmp` — the same places, the same answer, several times faster (the
+    /// log pass asks it a few dozen times per line).
+    static func find(_ c: UnsafePointer<CChar>, _ n: UnsafePointer<CChar>) -> UnsafePointer<CChar>? {
+        let f = UInt8(bitPattern: n[0])
+        if f == 0 { return c }
+        let rest = n + 1
+        let len = strlen(rest)
+        let lo = Int32(f >= 65 && f <= 90 ? f | 0x20 : f)
+        let up = Int32(f >= 97 && f <= 122 ? f & 0xDF : f)
+        if lo == up {
+            var p = c
+            while let h = strchr(p, lo) {
+                if strncasecmp(h + 1, rest, len) == 0 { return UnsafePointer(h) }
+                p = UnsafePointer(h) + 1
+            }
+            return nil
+        }
+        var a = strchr(c, lo), b = strchr(c, up)
+        while true {
+            let h: UnsafeMutablePointer<CChar>
+            if let x = a, let y = b { h = x < y ? x : y } else if let x = a { h = x } else if let y = b { h = y } else { return nil }
+            if strncasecmp(h + 1, rest, len) == 0 { return UnsafePointer(h) }
+            if h == a { a = strchr(h + 1, lo) } else { b = strchr(h + 1, up) }
+        }
+    }
+
+    @inline(__always) static func has(_ c: UnsafePointer<CChar>, _ n: String) -> Bool { n.withCString { find(c, $0) != nil } }
 
     static func hasAny(_ c: UnsafePointer<CChar>, _ ns: [String]) -> Bool {
-        for n in ns where strcasestr(c, n) != nil { return true }
+        for n in ns where n.withCString({ find(c, $0) != nil }) { return true }
         return false
     }
 
@@ -3052,7 +3250,7 @@ nonisolated enum CText {
         n.withCString { np -> Bool in
             let len = strlen(np)
             var p = c
-            while let hit = strcasestr(p, np) {
+            while let hit = find(p, np) {
                 let before: CChar = hit == c ? 0 : hit[-1]
                 let after = hit[len]
                 if !isAlpha(before) && !isAlpha(after) { return true }
@@ -3067,7 +3265,7 @@ nonisolated enum CText {
     }
 
     static func contains(_ s: String, _ n: String) -> Bool {
-        s.withCString { a in strcasestr(a, n) != nil }
+        s.withCString { a in has(a, n) }
     }
 }
 
@@ -3078,7 +3276,9 @@ nonisolated enum FText {
     static func clock(_ d: Date) -> String { clockFormat.string(from: d) }
 
     static func duration(_ s: Double) -> String {
-        let s = abs(s)
+        // Capped at 10^12 s (31,000 years): `Int(Double)` trapped on the spans a pcapng with a
+        // huge `if_tsoffset` made (and on NaN, shown as 0 s).
+        let s = s.isNaN ? 0 : min(abs(s), 1e12)
         if s < 60 { return "\(Int(s.rounded())) s" }
         if s < 3600 {
             let m = Int(s / 60), sec = Int(s) % 60
@@ -3114,22 +3314,27 @@ nonisolated enum FText {
     /// Cisco's abbreviations spelled out (`Gi1/0/5` → `GigabitEthernet1/0/5`, `Te1/1/1`,
     /// `Fa0/1`, `Po10`, NX-OS / Arista `Eth1/1` / `Et5`, Huawei `GE0/0/5` / `XGE0/0/1`): the
     /// same port in a PM / err-disable line and in a LINK line. Anything else is kept.
+    static let interfaceAbbreviations: [String: String] = [
+        "gi": "GigabitEthernet", "gig": "GigabitEthernet", "ge": "GigabitEthernet", "fa": "FastEthernet",
+        "te": "TenGigabitEthernet", "ten": "TenGigabitEthernet", "tw": "TwoGigabitEthernet", "fi": "FiveGigabitEthernet",
+        "twe": "TwentyFiveGigE", "fo": "FortyGigabitEthernet", "hu": "HundredGigE", "po": "Port-channel",
+        "eth": "Ethernet", "et": "Ethernet", "xge": "XGigabitEthernet",
+    ]
+    /// The full names by their lower-case spelling (built once: per link line, the tables were
+    /// half of the link rules).
+    static let interfaceFullNames: [String: String] = Dictionary(
+        interfaceAbbreviations.values.map { ($0.lowercased(), $0) }, uniquingKeysWith: { a, _ in a })
+
     static func canonicalInterface(_ s: String) -> String {
         let letters = s.prefix { $0.isLetter }
         guard !letters.isEmpty, letters.count < s.count, s[letters.endIndex].isNumber else { return s }
-        let full: [String: String] = [
-            "gi": "GigabitEthernet", "gig": "GigabitEthernet", "ge": "GigabitEthernet", "fa": "FastEthernet",
-            "te": "TenGigabitEthernet", "ten": "TenGigabitEthernet", "tw": "TwoGigabitEthernet", "fi": "FiveGigabitEthernet",
-            "twe": "TwentyFiveGigE", "fo": "FortyGigabitEthernet", "hu": "HundredGigE", "po": "Port-channel",
-            "eth": "Ethernet", "et": "Ethernet", "xge": "XGigabitEthernet",
-        ]
         let lower = letters.lowercased()
         // Linux's eth0 is no NX-OS Ethernet port: the short forms that are also other systems'
         // names only with a slot ("Eth1/1", "GE0/0/5").
         if ["eth", "et", "ge"].contains(lower), !s[letters.endIndex...].contains("/") { return s }
-        if let name = full[lower] { return name + s[letters.endIndex...] }
+        if let name = interfaceAbbreviations[lower] { return name + s[letters.endIndex...] }
         // Full names in any case ("gigabitethernet1/0/5") read as the same port.
-        for name in Set(full.values) where name.lowercased() == lower { return name + s[letters.endIndex...] }
+        if let name = interfaceFullNames[lower] { return name + s[letters.endIndex...] }
         return s
     }
 
@@ -3141,17 +3346,79 @@ nonisolated enum FText {
     static func excerpt(_ s: String, max n: Int = 90) -> String {
         var t = s
         // Drop an AOS-CX "Event|1105|LOG_CRIT|AMM|1/1|" prefix.
-        if t.hasPrefix("Event|"), let r = t.range(of: "|", options: .backwards) { t = String(t[r.upperBound...]) }
-        if let r = t.range(of: ":", options: []), t.hasPrefix("%%"), t.distance(from: t.startIndex, to: r.lowerBound) < 60 {
+        // (ASCII text: the last "|" byte is the last "|" Character — no Foundation search.)
+        if t.hasPrefix("Event|") {
+            if t.utf8.count == t.utf16.count, let i = t.utf8.lastIndex(of: UInt8(ascii: "|")) {
+                t = String(t[t.utf8.index(after: i)...])
+            } else if let r = t.range(of: "|", options: .backwards) {
+                t = String(t[r.upperBound...])
+            }
+        }
+        if t.hasPrefix("%%"), let r = rangeCI(of: ":", in: t, caseInsensitive: false), t.distance(from: t.startIndex, to: r.lowerBound) < 60 {
             t = String(t[r.upperBound...])
         }
-        t = t.trimmingCharacters(in: .whitespaces)
+        // Trimmed only when an end may be blank (the timeline labels thousands of lines);
+        // a Character no longer than n bytes is no longer than n Characters.
+        if let a = t.unicodeScalars.first, let z = t.unicodeScalars.last,
+           !a.isASCII || a == " " || a == "\t" || !z.isASCII || z == " " || z == "\t" {
+            t = t.trimmingCharacters(in: .whitespaces)
+        }
+        if t.utf8.count <= n { return t }
         return t.count > n ? String(t.prefix(n - 1)) + "…" : t
+    }
+
+    /// `s.range(of: marker, options: .caseInsensitive)`, by a byte search (`CText.find`, as
+    /// `strcasestr`) where that is the same answer — an ASCII marker in ASCII text without a
+    /// NUL byte (no Character there is more than one byte or folds to another one) — and by
+    /// Foundation otherwise. Foundation's search compares Characters: in a Debug build it was
+    /// a third of the log pass. `caseInsensitive: false`: `s.range(of: marker)` (`strstr`).
+    static func rangeCI(of marker: String, in s: Substring, caseInsensitive: Bool = true) -> Range<String.Index>? {
+        func foundation() -> Range<String.Index>? {
+            caseInsensitive ? s.range(of: marker, options: .caseInsensitive) : s.range(of: marker)
+        }
+        let base = s.base
+        let n = base.utf8.count
+        // utf16.count is the byte count only for ASCII (O(1) then: the string knows it).
+        guard !marker.isEmpty, marker.utf8.count == marker.utf16.count, n == base.utf16.count else { return foundation() }
+        let lo = base.utf8.distance(from: base.startIndex, to: s.startIndex)
+        let hi = base.utf8.distance(from: base.startIndex, to: s.endIndex)
+        let at = base.withCString { c -> Int in
+            guard strlen(c) == n else { return -2 }
+            let hit = marker.withCString { caseInsensitive ? CText.find(c + lo, $0) : UnsafePointer(strstr(c + lo, $0)) }
+            guard let hit else { return -1 }
+            return c.distance(to: hit)
+        }
+        if at == -2 { return foundation() }
+        // The first match from `lo` ends past `hi`: so does every later one.
+        let end = at + marker.utf8.count
+        guard at >= 0, end <= hi else { return nil }
+        return base.utf8.index(base.startIndex, offsetBy: at)..<base.utf8.index(base.startIndex, offsetBy: end)
+    }
+
+    static func rangeCI(of marker: String, in s: String, caseInsensitive: Bool = true) -> Range<String.Index>? {
+        rangeCI(of: marker, in: s[...], caseInsensitive: caseInsensitive)
     }
 
     /// The word after `marker` (case-insensitive), without trailing punctuation.
     static func token(after marker: String, in s: String) -> String? {
-        guard let r = s.range(of: marker, options: .caseInsensitive) else { return nil }
+        guard let r = rangeCI(of: marker, in: s) else { return nil }
+        // ASCII text: each byte is a Character ("\r\n" is two bytes, neither of them a
+        // separator), so the bytes give the same word without a Character walk.
+        let u = s.utf8
+        if u.count == s.utf16.count {
+            var a = r.upperBound
+            while a < u.endIndex, [32, 61, 58, 34, 39].contains(u[a]) { a = u.index(after: a) }
+            var b = a
+            while b < u.endIndex {
+                switch u[b] {
+                case 32, 44, 59, 40, 41, 34, 39, 91, 93, 9: break
+                default: b = u.index(after: b); continue
+                }
+                break
+            }
+            while b > a, [46, 58].contains(u[u.index(before: b)]) { b = u.index(before: b) }
+            return a == b ? nil : String(s[a..<b])
+        }
         let rest = s[r.upperBound...].drop { $0 == " " || $0 == "=" || $0 == ":" || $0 == "\"" || $0 == "'" }
         var tok = String(rest.prefix { !(" ,;()\"'[]\t".contains($0)) })
         while let l = tok.last, ".:".contains(l) { tok.removeLast() }
@@ -3166,7 +3433,7 @@ nonisolated enum FText {
     /// The first IPv6 address after `marker`: a word (up to space, comma, parenthesis or
     /// quote; a trailing "." or ":" dropped) that parses as one.
     static func firstIPv6(after marker: String, in s: String) -> String? {
-        guard let r = s.range(of: marker, options: .caseInsensitive) else { return nil }
+        guard let r = rangeCI(of: marker, in: s) else { return nil }
         for word in s[r.upperBound...].split(whereSeparator: { " ,;()[]\"'=\t".contains($0) }) where word.contains(":") {
             var w = String(word)
             while let l = w.last, l == "." || (l == ":" && !w.hasSuffix("::")) { w.removeLast() }
@@ -3180,24 +3447,51 @@ nonisolated enum FText {
     static func firstIPv4(after marker: String, in s: String, excluding: String? = nil) -> String? {
         var hay = Substring(s)
         if !marker.isEmpty {
-            guard let r = s.range(of: marker, options: .caseInsensitive) else { return nil }
+            guard let r = rangeCI(of: marker, in: s) else { return nil }
             hay = s[r.upperBound...]
         }
-        let bytes = Array(hay.utf8)
-        var i = 0
-        while i < bytes.count {
-            if bytes[i] >= 48, bytes[i] <= 57, i == 0 || !(bytes[i - 1] >= 48 && bytes[i - 1] <= 57) && bytes[i - 1] != 46 {
-                var j = i
-                while j < bytes.count, (bytes[j] >= 48 && bytes[j] <= 57) || bytes[j] == 46 { j += 1 }
-                let cand = String(decoding: bytes[i..<j], as: UTF8.self)
-                let trimmed = cand.hasSuffix(".") ? String(cand.dropLast()) : cand
-                if isIPv4(trimmed), trimmed != excluding { return trimmed }
-                i = j
-            } else {
-                i += 1
+        let scan = { (bytes: UnsafeBufferPointer<UInt8>) -> String? in
+            var i = 0
+            while i < bytes.count {
+                if bytes[i] >= 48, bytes[i] <= 57, i == 0 || !(bytes[i - 1] >= 48 && bytes[i - 1] <= 57) && bytes[i - 1] != 46 {
+                    var j = i
+                    while j < bytes.count, (bytes[j] >= 48 && bytes[j] <= 57) || bytes[j] == 46 { j += 1 }
+                    // A run of digits and dots, one trailing dot dropped: an address when it is
+                    // four parts of 1–3 digits up to 255 (`isIPv4`, read off the bytes — a
+                    // String per run was most of the routing lines' cost).
+                    let end = bytes[j - 1] == 46 ? j - 1 : j
+                    if Self.dottedQuad(bytes, i, end) {
+                        let trimmed = String(decoding: UnsafeBufferPointer(rebasing: bytes[i..<end]), as: UTF8.self)
+                        if trimmed != excluding { return trimmed }
+                    }
+                    i = j
+                } else {
+                    i += 1
+                }
             }
+            return nil
         }
-        return nil
+        if let found = hay.utf8.withContiguousStorageIfAvailable(scan) { return found }
+        return Array(hay.utf8).withUnsafeBufferPointer(scan)
+    }
+
+    /// `isIPv4` of the ASCII digits and dots `bytes[lo..<hi]`.
+    static func dottedQuad(_ bytes: UnsafeBufferPointer<UInt8>, _ lo: Int, _ hi: Int) -> Bool {
+        var parts = 0, digits = 0, value = 0
+        var k = lo
+        while k <= hi {
+            if k == hi || bytes[k] == 46 {
+                guard digits > 0, digits <= 3, value <= 255 else { return false }
+                parts += 1
+                digits = 0
+                value = 0
+            } else {
+                digits += 1
+                if digits <= 3 { value = value * 10 + Int(bytes[k] - 48) }
+            }
+            k += 1
+        }
+        return parts == 4
     }
 
     /// Every word a failed-login line is picked by (`LineClassifier.login`): a bare `fail` is a

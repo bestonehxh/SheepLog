@@ -180,12 +180,22 @@ nonisolated enum TimelineBuilder {
                 }
             }
         }
+        // One filter per device and address (a lane has up to `slots` picks of the same few).
+        var hostTerms: [String: String] = [:]
         for (lane, bySlot) in picks {
+            hostTerms.removeAll(keepingCapacity: true)
             for (s, p) in bySlot {
                 let w = warn[p.index]
-                let target: JumpTarget = w.isTrap
-                    ? .log("host:\(w.address) vendor:trap")
-                    : .log(ctx.hostTerm(address: w.address, name: lane) + " sev:<=warn")
+                let target: JumpTarget
+                if w.isTrap {
+                    target = .log("host:\(w.address) vendor:trap")
+                } else if let term = hostTerms[w.address] {
+                    target = .log(term)
+                } else {
+                    let term = ctx.hostTerm(address: w.address, name: lane) + " sev:<=warn"
+                    hostTerms[w.address] = term
+                    target = .log(term)
+                }
                 let label = (w.isTrap ? "Trap " : "\(w.severity.label) ") + FText.excerpt(w.text, max: 80)
                 lanes[lane]?.best[s] = TimelineEvent(id: nextID, time: p.time, kind: w.isTrap ? .trap : .log,
                                                      severity: p.sev, label: label, target: target)
@@ -211,8 +221,13 @@ nonisolated enum TimelineBuilder {
             lanes[lane] = a
         }
         let built = lanes.map { name, a in
-            TimelineLane(id: name, events: (a.bars + a.best.values).sorted { $0.time < $1.time }, worst: a.worst,
-                         total: a.total, problems: a.problems, first: a.first, last: a.last)
+            // In time order, ties as they come (what a stable sort by time gives), sorted as
+            // indices: moving whole events was most of the timeline in a Debug build.
+            let all = a.bars + a.best.values
+            let keys = all.map { $0.time.timeIntervalSinceReferenceDate }
+            let order = keys.indices.sorted { keys[$0] < keys[$1] || (keys[$0] == keys[$1] && $0 < $1) }
+            return TimelineLane(id: name, events: order.map { all[$0] }, worst: a.worst,
+                                total: a.total, problems: a.problems, first: a.first, last: a.last)
         }
         .sorted { a, b in
             if a.worst != b.worst { return a.worst > b.worst }

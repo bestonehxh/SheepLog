@@ -99,7 +99,7 @@ extension Notification.Name {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    /// One window: View ▸ Show Tab Bar offered a "+" that opened a second SheepLog window on the
+    /// One window: View ▸ Show Tab Bar offered a "+" that opened a second UncleSpy window on the
     /// same listeners and stores (and a second Flows analysis).
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSWindow.allowsAutomaticWindowTabbing = false

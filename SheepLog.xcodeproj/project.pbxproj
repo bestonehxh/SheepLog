@@ -17,7 +17,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		81918909E83595C8F4212CCC /* SheepLog.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SheepLog.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		81918909E83595C8F4212CCC /* UncleSpy.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = UncleSpy.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		858E33F033846B57054E0712 /* SheepLogTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SheepLogTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -64,7 +64,7 @@
 		86024CAD1E83101D97359D73 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				81918909E83595C8F4212CCC /* SheepLog.app */,
+				81918909E83595C8F4212CCC /* UncleSpy.app */,
 				858E33F033846B57054E0712 /* SheepLogTests.xctest */,
 			);
 			name = Products;
@@ -92,7 +92,7 @@
 			packageProductDependencies = (
 			);
 			productName = SheepLog;
-			productReference = 81918909E83595C8F4212CCC /* SheepLog.app */;
+			productReference = 81918909E83595C8F4212CCC /* UncleSpy.app */;
 			productType = "com.apple.product-type.application";
 		};
 		DFEE19449146DDDB4DD78AD1 /* SheepLogTests */ = {
@@ -276,24 +276,25 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 20;
+				CURRENT_PROJECT_VERSION = 31;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "SheepLog receives syslog, SNMP traps and mirrored traffic from network devices.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "UncleSpy receives syslog, SNMP traps and mirrored traffic from network devices.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.9;
+				MARKETING_VERSION = 1.10;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lpcap",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = Bestchaan.SheepLog;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_MODULE_NAME = SheepLog;
+				PRODUCT_NAME = UncleSpy;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
@@ -311,24 +312,25 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 20;
+				CURRENT_PROJECT_VERSION = 31;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "SheepLog receives syslog, SNMP traps and mirrored traffic from network devices.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "UncleSpy receives syslog, SNMP traps and mirrored traffic from network devices.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.9;
+				MARKETING_VERSION = 1.10;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lpcap",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = Bestchaan.SheepLog;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_MODULE_NAME = SheepLog;
+				PRODUCT_NAME = UncleSpy;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
@@ -344,10 +346,10 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 20;
+				CURRENT_PROJECT_VERSION = 31;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 26.4;
-				MARKETING_VERSION = 1.9;
+				MARKETING_VERSION = 1.10;
 				PRODUCT_BUNDLE_IDENTIFIER = Bestchaan.SheepLogTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
@@ -356,7 +358,7 @@
 				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/SheepLog/CPcap";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 6.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SheepLog.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/SheepLog";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/UncleSpy.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/UncleSpy";
 			};
 			name = Debug;
 		};
@@ -365,10 +367,10 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 20;
+				CURRENT_PROJECT_VERSION = 31;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 26.4;
-				MARKETING_VERSION = 1.9;
+				MARKETING_VERSION = 1.10;
 				PRODUCT_BUNDLE_IDENTIFIER = Bestchaan.SheepLogTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
@@ -377,7 +379,7 @@
 				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/SheepLog/CPcap";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 6.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SheepLog.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/SheepLog";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/UncleSpy.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/UncleSpy";
 			};
 			name = Release;
 		};

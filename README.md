@@ -6,9 +6,9 @@
 
 **Syslog viewer, SNMP tester and packet capture for network engineers — a native macOS app.** Formerly SheepLog.
 
-[![Download UncleSpy for macOS](https://img.shields.io/badge/Download-UncleSpy_1.9_for_macOS-2ea44f?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/bestonehxh/SheepLog/releases/latest)
+[![Download UncleSpy for macOS](https://img.shields.io/badge/Download-UncleSpy_1.10_for_macOS-2ea44f?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/bestonehxh/SheepLog/releases/latest)
 
-**[Get the latest release →](https://github.com/bestonehxh/SheepLog/releases/latest)** — download `UncleSpy-1.9.zip`, unzip, and drag **UncleSpy.app** into `Applications`. The build is not notarised: on first launch right-click the app and choose Open.
+**[Get the latest release →](https://github.com/bestonehxh/SheepLog/releases/latest)** — download `UncleSpy-1.10.zip`, unzip, and drag **UncleSpy.app** into `Applications`. The build is not notarised: on first launch right-click the app and choose Open.
 
 One app for the three things you reach for when a network misbehaves: the devices' syslog, an
 SNMP walk, and a packet capture of the SPAN port — plus a Troubleshoot page that reads all three

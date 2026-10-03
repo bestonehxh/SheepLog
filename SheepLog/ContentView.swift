@@ -5,8 +5,8 @@ enum Chrome {
     static let isCapturing = CommandLine.value(after: "-demoShot") != nil
 }
 
-/// Family shell (SheepRadius build 18+): a fixed 212 pt vibrant sidebar that owns the
-/// traffic-light row, and a solid main column showing the selected pane.
+/// The shell, as LabDC's MainView: a fixed 220 pt sidebar one shade off the page (no rule
+/// between them) and the selected pane on the page ground.
 struct ContentView: View {
     @ObservedObject private var model = AppModel.shared
     @Environment(\.controlActiveState) private var controlActiveState
@@ -15,9 +15,6 @@ struct ContentView: View {
         HStack(spacing: 0) {
             SidebarView()
                 .frame(width: Metrics.sidebar)
-            Rectangle()
-                .fill(Theme.hairline)
-                .frame(width: 0.5)
             VStack(spacing: 0) {
                 Color.clear
                     .frame(height: model.isFullScreen ? Metrics.titleBarFullScreen : Metrics.titleBar)
@@ -26,11 +23,8 @@ struct ContentView: View {
             .background(Theme.content)
         }
         .background {
-            if Chrome.isCapturing {
-                Theme.sidebar.ignoresSafeArea()
-            } else {
-                VisualEffectBackground(material: .sidebar).ignoresSafeArea()
-            }
+            // Quiet: flat colours, no vibrancy — the sidebar one shade off the page.
+            Theme.sidebar.ignoresSafeArea()
         }
         .frame(minWidth: Metrics.minimumWindow, minHeight: 640)
         .modifier(FullscreenSync())
@@ -41,7 +35,11 @@ struct ContentView: View {
             }
         }
         .environment(\.controlActiveState, Chrome.isCapturing ? .key : controlActiveState)
-        .onChange(of: model.mainPane) { _, pane in LastPane.save(pane) }
+        .onChange(of: model.mainPane) { _, pane in
+            Page.remember(pane)
+            LastPane.save(pane)
+        }
+        .onAppear { Page.remember(model.mainPane) }
     }
 
     private var errorBinding: Binding<Bool> {

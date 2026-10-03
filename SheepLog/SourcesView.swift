@@ -14,34 +14,34 @@ struct SourcesView: View {
     var body: some View {
         let _ = PaneProbe.ran("body.sources")
         VStack(spacing: 0) {
-            PaneHeader(eyebrow: "Syslog", heading: heading, subtitle: subtitle)
+            PaneHeader(pane: .sources, status: heading, detail: subtitle)
                 .paneColumn()
                 .padding(.top, Metrics.headerTop)
-                .padding(.bottom, 12)
+                .padding(.bottom, 14)
 
             ZStack {
                 table
                 if store.sources.isEmpty {
-                    TableEmptyOverlay(text: "No devices yet. Point a device’s syslog at this Mac and it appears here with its vendor, line count and last-seen time.")
+                    TableEmptyOverlay(text: "No devices yet. A device appears here once it sends a line.")
                         .allowsHitTesting(false)
                 }
             }
             .tablePanel()
             .paneColumn()
-            .padding(.vertical, 16)
+            .padding(.bottom, 16)
         }
     }
 
     private var heading: String {
         switch store.sources.count {
-        case 0: "No devices are talking yet."
-        case 1: "1 device is talking."
-        default: "\(store.sources.count) devices are talking."
+        case 0: "No devices are talking yet"
+        case 1: "1 device is talking"
+        default: "\(store.sources.count) devices are talking"
         }
     }
 
     private var subtitle: String {
-        "Every address that has sent a line since launch. When a vendor is detected wrongly, pick the right one and that source’s lines are parsed again."
+        "every address that sent a line since launch · pick a vendor to parse a source again"
     }
 
     private var table: some View {
@@ -50,21 +50,19 @@ struct SourcesView: View {
         // column that gives way.
         Table(rows, selection: $selection, sortOrder: $sortOrder) {
             TableColumn("Hostname", value: \SourceStats.displayName) { s in
-                HStack(spacing: 7) {
-                    Circle().fill(Theme.vendorColor(s.vendor)).frame(width: 7, height: 7)
-                        .accessibilityHidden(true)
+                HStack(spacing: 8) {
                     Text(s.displayName).identifierText()
-                    Spacer(minLength: 4)
+                    Spacer(minLength: 8)
                     Button { show(s.address) } label: {
-                        Image(systemName: "arrow.right.circle").font(.system(size: 12))
+                        Text("Show").font(Theme.caption)
                     }
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(Theme.dimText)
+                    .buttonStyle(.quietLink)
                     .help("Show this source’s lines")
                     .accessibilityLabel("Show \(s.displayName)’s lines")
                 }
             }
-            .width(min: 110, ideal: 140, max: 260)
+            // Room for "FGT-60F-Branch" and its Show link at the 1000 pt minimum.
+            .width(min: 150, ideal: 172, max: 280)
 
             TableColumn("Address", value: \SourceStats.address) { s in
                 Text(s.address)
@@ -72,12 +70,12 @@ struct SourcesView: View {
                     .foregroundStyle(Theme.text2)
                     .identifierText()
             }
-            .width(min: 84, ideal: 100, max: 180)
+            .width(min: 84, ideal: 96, max: 180)
 
             TableColumn("Vendor", value: \SourceStats.vendorLabel) { s in
                 VendorOverridePicker(source: s, detected: store.detectedVendor(for: s.address))
             }
-            .width(min: 100, ideal: 116)
+            .width(min: 100, ideal: 104, max: 150)
 
             TableColumn("Lines", value: \SourceStats.count) { s in
                 Text(Format.count(s.count)).monospacedDigit()
@@ -114,8 +112,7 @@ struct SourcesView: View {
         } primaryAction: { ids in
             if let s = store.sources.first(where: { ids.contains($0.id) }) { show(s.address) }
         }
-        .tableStyle(.inset(alternatesRowBackgrounds: false))
-        .scrollContentBackground(.hidden)
+        .quietTable(selection: selection)
     }
 
     private func show(_ address: String) {

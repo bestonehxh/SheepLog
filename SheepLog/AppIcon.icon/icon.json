@@ -1,11 +1,135 @@
 {
-  "fill" : { "linear-gradient" : [ "extended-srgb:0.784,0.282,0.545,1.000", "extended-srgb:0.624,0.212,0.427,1.000" ] },
-  "groups" : [
+  "fill-specializations": [
     {
-      "layers" : [
-        { "glass" : false, "image-name" : "sheeplog-artwork.png" }
-      ]
+      "value": {
+        "solid": "extended-srgb:0.95294,0.93333,0.89020,1.00000"
+      }
+    },
+    {
+      "appearance": "dark",
+      "value": {
+        "solid": "extended-srgb:0.12157,0.10980,0.09412,1.00000"
+      }
     }
   ],
-  "supported-platforms" : { "squares" : [ "macOS" ] }
+  "groups": [
+    {
+      "name": "Monocle",
+      "layers": [
+        {
+          "image-name": "monocle.svg",
+          "name": "rim",
+          "glass": true,
+          "fill-specializations": [
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "extended-srgb:0.81569,0.66667,0.37647,1.00000"
+              }
+            },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "extended-srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            }
+          ]
+        },
+        {
+          "image-name": "lens.svg",
+          "name": "lens",
+          "glass": true,
+          "opacity-specializations": [
+            {
+              "value": 0.5
+            },
+            {
+              "appearance": "dark",
+              "value": 0.1
+            }
+          ]
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.5
+      },
+      "specular": true,
+      "translucency": {
+        "enabled": false,
+        "value": 0.5
+      }
+    },
+    {
+      "name": "Chain",
+      "layers": [
+        {
+          "image-name": "chain.svg",
+          "name": "chain",
+          "glass": false,
+          "fill-specializations": [
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "extended-srgb:0.81569,0.66667,0.37647,1.00000"
+              }
+            },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "extended-srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            }
+          ]
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.0
+      },
+      "specular": false,
+      "translucency": {
+        "enabled": false,
+        "value": 0.5
+      }
+    },
+    {
+      "name": "Mustache",
+      "layers": [
+        {
+          "image-name": "mustache.svg",
+          "name": "mustache",
+          "glass": true,
+          "fill-specializations": [
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "extended-srgb:0.95294,0.93333,0.89020,1.00000"
+              }
+            },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "extended-srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            }
+          ]
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.5
+      },
+      "specular": true,
+      "translucency": {
+        "enabled": false,
+        "value": 0.5
+      }
+    }
+  ],
+  "supported-platforms": {
+    "squares": [
+      "macOS"
+    ]
+  }
 }

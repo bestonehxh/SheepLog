@@ -189,7 +189,7 @@ nonisolated final class DiskLogger: @unchecked Sendable {
                 report(Self.notConnected(disk))
                 return
             }
-            report("SheepLog: writing \(currentFile?.path ?? "the log file") failed: \(String(cString: strerror(ok)))"
+            report("UncleSpy: writing \(currentFile?.path ?? "the log file") failed: \(String(cString: strerror(ok)))"
                    + (ok == ENOSPC ? " (the disk is full)" : "") + ". Lines are kept in memory only until this is fixed.")
         } else {
             // Writing works (again): a later failure is worth another report.
@@ -218,7 +218,7 @@ nonisolated final class DiskLogger: @unchecked Sendable {
         guard fstat(f, &st) == 0, st.st_mode & S_IFMT == S_IFREG else { return }
         let ok = Self.writeWhole(f, data)
         if ok != 0 {
-            report("SheepLog: writing \(path) failed: \(String(cString: strerror(ok)))"
+            report("UncleSpy: writing \(path) failed: \(String(cString: strerror(ok)))"
                    + (ok == ENOSPC ? " (the disk is full)" : "") + ". Lines are kept in memory only until this is fixed.")
         }
     }
@@ -267,7 +267,7 @@ nonisolated final class DiskLogger: @unchecked Sendable {
         day = today
         let url = directory.appending(path: "\(today).log")
         if let why = Self.unsuitableReason(directory) {
-            report("SheepLog: not writing log files: \(why). Choose another folder in Settings.")
+            report("UncleSpy: not writing log files: \(why). Choose another folder in Settings.")
             return
         }
         if let disk = Self.missingVolume(directory) {
@@ -279,7 +279,7 @@ nonisolated final class DiskLogger: @unchecked Sendable {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
                                                     attributes: [.posixPermissions: 0o700])
         } catch {
-            report("SheepLog: cannot create the log folder \(directory.path(percentEncoded: false)): \(error.localizedDescription)")
+            report("UncleSpy: cannot create the log folder \(directory.path(percentEncoded: false)): \(error.localizedDescription)")
             return
         }
         // O_NOFOLLOW: a symlink planted as today's file is not followed; 0600: the lines may
@@ -288,7 +288,7 @@ nonisolated final class DiskLogger: @unchecked Sendable {
         let f = Darwin.open(path, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600)
         guard f >= 0 else {
             let e = errno
-            report("SheepLog: cannot open \(path): \(String(cString: strerror(e)))"
+            report("UncleSpy: cannot open \(path): \(String(cString: strerror(e)))"
                    + (e == ELOOP ? " (it is a symbolic link)" : ""))
             return
         }
@@ -296,7 +296,7 @@ nonisolated final class DiskLogger: @unchecked Sendable {
         if fstat(f, &st) == 0 {
             guard st.st_mode & S_IFMT == S_IFREG else {
                 Darwin.close(f)
-                report("SheepLog: cannot write \(path): not a regular file")
+                report("UncleSpy: cannot write \(path): not a regular file")
                 return
             }
             // A file from an older build (0644) is tightened too.
@@ -309,7 +309,7 @@ nonisolated final class DiskLogger: @unchecked Sendable {
     }
 
     static func notConnected(_ disk: String) -> String {
-        "SheepLog: the disk “\(disk)” that holds the log folder is not connected. "
+        "UncleSpy: the disk “\(disk)” that holds the log folder is not connected. "
             + "Lines are written again as soon as it is back; meanwhile they are kept in memory only."
     }
 
@@ -326,6 +326,11 @@ nonisolated final class DiskLogger: @unchecked Sendable {
         let sec = Int(t.rounded(.down))
         if sec != stampSecond {
             stampSecond = sec
+            // The day files (dayString) read `.current` per call, so rotation follows a system
+            // zone change at once; the formatter held the zone object of launch and went on
+            // stamping the old offset until relaunch — a line stamped with it could sit in
+            // another day's file. Re-taken once a second, it is cheap.
+            isoSeconds.timeZone = .current
             stampPrefix = isoSeconds.string(from: Date(timeIntervalSince1970: Double(sec)))
         }
         let ms = min(999, Int((t - Double(sec)) * 1000))

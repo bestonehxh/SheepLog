@@ -1,6 +1,11 @@
 import SwiftUI
 
-/// SERVICES with their switches, then the panes in four groups — no icons, the word is the row.
+/// The Quiet sidebar, structured exactly like the LabDC app's: the app's name and one status
+/// line up top, the pages (`Page.sidebar`: Status, Troubleshoot, Log, SNMP, Capture) as a flat
+/// list of words (selected = ink and semibold, no fills, no icons, no section labels), Settings
+/// at the bottom. A page's panes are tabs in its header (`PaneHeader(pane:)`). The services have no switches here —
+/// they are started and stopped as word links on the Status page, the way LabDC's Services
+/// page restarts its services.
 struct SidebarView: View {
     @ObservedObject private var model = AppModel.shared
     @ObservedObject private var syslog = AppModel.shared.syslog
@@ -10,164 +15,92 @@ struct SidebarView: View {
     @ObservedObject private var packets = AppModel.shared.packets
     @ObservedObject private var mibs = MIBRegistry.shared
 
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack { Spacer() }
-                .frame(height: model.isFullScreen ? Metrics.titleBarFullScreen : Metrics.titleBar)
-
-            VStack(alignment: .leading, spacing: 0) {
-                    sectionHeader("Services", top: 2)
-                    service("Syslog", failed: syslog.lastError != nil, detail: syslog.portsText,
-                            isOn: Binding(get: { syslog.isRunning }, set: { $0 ? model.startSyslog() : model.stopSyslog() }))
-                    service("SNMP traps", failed: traps.lastError != nil, detail: "udp \(traps.port)",
-                            isOn: Binding(get: { traps.isRunning }, set: { $0 ? model.startTraps() : model.stopTraps() }))
-                    service("Capture", failed: capture.lastError != nil, detail: captureDetail,
-                            isOn: Binding(get: { capture.isRunning }, set: { $0 ? model.startCapture() : model.stopCapture() }))
-
-                    sectionHeader("Overview")
-                    group {
-                        row(.status, "Status")
-                        row(.troubleshoot, "Troubleshoot")
+            SidebarHeader(failed: failed, status: statusLine)
+                .padding(.bottom, 32)
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(Page.sidebar, id: \.self) { page in
+                    SidebarLink(title: page.title, selected: Page.of(model.mainPane) == page) {
+                        // The page's own word again keeps the tab it is on.
+                        if Page.of(model.mainPane) != page { model.mainPane = page.landingPane }
                     }
-
-                    sectionHeader("Syslog")
-                    group {
-                        row(.log, "Log", count: count(.log))
-                        row(.sources, "Sources", count: count(.sources))
-                    }
-
-                    sectionHeader("SNMP")
-                    group {
-                        row(.snmpTest, "Test")
-                        row(.mibs, "MIBs", count: count(.mibs))
-                    }
-
-                    sectionHeader("Capture")
-                    group {
-                        row(.packets, "Packets", count: count(.packets))
-                        row(.flows, "TCP flows")
-                        row(.auth, "Authentication")
-                    }
-
-                    sectionHeader("App")
-                    group { row(.settings, "Settings") }
                 }
-                .padding(.bottom, 12)
+            }
+            Spacer(minLength: 24)
+            SidebarLink(title: "Settings", selected: model.mainPane == .settings) {
+                model.mainPane = .settings
+            }
         }
-        .frame(maxHeight: .infinity, alignment: .top)
+        .padding(.top, 40)
+        .padding(.leading, 28)
+        .padding(.trailing, 16)
+        .padding(.bottom, 28)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Theme.sidebar.ignoresSafeArea())
     }
 
-    private func count(_ pane: MainPane) -> Int? { Self.counts(logs: logs, packets: packets, mibs: mibs)[pane] }
+    private var failed: Bool { syslog.lastError != nil || traps.lastError != nil || capture.lastError != nil }
 
-    private var captureDetail: String {
-        capture.interfaceName + (capture.runningPromiscuous ? " · promisc" : "")
+    /// One quiet line under the app's name: what is running, or what failed.
+    private var statusLine: String {
+        if failed { return "Needs attention" }
+        var running: [String] = []
+        if syslog.isRunning { running.append("Syslog") }
+        if traps.isRunning { running.append("Traps") }
+        if capture.isRunning { running.append("Capture") }
+        return running.isEmpty ? "Everything is off" : running.joined(separator: " · ") + " running"
     }
 
-    /// A service's switch (`isOn` = running): green dot and `detail` while running, "off" or a
-    /// red "failed" when not.
-    private func service(_ name: String, failed: Bool, detail: String, isOn: Binding<Bool>) -> some View {
-        let look = Self.serviceLook(running: isOn.wrappedValue, failed: failed, detail: detail)
-        return SidebarServiceRow(name: name, detail: look.detail, dot: look.dot, isOn: isOn)
-    }
-
-    /// Green dot and what it is doing while running; "off", or a red "failed" when it could not
-    /// start.
+    /// The state of a sidebar service row (read by tests; the sidebar itself writes the state
+    /// as words in the header and on the Status page).
     static func serviceLook(running: Bool, failed: Bool, detail: String) -> (detail: String, dot: Color) {
         (running ? detail : (failed ? "failed" : "off"), running ? Theme.live : (failed ? Theme.err : Theme.faintText))
     }
 
-    /// The counts beside the panes' rows (the same numbers the panes lead with).
+    /// The counts the panes lead with (read by tests).
     static func counts(logs: LogStore, packets: PacketStore, mibs: MIBRegistry) -> [MainPane: Int] {
         [.log: logs.entries.count, .sources: logs.sources.count, .mibs: mibs.modules.count, .packets: packets.packets.count]
     }
-
-    private func group(@ViewBuilder _ content: () -> some View) -> some View {
-        VStack(alignment: .leading, spacing: 1) { content() }
-            .padding(.horizontal, 8)
-    }
-
-    private func row(_ pane: MainPane, _ title: String, count: Int? = nil) -> some View {
-        SidebarRow(title: title, isSelected: model.mainPane == pane, count: count) {
-            model.mainPane = pane
-        }
-    }
-
-    private func sectionHeader(_ name: String, top: CGFloat = 14) -> some View {
-        Text(name.uppercased())
-            .font(.system(size: 10.5, weight: .semibold))
-            .kerning(0.4)
-            .foregroundStyle(Theme.faintText)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 18)
-            .padding(.top, top)
-            .padding(.bottom, 4)
-    }
 }
 
-/// Name and switch on one line, what it is doing under it.
-struct SidebarServiceRow: View {
-    let name: String
-    let detail: String
-    let dot: Color
-    @Binding var isOn: Bool
+/// The app's name and one status line, at the top of the sidebar.
+struct SidebarHeader: View {
+    let failed: Bool
+    let status: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 1) {
-            HStack(spacing: 8) {
-                Circle().fill(dot).frame(width: 7, height: 7)
-                Text(name)
-                    .font(.system(size: 13, weight: isOn ? .medium : .regular))
-                    .foregroundStyle(Theme.text)
-                Spacer(minLength: 0)
-                Toggle(name, isOn: $isOn)
-                    .toggleStyle(.switch)
-                    .controlSize(.mini)
-                    .labelsHidden()
-                    .tint(Theme.accent)
-            }
-            Text(detail)
-                .font(.system(size: 10.5, design: .monospaced))
-                .foregroundStyle(isOn ? Theme.ok : Theme.faintText)
+        VStack(alignment: .leading, spacing: 4) {
+            Text("UncleSpy")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Theme.text)
+            Text(status)
+                .font(Theme.detail)
+                .foregroundStyle(failed ? Theme.err : Theme.text2)
                 .lineLimit(1)
-                .truncationMode(.middle)
-                .padding(.leading, 15)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 5)
+        .accessibilityElement(children: .combine)
     }
 }
 
-struct SidebarRow: View {
+/// One page in the sidebar: a word, ink and semibold when selected.
+struct SidebarLink: View {
     let title: String
-    var isSelected = false
-    var count: Int?
+    let selected: Bool
     let action: () -> Void
-    @State private var hovering = false
 
     var body: some View {
-        HStack(spacing: 9) {
+        Button(action: action) {
             Text(title)
-                .font(.system(size: 13, weight: isSelected ? .medium : .regular))
-                .foregroundStyle(isSelected ? Theme.text : Theme.text2)
-            Spacer(minLength: 0)
-            if let count {
-                Text(Format.count(count))
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(Theme.faintText)
-            }
+                .font(.system(size: 13, weight: selected ? .semibold : .regular))
+                .foregroundStyle(selected ? Theme.text : Theme.text2)
+                .padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .background(
-            RoundedRectangle(cornerRadius: 7)
-                .fill(isSelected ? Theme.selectedAccent : hovering ? Theme.hover : .clear)
-        )
-        .contentShape(Rectangle())
-        .onTapGesture(perform: action)
-        .onHover { hovering = $0 }
-        // VoiceOver: one button per pane ("Log, 498"), selected state included.
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
-        .accessibilityAction { action() }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityLabel(title)
     }
 }

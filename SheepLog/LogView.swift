@@ -22,16 +22,21 @@ struct LogView: View {
     var body: some View {
         let _ = PaneProbe.ran("body.log")
         VStack(spacing: 0) {
-            PaneHeader(eyebrow: "Syslog", heading: heading, subtitle: subtitle)
+            PaneHeader(pane: .log, status: heading, detail: subtitle, problem: syslog.lastError != nil) { headerActions }
                 .paneColumn()
                 .padding(.top, Metrics.headerTop)
-                .padding(.bottom, 12)
+                .padding(.bottom, 14)
 
             PaneStrip { strip }
                 .controlSize(.small)
 
-            tableAndDetail
-            footer
+            // The table, its footer and the inspector sit in the page column: the grid's left
+            // edge is the title's.
+            VStack(spacing: 0) {
+                tableAndDetail
+                footer
+            }
+            .paneColumn()
         }
         .paneKeyCommands(find: { filterFocused = true }, copy: copySelection)
         .onAppear {
@@ -107,10 +112,10 @@ struct LogView: View {
 
     private var heading: String {
         if store.paused {
-            return "Paused — \(Format.count(store.pausedCount)) \(store.pausedCount == 1 ? "line" : "lines") waiting."
+            return "Paused — \(Format.count(store.pausedCount)) \(store.pausedCount == 1 ? "line" : "lines") waiting"
         }
-        guard syslog.isRunning else { return "Not listening." }
-        return "Listening on \(syslog.portsText)."
+        guard syslog.isRunning else { return "Not listening" }
+        return "Listening on \(syslog.portsText)"
     }
 
     private var subtitle: String {
@@ -138,57 +143,60 @@ struct LogView: View {
                     onClear: { store.applyQueryText() })
             .frame(maxWidth: .infinity)
 
-        Toggle(isOn: $store.regexMode) {
-            Text(".*").font(.system(size: 12, weight: .semibold, design: .monospaced))
+        Button { store.regexMode.toggle() } label: {
+            Text(".*")
+                .font(.system(size: 12, weight: store.regexMode ? .semibold : .regular, design: .monospaced))
+                .foregroundStyle(store.regexMode ? Theme.text : Theme.text2)
+                .contentShape(Rectangle())
         }
-        .toggleStyle(.button)
+        .buttonStyle(.plain)
         .help("Treat every bare word as a regular expression")
         .accessibilityLabel("Regular expressions")
+        .accessibilityAddTraits(store.regexMode ? .isSelected : [])
 
         if let source = store.selectedSource {
-            HStack(spacing: 4) {
-                Text("Source: \(source)")
-                    .font(.system(size: 11.5, design: .monospaced))
-                    .foregroundStyle(Theme.accent)
-                Button {
-                    store.selectedSource = nil
-                } label: {
-                    Image(systemName: "xmark").font(.system(size: 9, weight: .bold))
+            // Words, not a chip: "Source 10.1.0.9  Show all".
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                HStack(alignment: .firstTextBaseline, spacing: 5) {
+                    Text("Source")
+                        .font(Theme.body)
+                        .foregroundStyle(Theme.text2)
+                    Text(source)
+                        .font(Theme.mono)
+                        .foregroundStyle(Theme.text)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(Theme.accent)
-                .help("Show every source")
-                .accessibilityLabel("Show every source")
+                Button("Show all") { store.selectedSource = nil }
+                    .buttonStyle(.quietLink)
+                    .help("Show every source")
+                    .accessibilityLabel("Show every source")
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
-            .background(Capsule().fill(Theme.selectedAccent))
             .fixedSize()
         }
 
-        // One width for both titles, so the controls to its right do not jump on Pause.
+        QuietToolToggle("Newest first", isOn: $model.settings.newestFirst)
+        QuietToolToggle("Detail", isOn: $detailPinned,
+                        help: detailPinned ? "Hide the detail panel when no line is selected"
+                                           : "Keep the detail panel open when no line is selected")
+            .accessibilityLabel("Keep detail panel open")
+    }
+
+    /// The page's actions, on the status line (the page has tabs, so they sit under them).
+    @ViewBuilder private var headerActions: some View {
+        // One width for both titles, so the links to its right do not jump on Pause.
         Button { store.paused.toggle() } label: {
-            Text(store.paused ? "Resume" : "Pause").frame(minWidth: 46)
+            Text(store.paused ? "Resume" : "Pause").frame(minWidth: 46, alignment: .trailing)
         }
-        .buttonStyle(.bordered)
-        Toggle("Newest first", isOn: $model.settings.newestFirst)
-            .toggleStyle(.checkbox)
-            .fixedSize()
+        .buttonStyle(.quietLink)
         Button("Clear") {
             store.clear()
             selectedID = nil
         }
-        .buttonStyle(.bordered)
+        .buttonStyle(.quietLink)
         Button(store.isExporting ? "Exporting…" : "Export…") { export() }
-            .buttonStyle(.bordered)
+            .buttonStyle(.quietLink)
             .disabled(store.isExporting)
-        Toggle(isOn: $detailPinned) {
-            Image(systemName: "sidebar.right")
-        }
-        .toggleStyle(.button)
-        .help(detailPinned ? "Hide the detail panel when no line is selected"
-                           : "Keep the detail panel open when no line is selected")
-        .accessibilityLabel("Keep detail panel open")
     }
 
     // MARK: Table
@@ -205,19 +213,16 @@ struct LogView: View {
             }
         }
         .overlay(alignment: .bottom) {
-            // The field's orange border alone does not say what is wrong, nor that the table
+            // The field's red underline alone does not say what is wrong, nor that the table
             // still shows the previous filter.
             if let error = store.queryError {
-                let tint = store.queryErrorIsNotice ? Theme.caution : Theme.err
+                let tint = store.queryErrorIsNotice ? Theme.text2 : Theme.err
                 Text(Self.filterBanner(error, isNotice: store.queryErrorIsNotice))
-                    .font(.system(size: 11.5, weight: .medium))
+                    .font(Theme.caption.weight(.medium))
                     .foregroundStyle(tint)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
-                    .background(Capsule().fill(Theme.panel))
-                    .overlay(Capsule().strokeBorder(tint.opacity(0.5), lineWidth: 0.5))
-                    .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
-                    .padding(.bottom, 12)
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 10)
+                    .frame(maxWidth: .infinity, alignment: .center)
                     .allowsHitTesting(false)
             }
         }
@@ -240,7 +245,7 @@ struct LogView: View {
         }
         if !syslog.isRunning {
             if let e = syslog.lastError { return "Syslog could not start: \(e)" }
-            return "Not listening. Turn Syslog on in the sidebar, then point your devices’ syslog at this Mac (\(thisMac), \(port))."
+            return "Not listening. Start Syslog on the Status page, then point your devices’ syslog at this Mac (\(thisMac), \(port))."
         }
         return "No lines yet. Point your devices’ syslog at this Mac (\(thisMac), \(port))."
     }
@@ -270,18 +275,17 @@ struct LogView: View {
 
     // MARK: Footer
 
+    /// One faint 11 pt line under the grid, on the column's left edge, no rule above it.
     private var footer: some View {
-        HStack(spacing: 0) {
-            Text(footerText)
-                .font(.system(size: 11.5))
-                .foregroundStyle(Theme.faintText)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 14)
-        .frame(height: 26)
-        .overlay(alignment: .top) { Rectangle().fill(Theme.hairline).frame(height: 0.5) }
+        Text(footerText)
+            .font(Theme.caption)
+            .foregroundStyle(Theme.faintText)
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 8)
+            .padding(.bottom, 12)
     }
 
     private var footerText: String { Self.footerText(store: store, diskLogging: model.settings.diskLogging) }
@@ -338,10 +342,10 @@ struct LogView: View {
         }
     }
 
-    /// `SheepLog-2026-09-23-101532.log`, with the source when one is selected — two exports in
+    /// `UncleSpy-2026-09-23-101532.log`, with the source when one is selected — two exports in
     /// a day do not propose the same name.
     static func exportName(source: String?, date: Date) -> String {
-        var name = "SheepLog-\(Format.day.string(from: date))-\(Format.hms.string(from: date))"
+        var name = "UncleSpy-\(Format.day.string(from: date))-\(Format.hms.string(from: date))"
         if let source {
             name += "-" + source.map { $0.isLetter || $0.isNumber || $0 == "." || $0 == "-" ? String($0) : "_" }.joined()
         }
@@ -355,7 +359,7 @@ struct LogView: View {
 /// `-demoLogSelect <text>` selects the newest line whose raw text contains `<text>` once it
 /// has arrived (send lines with Tests/replay.sh during `-demoShotDelay`), `-demoLogFile
 /// <path>` ingests every line of a file as if received (from `-demoLogSources N` addresses,
-/// 10.20.0.1…N, default 1).
+/// 10.20.0.1…N, default 1), `-demoLogSource <address>` shows one source.
 @MainActor
 enum LogDemo {
     private static var applied = false
@@ -378,6 +382,8 @@ enum LogDemo {
             }
             store.ingest(SyslogListener.parseBatch(raws, overrides: [:]))
         }
+        // `-demoLogSource <address>`: as Status / Sources "Show" does (the tool row's source words).
+        if let source = CommandLine.value(after: "-demoLogSource") { store.showSource(source) }
         guard let needle = CommandLine.value(after: "-demoLogSelect") else { return }
         Task { @MainActor in
             for _ in 0..<120 {
@@ -403,7 +409,7 @@ struct ColumnDivider: View {
     var body: some View {
         Rectangle()
             .fill(Theme.hairline)
-            .frame(width: 0.5)
+            .frame(width: 1)
             .frame(maxHeight: .infinity)
             .overlay {
                 Color.clear
@@ -451,83 +457,135 @@ struct StackedFactRow: View {
                 CopyButton(value: v, help: "Copy \(v)")
             }
         }
-        .padding(.horizontal, 14)
         .padding(.vertical, 7)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// LabDC's inspector row (UsersInspector's `InspectorRow`): the label above the value, a word
+/// link at the right, rows divided by hairlines (`GroupedList`).
+private struct InspectorFactRow: View {
+    let label: String
+    let value: String
+    var mono = true
+    var copyable = true
+    var copyValue: String?
+
+    var body: some View {
+        HStack(alignment: .lastTextBaseline, spacing: 16) {
+            QuietField(label) {
+                Text(value)
+                    .font(mono ? Theme.mono : Theme.body)
+                    .foregroundStyle(Theme.text)
+                    .textSelection(.enabled)
+                    .lineLimit(3)
+                    .truncationMode(.middle)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .help(value)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if copyable {
+                let v = copyValue ?? value
+                CopyButton(value: v, help: "Copy \(v)")
+            }
+        }
+        .padding(.vertical, 9)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
 struct LogDetailPanel: View {
     let entry: LogEntry?
-    /// Narrow panel: key over value.
+    /// Narrow panel: vendor fields key over value.
     var compact = false
-
-    @ViewBuilder
-    private func fact(_ key: String, _ value: String, copyable: Bool = true, copyValue: String? = nil) -> some View {
-        if compact {
-            StackedFactRow(key: key, value: value, copyable: copyable, copyValue: copyValue)
-        } else {
-            FactRow(key: key, value: value, copyable: copyable, keyWidth: 78, copyValue: copyValue)
-        }
-    }
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 28) {
                 if let e = entry {
                     content(e)
                 } else {
-                    Text("Select a line to see its header, the fields its vendor format carries, and the raw text.")
-                        .hint()
-                        .padding(.top, 6)
+                    Text("Select a line to see its header, its vendor fields and the raw text.")
+                        .font(Theme.body)
+                        .foregroundStyle(Theme.faintText)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 2)
                 }
             }
-            .padding(14)
+            // Room for the scroll bar on the right, so it never covers Copy.
+            .padding(.leading, 24)
+            .padding(.trailing, 10)
+            .padding(.top, 4)
+            .padding(.bottom, 24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Theme.content)
     }
 
-    @ViewBuilder private func content(_ e: LogEntry) -> some View {
-        HStack(spacing: 6) {
-            Text(e.vendor.label)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(Theme.vendorColor(e.vendor))
-                .padding(.horizontal, 7)
-                .padding(.vertical, 2)
-                .background(Capsule().fill(Theme.vendorColor(e.vendor).opacity(0.13)))
-                .fixedSize()
-            StatusPill(text: e.severity.label, kind: pillKind(e.severity))
-                .accessibilityLabel(e.severity.name)
-            Text(e.facility.name)
-                .font(.system(size: 11.5, design: .monospaced))
-                .foregroundStyle(Theme.faintText)
-            Spacer(minLength: 0)
-        }
+    /// The source as the inspector's name: the hostname the line carries, else the address.
+    private func title(_ e: LogEntry) -> String {
+        e.hostname.isEmpty ? e.sourceAddress : e.hostname
+    }
 
-        PaneGroup("Line") {
-            fact("Received", Format.stamp.string(from: e.received))
-            fact("Device time", e.deviceTime.map { Format.stamp.string(from: $0) } ?? "—", copyable: e.deviceTime != nil)
-            // The address alone is what gets pasted into a ping or an ACL; the port and
-            // transport stay in the row.
-            fact("From", "\(e.sourceAddress):\(e.sourcePort) (\(e.transport.rawValue))", copyValue: e.sourceAddress)
-            fact("Hostname", e.hostname.isEmpty ? "—" : e.hostname, copyable: !e.hostname.isEmpty)
-            fact("Program", e.program.isEmpty ? "—" : e.program, copyable: !e.program.isEmpty)
-            fact("PID", e.pid ?? "—", copyable: e.pid != nil)
-            fact("PRI", priText(e), copyable: false)
+    @ViewBuilder private func content(_ e: LogEntry) -> some View {
+        // LabDC's InspectorHeader: the name large and light, a muted line under it, then the
+        // label-above rows.
+        VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(title(e))
+                    .font(Theme.subtitle)
+                    .tracking(-0.4)
+                    .foregroundStyle(Theme.text)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .accessibilityAddTraits(.isHeader)
+                HStack(alignment: .firstTextBaseline, spacing: 0) {
+                    Text("\(e.vendor.label) · ")
+                        .foregroundStyle(Theme.text2)
+                    Text(e.severity.label)
+                        .foregroundStyle(pillKind(e.severity) == .bad ? Theme.err : Theme.text2)
+                        .accessibilityLabel(e.severity.name)
+                    Text(" · \(e.facility.name)")
+                        .foregroundStyle(Theme.text2)
+                }
+                .font(Theme.detail)
+                .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+    
+            GroupedList {
+                InspectorFactRow(label: "Received", value: Format.stamp.string(from: e.received))
+                InspectorFactRow(label: "Device time", value: e.deviceTime.map { Format.stamp.string(from: $0) } ?? "—",
+                                 copyable: e.deviceTime != nil)
+                // The address alone is what gets pasted into a ping or an ACL; the port and
+                // transport stay in the row.
+                InspectorFactRow(label: "From", value: "\(e.sourceAddress):\(e.sourcePort) (\(e.transport.rawValue))",
+                                 copyValue: e.sourceAddress)
+                InspectorFactRow(label: "Hostname", value: e.hostname.isEmpty ? "—" : e.hostname, copyable: !e.hostname.isEmpty)
+                InspectorFactRow(label: "Program", value: e.program.isEmpty ? "—" : e.program, copyable: !e.program.isEmpty)
+                InspectorFactRow(label: "PID", value: e.pid ?? "—", copyable: e.pid != nil)
+                InspectorFactRow(label: "PRI", value: priText(e), copyable: false)
+            }
         }
 
         if !e.fields.isEmpty {
+            // A compact key / value list: a FortiGate line carries 40 fields.
             PaneGroup("Vendor fields") {
                 ForEach(Array(e.fields.enumerated()), id: \.offset) { _, f in
-                    if compact { StackedFactRow(key: f.key, value: f.value) } else { FactRow(key: f.key, value: f.value) }
+                    if compact {
+                        StackedFactRow(key: f.key, value: f.value)
+                    } else {
+                        FactRow(key: f.key, value: f.value, keyWidth: 96, monoLines: 3)
+                    }
                 }
             }
         }
 
-        PaneGroup("Raw") {
+        PaneSection("Raw") {
             // A 64 KB datagram laid out in full is ~2,000 wrapped lines: the Copy / Filter
-            // buttons below it would be a long scroll away and every selection re-lays it out.
+            // links below it would be a long scroll away and every selection re-lays it out.
             Text(Self.rawPreview(e.raw))
                 .font(.system(size: 11.5, design: .monospaced))
                 .foregroundStyle(Theme.text)
@@ -536,24 +594,29 @@ struct LogDetailPanel: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(10)
                 .background(RoundedRectangle(cornerRadius: Metrics.field).fill(Theme.well))
-                .padding(8)
         }
 
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                CopyButton("Copy raw", value: e.raw, bordered: true)
-                Button("Filter this host") {
-                    AppModel.shared.logs.appendToQuery("host:\(e.sourceAddress)")
-                }
-                .buttonStyle(.bordered)
-            }
-            Button("Open in SNMP test") {
-                AppModel.shared.mainPane = .snmpTest
-                NotificationCenter.default.post(name: .sheepLogSNMPTarget, object: e.sourceAddress)
-            }
-            .buttonStyle(.bordered)
+        // Word links; they wrap onto two lines in a narrow panel.
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 20) { actions(e) }
+            VStack(alignment: .leading, spacing: 10) { actions(e) }
         }
-        .controlSize(.small)
+    }
+
+    @ViewBuilder private func actions(_ e: LogEntry) -> some View {
+        CopyButton("Copy raw", value: e.raw, bordered: true)
+            .fixedSize()
+        Button("Filter this host") {
+            AppModel.shared.logs.appendToQuery("host:\(e.sourceAddress)")
+        }
+        .buttonStyle(.quietLink)
+        .fixedSize()
+        Button("Open in SNMP test") {
+            AppModel.shared.mainPane = .snmpTest
+            NotificationCenter.default.post(name: .sheepLogSNMPTarget, object: e.sourceAddress)
+        }
+        .buttonStyle(.quietLink)
+        .fixedSize()
     }
 
     /// The first 8 KB of the raw line, then how much is left ("Copy raw" copies all of it).

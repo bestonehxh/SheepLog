@@ -1,8 +1,10 @@
 import Combine
 import SwiftUI
 
-/// Overview (SheepRadius Status shape): the state sentence, one strip of the three services and
-/// this Mac, what to type into devices, the traffic counters, and the busiest sources.
+/// The Status page in the Quiet look, structured like the LabDC app's Services page: the page
+/// header's status line is the state sentence, then one row per service (the name, the state as
+/// words, a Start / Stop link), the traffic numbers, the point-devices rows and the busiest
+/// sources. No switches, no icons.
 struct StatusView: View {
     @ObservedObject private var model = AppModel.shared
     @ObservedObject private var logs = AppModel.shared.logs
@@ -25,25 +27,24 @@ struct StatusView: View {
     var body: some View {
         let _ = PaneProbe.ran("body.status")
         VStack(spacing: 0) {
-            PaneHeader(eyebrow: "Overview", heading: heading, subtitle: subtitle) {
+            PaneHeader(pane: .status, status: Self.sentence(heading), detail: subtitle, problem: failed) {
                 Button("Stop all") { model.stopAll() }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.quietLink)
                     .disabled(!model.anyRunning)
                     .help("Stops the syslog listener, the trap receiver and a running capture.")
                 Button("Start all") { model.startAll() }
-                    .buttonStyle(.borderedProminent)
-                    .tint(Theme.accent)
+                    .buttonStyle(.quietPrimary)
                     .disabled(syslog.isRunning && traps.isRunning)
-                    .help("Starts the syslog listener and the trap receiver. Capture is not started here — use its switch in the sidebar or the Packets pane.")
+                    .help("Starts the syslog listener and the trap receiver. Capture is started with Start on its row or in the Packets pane.")
             }
             .paneColumn()
             .padding(.top, Metrics.headerTop)
-            .padding(.bottom, 12)
+            .padding(.bottom, 14)
 
-            PaneBody {
-                servicesStrip
-                pointDevicesSection
+            PaneBody(spacing: 28) {
+                servicesSection
                 trafficSection
+                pointDevicesSection
                 topTalkersSection
             }
         }
@@ -61,34 +62,59 @@ struct StatusView: View {
         }
     }
 
-    private var servicesStrip: some View {
-        StatStrip(cells: [
-            Self.serviceCell("Syslog", running: syslog.isRunning, error: syslog.lastError, detail: Self.syslogPorts(syslog)),
-            Self.serviceCell("SNMP traps", running: traps.isRunning, error: traps.lastError,
-                             detail: "udp \(traps.port) · \(Format.count(traps.trapCount)) received"),
-            Self.serviceCell("Capture", running: capture.isRunning, error: capture.lastError, runningWord: "Capturing",
-                             detail: "\(capture.interfaceName) · \(Format.count(packets.packets.count)) packets"),
-            StatCell(caption: "This Mac", value: primary, mono: true,
-                     detail: addresses.first.map { $0.address.contains(":") ? "\($0.interface) · IPv6 only" : $0.interface } ?? "no IPv4 address"),
-        ])
+    private var failed: Bool { syslog.isRunning == false && syslog.lastError != nil
+        || traps.isRunning == false && traps.lastError != nil }
+
+    /// The header's status line has no trailing period (round 22); `heading` keeps its sentence
+    /// for the tests.
+    static func sentence(_ s: String) -> String {
+        s.hasSuffix(".") ? String(s.dropLast()) : s
     }
 
-    private var pointDevicesSection: some View {
-        PaneSection("Point devices here", note: "what to type into each device’s syslog and SNMP pages") {
-            GroupedList {
-                // Copy gives the address alone — what a device's syslog-server field takes.
-                ForEach(Self.pointRows(address: addresses.first?.address, udp: syslogUDP, tcp: syslogTCP, trapPort: trapPort,
-                                       mirror: mirrorText), id: \.key) { r in
-                    FactRow(key: r.key, value: r.value, copyable: r.copy != nil, keyWidth: 190, copyValue: r.copy)
-                }
-                let v6Primary = addresses.first?.address.contains(":") ?? false
-                let others = addresses.dropFirst().map { "\($0.address) (\($0.interface))" }
-                    + (v6Primary ? [] : HostAddresses.ipv6Global().map { "\($0.address) (\($0.interface))" })
-                if !others.isEmpty {
-                    NoteRow(text: "Other addresses: " + others.joined(separator: " · "))
-                }
-            }
+    // MARK: Services (one row per service: name · state as words · Start / Stop)
+
+    private var servicesSection: some View {
+        PaneGroup("Services") {
+            serviceRow("Syslog",
+                       running: syslog.isRunning, error: syslog.lastError,
+                       runningState: Self.syslogPorts(syslog),
+                       start: { model.startSyslogIfStopped() }, stop: { model.stopSyslog() },
+                       startHelp: "Starts the syslog listener (⌘⇧L does this from anywhere)")
+            serviceRow("SNMP traps",
+                       running: traps.isRunning, error: traps.lastError,
+                       runningState: "udp \(traps.port) · \(Format.count(traps.trapCount)) received",
+                       start: { model.startTraps() }, stop: { model.stopTraps() },
+                       startHelp: "Starts the trap receiver")
+            serviceRow("Capture",
+                       running: capture.isRunning, error: capture.lastError,
+                       runningState: "\(capture.interfaceName) · \(Format.count(packets.packets.count)) packets",
+                       start: { model.startCapture() }, stop: { model.stopCapture() },
+                       startHelp: "Starts a live capture on the interface chosen in Settings")
         }
+    }
+
+    /// The LabDC ServiceRow shape: the name left, the state as words right, one word link.
+    private func serviceRow(_ name: String, running: Bool, error: String?, runningState: String,
+                            start: @escaping () -> Void, stop: @escaping () -> Void, startHelp: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 24) {
+            Text(name)
+                .font(Theme.body)
+                .foregroundStyle(Theme.text)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text(running ? runningState : (error ?? "Stopped"))
+                .font(Theme.detail)
+                .foregroundStyle(!running && error != nil ? Theme.err : Theme.text2)
+                .lineLimit(2)
+                .multilineTextAlignment(.trailing)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: 380, alignment: .trailing)
+            Button(running ? "Stop" : "Start") { running ? stop() : start() }
+                .buttonStyle(.quietLink)
+                .help(running ? "Stops \(name)" : startHelp)
+                .accessibilityLabel("\(running ? "Stop" : "Start") \(name)")
+        }
+        .padding(.vertical, 10)
     }
 
     private var trafficSection: some View {
@@ -112,6 +138,24 @@ struct StatusView: View {
         }
     }
 
+    private var pointDevicesSection: some View {
+        PaneSection("Point devices here", note: "what to type into each device’s syslog and SNMP pages") {
+            GroupedList {
+                // Copy gives the address alone — what a device's syslog-server field takes.
+                ForEach(Self.pointRows(address: addresses.first?.address, udp: syslogUDP, tcp: syslogTCP, trapPort: trapPort,
+                                       mirror: mirrorText), id: \.key) { r in
+                    PointDeviceRow(row: r)
+                }
+                let v6Primary = addresses.first?.address.contains(":") ?? false
+                let others = addresses.dropFirst().map { "\($0.address) (\($0.interface))" }
+                    + (v6Primary ? [] : HostAddresses.ipv6Global().map { "\($0.address) (\($0.interface))" })
+                if !others.isEmpty {
+                    NoteRow(text: "Other addresses: " + others.joined(separator: " · "))
+                }
+            }
+        }
+    }
+
     private var topTalkersSection: some View {
         PaneSection("Top talkers", note: topNote) {
             GroupedList {
@@ -125,27 +169,25 @@ struct StatusView: View {
         }
     }
 
+    /// LabDC's Leases row: the name, the address and vendor under it; the counts and a Show
+    /// link at the right.
     private func talkerRow(_ s: SourceStats) -> some View {
-        HStack(spacing: 10) {
-            Circle().fill(Theme.vendorColor(s.vendor)).frame(width: 7, height: 7)
-            Text(s.displayName).font(.system(size: 12)).foregroundStyle(Theme.text)
-            Text(s.address).font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.faintText)
-            Spacer(minLength: 8)
-            if s.errorCount > 0 {
-                StatusPill(text: "\(Format.count(s.errorCount)) err", kind: .bad)
+        QuietListRow(title: s.displayName, detail: "\(s.address) · \(s.vendorLabel)") {
+            HStack(alignment: .firstTextBaseline, spacing: 18) {
+                if s.errorCount > 0 {
+                    StatusPill(text: "\(Format.count(s.errorCount)) err", kind: .bad)
+                }
+                Text("\(Format.count(s.count)) \(s.count == 1 ? "line" : "lines")")
+                    .font(Theme.detail.monospacedDigit())
+                    .foregroundStyle(Theme.text2)
+                Button("Show") {
+                    logs.showSource(s.address)
+                    model.mainPane = .log
+                }
+                .buttonStyle(.quietLink)
+                .help("Show this source’s lines")
             }
-            Text(Format.count(s.count))
-                .font(.system(size: 12, design: .monospaced))
-                .foregroundStyle(Theme.text2)
-            Button("Show") {
-                logs.showSource(s.address)
-                model.mainPane = .log
-            }
-            .buttonStyle(.bordered).controlSize(.small)
-            .help("Show this source’s lines")
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 7)
     }
 
     private var heading: String {
@@ -217,10 +259,9 @@ struct StatusView: View {
         return "Syslog and traps on \(primary) · \(lines)"
     }
 
-    /// Listening (green) with `detail`, Stopped, or Failed (red) with the error. Running with
-    /// an error (syslog's TCP port taken while UDP opened, the TCP client limit) is amber with
-    /// the error after the detail — it was a plain green "Listening" and the failure was only
-    /// in a sheet that had been dismissed.
+    /// Listening with `detail`, Stopped, or Failed (red) with the error. Running with an error
+    /// (syslog's TCP port taken while UDP opened, the TCP client limit) carries the error after
+    /// the detail. (Read by tests; the row writes its state as words.)
     static func serviceCell(_ caption: String, running: Bool, error: String?, runningWord: String = "Listening",
                             detail: String) -> StatCell {
         let partly = running && error != nil
@@ -264,5 +305,34 @@ struct StatusView: View {
 
     private var topNote: String {
         logs.sources.isEmpty ? "" : "\(Format.count(logs.sources.count)) source\(logs.sources.count == 1 ? "" : "s") · Sources has them all"
+    }
+}
+
+/// A "Point devices here" row: the key in a muted column, the value monospaced after it, Copy
+/// at the row's right edge.
+private struct PointDeviceRow: View {
+    let row: StatusView.PointRow
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 16) {
+            Text(row.key)
+                .font(Theme.body)
+                .foregroundStyle(Theme.text2)
+                .frame(width: 170, alignment: .leading)
+            Text(row.value)
+                .font(Theme.mono)
+                .foregroundStyle(Theme.text)
+                .textSelection(.enabled)
+                .lineLimit(2)
+                .truncationMode(.middle)
+                .fixedSize(horizontal: false, vertical: true)
+                .help(row.value)
+            Spacer(minLength: 12)
+            if let copy = row.copy {
+                CopyButton(value: copy, help: "Copy \(copy)")
+            }
+        }
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

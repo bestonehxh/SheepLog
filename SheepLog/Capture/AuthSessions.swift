@@ -227,16 +227,33 @@ nonisolated enum AuthSessions {
     static func build(_ packets: [Packet]) -> [AuthSession] { build(packets) { false } }
 
     static func build(_ packets: [Packet], isCancelled: () -> Bool) -> [AuthSession] {
+        build(packets, isCancelled: isCancelled, checking: false).sessions
+    }
+
+    #if DEBUG
+    /// Tests: the sessions, and how many group-addressed frames the talker and bound-client
+    /// indexes (`GroupTalkers`, `BoundClients`) sent elsewhere than the scan they replaced
+    /// (`groupTargetByScan`, over the bound lists kept the old way) would have — plus every
+    /// bind and port attempt where `BoundClients` and those lists disagree.
+    static func buildCheckingGroupTargets(_ packets: [Packet]) -> (sessions: [AuthSession], mismatches: Int) {
+        build(packets, isCancelled: { false }, checking: true)
+    }
+    #endif
+
+    private static func build(_ packets: [Packet], isCancelled: () -> Bool, checking: Bool) -> (sessions: [AuthSession], mismatches: Int) {
         var run = Run()
+        #if DEBUG
+        if checking { run.scanTalkers = [:]; run.scanBound = [:] }
+        #endif
         var obs: [Obs] = []
         for (i, p) in packets.enumerated() {
-            if i & 0x3FFF == 0, isCancelled() { return [] }
+            if i & 0x3FFF == 0, isCancelled() { return ([], 0) }
             guard let f = AuthDecoder.classify(p) else { continue }
             obs.append(Obs(index: i, time: p.timestamp.timeIntervalSince1970, frame: f))
             if case .dhcp(let type, let mac, let yi) = f, type == "ACK", let mac, let yi { run.ipToMAC[yi] = mac }
             if case .dhcp = f { run.sawDHCP = true }
         }
-        guard !obs.isEmpty else { return [] }
+        guard !obs.isEmpty else { return ([], 0) }
         // Capture order is almost always time order; a merged capture is not.
         var sorted = true
         for k in 1..<obs.count where obs[k].time < obs[k - 1].time { sorted = false; break }
@@ -250,7 +267,7 @@ nonisolated enum AuthSessions {
             }
         }
         for (n, o) in obs.enumerated() {
-            if n & 0x3FFF == 0, isCancelled() { return [] }
+            if n & 0x3FFF == 0, isCancelled() { return ([], 0) }
             run.handle(o, packets[o.index])
         }
         run.finishPorts()
@@ -258,7 +275,7 @@ nonisolated enum AuthSessions {
         for b in run.builders where b.hasAuthContent {
             sessions.append(b.finish(id: sessions.count + 1, run: run))
         }
-        return sessions
+        return (sessions, run.groupTargetMismatches)
     }
 
     struct Obs {
@@ -296,9 +313,357 @@ nonisolated enum AuthSessions {
         let isProbe: Bool
     }
 
+    /// Keys in the order they were appended (appending one already there moves it to the
+    /// end), with the first, the next and a removal in O(1): a linked list through a dictionary.
+    struct LinkedKeys<Key: Hashable> {
+        private var links: [Key: (prev: Key?, next: Key?)] = [:]
+        private(set) var first: Key?
+        private var last: Key?
+
+        var count: Int { links.count }
+        func contains(_ k: Key) -> Bool { links[k] != nil }
+        func next(after k: Key) -> Key? { links[k]?.next }
+        /// All of them, from the first.
+        var all: [Key] { prefix(links.count) }
+
+        /// Up to `n` of them from the first.
+        func prefix(_ n: Int) -> [Key] {
+            var out: [Key] = []
+            var k = first
+            while let c = k, out.count < n { out.append(c); k = links[c]?.next }
+            return out
+        }
+
+        mutating func append(_ k: Key) {
+            remove(k)
+            links[k] = (last, nil)
+            if let l = last { links[l]?.next = k } else { first = k }
+            last = k
+        }
+
+        mutating func remove(_ k: Key) {
+            guard let n = links.removeValue(forKey: k) else { return }
+            if let p = n.prev { links[p]?.next = n.next } else { first = n.next }
+            if let x = n.next { links[x]?.prev = n.prev } else { last = n.prev }
+        }
+    }
+
+    /// What `groupTarget` asks of an attempt (`AttemptIndex` files it under these).
+    struct AttemptKeys: Equatable {
+        /// Its last EAP-Response's id (Success / Failure "exact").
+        var response: UInt8?
+        /// That id + 1 (the request that would follow it: "next").
+        var next: UInt8?
+        /// That id + 1 while the exchange waits for the request (`awaits`, first half).
+        var awaiting: UInt8?
+        /// The id of the request it has not answered (`awaits`, second half: a
+        /// retransmission ≥ 1 s after it), and when it came.
+        var request: UInt8?
+        var requestAt: Double = 0
+        /// An EAPOL-Start no request answered yet.
+        var start = false
+
+        init() {}
+
+        init(_ b: Builder) {
+            response = b.lastEAPResponseID.map { UInt8(truncatingIfNeeded: $0) }
+            next = b.lastEAPResponseID.map { UInt8(truncatingIfNeeded: $0 &+ 1) }
+            awaiting = b.awaitingRequest ? next : nil
+            if b.eapRequestsUnanswered > 0, let r = b.lastEAPRequestID {
+                request = UInt8(truncatingIfNeeded: r)
+                requestAt = b.lastEAPRequestAt
+            }
+            start = b.startPending
+        }
+    }
+
+    /// Attempts filed by what `groupTarget` asks of them (`AttemptKeys`), so that a question
+    /// costs O(log n) whatever the number of attempts: each needs at most two names (none, one
+    /// or more than one). The talkers' index is by client (`GroupTalkers`), each
+    /// authenticator's bound clients' by attempt (`BoundClients`).
+    struct AttemptIndex<Key: Hashable> {
+        private var keys: [Key: AttemptKeys] = [:]
+        private var byResponse: [UInt8: LinkedKeys<Key>] = [:]
+        private var byNext: [UInt8: LinkedKeys<Key>] = [:]
+        private var byAwaiting: [UInt8: LinkedKeys<Key>] = [:]
+        private var starts = LinkedKeys<Key>()
+        /// Unanswered requests ≥ 1 s old (a retransmission of them would be theirs), by id; the
+        /// younger ones wait in `young` (by time) until they are.
+        private var byRequest: [UInt8: LinkedKeys<Key>] = [:]
+        private var young = TimeHeap<Key>()
+
+        /// Files `c` under `new` at `t`.
+        mutating func set(_ c: Key, _ new: AttemptKeys, at t: Double) {
+            let old = keys[c] ?? AttemptKeys()
+            guard new != old else { return }
+            unindex(c, old)
+            keys[c] = new
+            if let v = new.response { byResponse[v, default: LinkedKeys()].append(c) }
+            if let v = new.next { byNext[v, default: LinkedKeys()].append(c) }
+            if let v = new.awaiting { byAwaiting[v, default: LinkedKeys()].append(c) }
+            if new.start { starts.append(c) }
+            if let v = new.request {
+                if t - new.requestAt >= 1 { byRequest[v, default: LinkedKeys()].append(c) }
+                else { young.push(new.requestAt, c) }
+            }
+        }
+
+        mutating func remove(_ c: Key) {
+            if let k = keys.removeValue(forKey: c) { unindex(c, k) }
+        }
+
+        private mutating func unindex(_ c: Key, _ k: AttemptKeys) {
+            if let v = k.response { Self.drop(c, v, &byResponse) }
+            if let v = k.next { Self.drop(c, v, &byNext) }
+            if let v = k.awaiting { Self.drop(c, v, &byAwaiting) }
+            if k.start { starts.remove(c) }
+            // A young entry is left in `young`: `ripen` drops it when its keys have moved on.
+            if let v = k.request { Self.drop(c, v, &byRequest) }
+        }
+
+        private static func drop(_ c: Key, _ v: UInt8, _ index: inout [UInt8: LinkedKeys<Key>]) {
+            index[v]?.remove(c)
+            if index[v]?.count == 0 { index[v] = nil }
+        }
+
+        /// Moves the requests that are ≥ 1 s old at `t` from `young` to `byRequest` (before
+        /// `awaiting` is asked at `t`).
+        mutating func ripen(at t: Double) {
+            while let (at, c) = young.peek, t - at >= 1 {
+                young.pop()
+                if let k = keys[c], let v = k.request, k.requestAt == at { byRequest[v, default: LinkedKeys()].append(c) }
+            }
+        }
+
+        /// Up to two attempts whose exchange a request of `id` continues (`Builder.awaits`), once
+        /// `ripen(at:)` has run for the request's time.
+        func awaiting(_ id: UInt8) -> [Key] {
+            var out = byAwaiting[id]?.prefix(2) ?? []
+            if out.count < 2, let more = byRequest[id]?.prefix(3) {
+                for c in more where out.count < 2 && !out.contains(c) { out.append(c) }
+            }
+            return out
+        }
+
+        /// Up to two attempts with an EAPOL-Start pending.
+        func starting() -> [Key] { starts.prefix(2) }
+        /// Up to two attempts whose last response had `id`.
+        func answered(_ id: UInt8) -> [Key] { byResponse[id]?.prefix(2) ?? [] }
+        /// Up to two attempts whose last response had the id before `id`.
+        func answeredBefore(_ id: UInt8) -> [Key] { byNext[id]?.prefix(2) ?? [] }
+    }
+
+    /// The clients talking to the PAE group with no authenticator known yet (`Run.groupTalkers`),
+    /// indexed by what `groupTarget` asks of their attempts (`AttemptIndex`), so that a
+    /// group-addressed request costs O(log n) whatever the number of talkers. The index follows
+    /// the attempt's state, which changes only in `Builder.eapol` — `update` is called after
+    /// every one of those on a talker, and when a talker gets a new attempt.
+    struct GroupTalkers {
+        /// Talkers by when they last talked, oldest first (times only grow in a pass).
+        private var bySeen = LinkedKeys<String>()
+        private var seen: [String: Double] = [:]
+        private var index = AttemptIndex<String>()
+
+        var count: Int { seen.count }
+        func contains(_ c: String) -> Bool { seen[c] != nil }
+        func first(_ n: Int) -> [String] { bySeen.prefix(n) }
+
+        mutating func note(_ c: String, at t: Double) {
+            prune(at: t)
+            seen[c] = t
+            bySeen.append(c)
+        }
+
+        /// Talkers silent for longer than `idleSplit` are no talkers any more.
+        mutating func prune(at t: Double) {
+            while let c = bySeen.first, let at = seen[c], t - at > AuthSessions.idleSplit { remove(c) }
+        }
+
+        mutating func remove(_ c: String) {
+            guard seen.removeValue(forKey: c) != nil else { return }
+            bySeen.remove(c)
+            index.remove(c)
+        }
+
+        mutating func update(_ c: String, _ b: Builder, at t: Double) {
+            guard seen[c] != nil else { return }
+            index.set(c, AttemptKeys(b), at: t)
+        }
+
+        mutating func ripen(at t: Double) { index.ripen(at: t) }
+        /// Up to two talkers whose exchange a request of `id` continues, once `ripen(at:)` ran.
+        func awaiting(_ id: UInt8) -> [String] { index.awaiting(id) }
+        /// Up to two talkers with an EAPOL-Start pending.
+        func starting() -> [String] { index.starting() }
+        /// Up to two talkers whose last response had `id`.
+        func answered(_ id: UInt8) -> [String] { index.answered(id) }
+        /// Up to two talkers whose last response had the id before `id`.
+        func answeredBefore(_ id: UInt8) -> [String] { index.answeredBefore(id) }
+    }
+
+    /// The attempts bound to one authenticator (`Run.bound`): the bound list in the order bound
+    /// (what `finishPorts` reads and a bind prunes), and of it the pool a group-addressed
+    /// request at the time could continue (last packet within `idleSplit`), indexed like the
+    /// talkers. A busy wired closet captured for long, or spoofed MACs sending unicast EAPOL to
+    /// the switch, bind thousands of clients to one authenticator: filtering them all per
+    /// group-addressed request, and per bind past 16 for idle ones, was clients × requests.
+    ///
+    /// An attempt's EAP state and last packet change in many places: `BuilderList` notes the
+    /// bound attempts that changed and `Run.refreshBound` hands them here before a request is
+    /// asked about. `last` only grows, which the two heaps rely on: an entry's time is never
+    /// later than its attempt's `last` (an entry whose attempt moved on is filed again).
+    struct BoundClients {
+        /// The bound list, oldest bound first.
+        private(set) var members = LinkedKeys<Int>()
+        /// Every member by its `last` when filed, for the prune at a bind.
+        private var byLast = TimeHeap<Int>()
+        private var filedLast: [Int: Double] = [:]
+        /// The pool, by `last` when filed (`prepare` takes the idle ones out).
+        private var pool = LinkedKeys<Int>()
+        private var byPoolLast = TimeHeap<Int>()
+        private var poolLast: [Int: Double] = [:]
+        private var index = AttemptIndex<Int>()
+
+        var count: Int { members.count }
+        var poolCount: Int { pool.count }
+
+        /// Binds attempt `i` — once the list holds 16, it is first pruned of the attempts idle
+        /// at `t`, as before. It joins the pool at its next `refresh`.
+        mutating func bind(_ i: Int, at t: Double, _ builders: [Builder]) {
+            guard !members.contains(i) else { return }
+            if members.count >= 16 {
+                while let (at, j) = byLast.peek, t - at > AuthSessions.idleSplit {
+                    byLast.pop()
+                    guard filedLast[j] == at else { continue }
+                    let last = builders[j].last
+                    if last > at { filedLast[j] = last; byLast.push(last, j) } else { remove(j) }
+                }
+            }
+            members.append(i)
+            filedLast[i] = builders[i].last
+            byLast.push(builders[i].last, i)
+        }
+
+        private mutating func remove(_ j: Int) {
+            members.remove(j)
+            filedLast[j] = nil
+            leavePool(j)
+        }
+
+        private mutating func leavePool(_ j: Int) {
+            guard poolLast.removeValue(forKey: j) != nil else { return }
+            pool.remove(j)
+            index.remove(j)
+        }
+
+        /// Member `i` changed (or was just bound): its keys at `t`, and back in the pool if
+        /// idleness had taken it out (`prepare` takes it out again when it is still idle).
+        mutating func refresh(_ i: Int, _ keys: AttemptKeys, last: Double, at t: Double) {
+            guard members.contains(i) else { return }
+            if poolLast[i] == nil {
+                poolLast[i] = last
+                byPoolLast.push(last, i)
+                pool.append(i)
+            }
+            index.set(i, keys, at: t)
+        }
+
+        /// Before a request at `t` is asked about (their times only grow in a pass): the members
+        /// whose last packet is more than `idleSplit` before it leave the pool, and requests
+        /// ≥ 1 s old ripen. A member that later moves on comes back through `refresh`.
+        mutating func prepare(at t: Double, _ builders: [Builder]) {
+            while let (at, j) = byPoolLast.peek, t - at > AuthSessions.idleSplit {
+                byPoolLast.pop()
+                guard poolLast[j] == at else { continue }
+                let last = builders[j].last
+                if last > at { poolLast[j] = last; byPoolLast.push(last, j) } else { leavePool(j) }
+            }
+            index.ripen(at: t)
+        }
+
+        /// Up to `n` attempts of the pool.
+        func inPool(_ n: Int) -> [Int] { pool.prefix(n) }
+        /// Up to two attempts of the pool whose exchange a request of `id` continues.
+        func awaiting(_ id: UInt8) -> [Int] { index.awaiting(id) }
+        /// Up to two attempts of the pool with an EAPOL-Start pending.
+        func starting() -> [Int] { index.starting() }
+        /// Up to two attempts of the pool whose last response had `id`.
+        func answered(_ id: UInt8) -> [Int] { index.answered(id) }
+        /// Up to two attempts of the pool whose last response had the id before `id`.
+        func answeredBefore(_ id: UInt8) -> [Int] { index.answeredBefore(id) }
+    }
+
+    /// The attempts of a pass. A change to one bound to an authenticator — its EAP state or its
+    /// last packet, from any of the places that change attempts — is noted (`takeChanged`), so
+    /// that its authenticator's `BoundClients` follows it (`Run.refreshBound`).
+    struct BuilderList: Sequence {
+        private(set) var items: [Builder] = []
+        private var noted: [Bool] = []
+        private var changed: [Int] = []
+
+        var count: Int { items.count }
+
+        subscript(i: Int) -> Builder {
+            _read { yield items[i] }
+            _modify {
+                yield &items[i]
+                if !noted[i], items[i].nasMAC != nil { noted[i] = true; changed.append(i) }
+            }
+        }
+
+        mutating func append(_ b: Builder) {
+            items.append(b)
+            noted.append(false)
+        }
+
+        /// The bound attempts changed since the last call, each once.
+        mutating func takeChanged() -> [Int] {
+            var out: [Int] = []
+            swap(&out, &changed)
+            for i in out { noted[i] = false }
+            return out
+        }
+
+        func makeIterator() -> IndexingIterator<[Builder]> { items.makeIterator() }
+    }
+
+    /// A binary min-heap of (time, item).
+    struct TimeHeap<Item> {
+        private var items: [(Double, Item)] = []
+
+        var peek: (Double, Item)? { items.first }
+
+        mutating func push(_ t: Double, _ c: Item) {
+            items.append((t, c))
+            var i = items.count - 1
+            while i > 0 {
+                let p = (i - 1) / 2
+                guard items[i].0 < items[p].0 else { break }
+                items.swapAt(i, p)
+                i = p
+            }
+        }
+
+        mutating func pop() {
+            guard !items.isEmpty else { return }
+            items.swapAt(0, items.count - 1)
+            items.removeLast()
+            var i = 0
+            while true {
+                let l = 2 * i + 1, r = l + 1
+                var m = i
+                if l < items.count, items[l].0 < items[m].0 { m = l }
+                if r < items.count, items[r].0 < items[m].0 { m = r }
+                if m == i { break }
+                items.swapAt(i, m)
+                i = m
+            }
+        }
+    }
+
     /// Everything one pass carries between packets.
     struct Run {
-        var builders: [Builder] = []
+        var builders = BuilderList()
         var current: [String: Int] = [:]
         var ipToMAC: [String: String] = [:]
         var sawDHCP = false
@@ -312,16 +677,38 @@ nonisolated enum AuthSessions {
         /// its group-addressed request), newest last — a dictionary: a backwards scan of every
         /// builder per frame was quadratic (10,000 attempts took 7 s). A group-addressed EAP frame
         /// from the authenticator goes to the one of them whose exchange it continues (EAP ids).
-        var bound: [String: [Int]] = [:]
+        /// Indexed by what `groupTarget` asks of them (`BoundClients`): filtering the whole list
+        /// per group-addressed request was clients × requests once thousands were bound to one.
+        var bound: [String: BoundClients] = [:]
         /// Clients that sent EAPOL to the PAE group address with no authenticator known yet, and
         /// when. On a wired port both sides may address every EAPOL frame to the group: the
-        /// switch's frames then belong to the one client that is talking.
-        var groupTalkers: [String: Double] = [:]
+        /// switch's frames then belong to the one client that is talking. Indexed by what
+        /// `groupTarget` asks of them (a scan of every talker per group-addressed request was
+        /// clients × requests: thousands of spoofed sources on the PAE group).
+        var groupTalkers = GroupTalkers()
+        /// Group-addressed frames the indexes sent elsewhere than `groupTargetByScan`, binds that
+        /// left the bound list otherwise than the list did, and port attempts that named another
+        /// last client than the list's would have (tests).
+        var groupTargetMismatches = 0
+        #if DEBUG
+        /// The talkers and the bound lists as the scan kept them (`buildCheckingGroupTargets` only).
+        var scanTalkers: [String: Double]?
+        var scanBound: [String: [Int]]?
+        #endif
         /// Group-addressed EAP-Requests no client could be named for yet, per authenticator (a
         /// switch asking a port whose device has not said anything). The client whose
         /// EAP-Response carries the request's id takes it; what nobody answers is, at the end, an
         /// attempt of the port itself: "no supplicant answered".
-        var portFrames: [String: [PortFrame]] = [:]
+        /// By authenticator and EAP id, each list in time order: requests nobody answers pile up
+        /// (a switch asking a silent port every 30 s, a flood), and every EAP-Response filtered
+        /// the whole pile — of every authenticator for an unbound client: 200,000 frames ≈ 10^10
+        /// steps. A reply now looks at its own id's requests only.
+        var portFrames: [String: [UInt8: [PortFrame]]] = [:]
+        /// Requests older than `idleSplit` when their id was next looked at: no reply can take
+        /// them any more (`portCandidates`), so they wait here for `finishPorts`.
+        var portSettled: [String: [PortFrame]] = [:]
+        /// The authenticators holding requests of each EAP id (where an unbound client's reply looks).
+        var portHolders: [UInt8: Set<String>] = [:]
         /// Clients' EAP-Responses by EAP id, in time order (filled before the pass).
         var responses: [UInt8: [(time: Double, client: String)]] = [:]
 
@@ -397,6 +784,8 @@ nonisolated enum AuthSessions {
             }
             builders.append(Builder(client: client, first: t))
             current[client] = builders.count - 1
+            // A talker's new attempt starts with nothing pending (radius / DHCP start them too).
+            if groupTalkers.contains(client) { groupTalkers.update(client, builders[builders.count - 1], at: t) }
             return builders.count - 1
         }
 
@@ -456,11 +845,18 @@ nonisolated enum AuthSessions {
             // own attempt ("no supplicant answered on port …").
             if Self.isGroup(client) {
                 guard fromAuthenticator, !authenticator.isEmpty, !Self.isGroup(authenticator) else { return }
-                switch groupTarget(f, from: authenticator, at: o.time) {
+                let target = groupTarget(f, from: authenticator, at: o.time)
+                #if DEBUG
+                if let scan = scanTalkers, groupTargetByScan(f, from: authenticator, at: o.time, talkers: scan) != target {
+                    groupTargetMismatches += 1
+                }
+                #endif
+                switch target {
                 case .client(let c): client = c
                 case .port(let id, let identity):
-                    portFrames[authenticator, default: []].append(
+                    portFrames[authenticator, default: [:]][id, default: []].append(
                         PortFrame(frame: f, time: o.time, packet: p.id, eapID: id, identity: identity))
+                    portHolders[id, default: []].insert(authenticator)
                     return
                 case .nobody: return
                 }
@@ -474,10 +870,14 @@ nonisolated enum AuthSessions {
             if !Self.isGroup(authenticator) {
                 bind(i, to: authenticator, at: o.time)
             } else if !fromAuthenticator, builders[i].nasMAC == nil {
-                if groupTalkers.count >= 64 { groupTalkers = groupTalkers.filter { o.time - $0.value <= AuthSessions.idleSplit } }
-                groupTalkers[client] = o.time
+                groupTalkers.note(client, at: o.time)
+                #if DEBUG
+                scanTalkers?[client] = o.time
+                #endif
             }
             builders[i].eapol(f, time: o.time, packet: p.id, fromAuthenticator: fromAuthenticator)
+            // What `groupTarget` asks of a talker (ids, a pending Start) changes only here.
+            if groupTalkers.contains(client) { groupTalkers.update(client, builders[i], at: o.time) }
         }
 
         static func trigger(_ f: AuthDecoder.EAPOLFrame) -> Trigger {
@@ -488,17 +888,34 @@ nonisolated enum AuthSessions {
         }
 
         mutating func bind(_ i: Int, to authenticator: String, at t: Double) {
+            // Noted as changed (`BuilderList`): it joins the pool at the next `refreshBound`.
             builders[i].nasMAC = authenticator
-            var list = bound[authenticator] ?? []
-            if list.last != i, !list.contains(i) {
-                if list.count >= 16 { list.removeAll { t - builders[$0].last > AuthSessions.idleSplit } }
-                list.append(i)
+            bound[authenticator, default: BoundClients()].bind(i, at: t, builders.items)
+            groupTalkers.remove(builders[i].client)
+            #if DEBUG
+            scanTalkers?[builders[i].client] = nil
+            if scanBound != nil {
+                var list = scanBound?[authenticator] ?? []
+                if list.last != i, !list.contains(i) {
+                    if list.count >= 16 { list.removeAll { t - builders[$0].last > AuthSessions.idleSplit } }
+                    list.append(i)
+                }
+                scanBound?[authenticator] = list
+                if list != bound[authenticator]?.members.all { groupTargetMismatches += 1 }
             }
-            bound[authenticator] = list
-            groupTalkers[builders[i].client] = nil
+            #endif
         }
 
-        enum GroupTarget {
+        /// Hands the bound attempts changed since the last call to their authenticators'
+        /// `BoundClients` (keys at `t`, back in the pool).
+        mutating func refreshBound(at t: Double) {
+            for i in builders.takeChanged() {
+                guard let a = builders[i].nasMAC else { continue }
+                bound[a]?.refresh(i, AttemptKeys(builders[i]), last: builders[i].last, at: t)
+            }
+        }
+
+        enum GroupTarget: Equatable {
             case client(String)
             /// Held for the client that answers it (EAP id), else the port's own attempt.
             case port(id: UInt8, identity: Bool)
@@ -509,11 +926,64 @@ nonisolated enum AuthSessions {
         /// clients bound to it and the clients talking to the group with no authenticator yet,
         /// the one whose exchange its EAP id continues. Never a guess between two clients: an id
         /// two exchanges could take is nobody's.
-        func groupTarget(_ f: AuthDecoder.EAPOLFrame, from authenticator: String, at t: Double) -> GroupTarget {
-            var pool = (bound[authenticator] ?? []).filter { i in
+        ///
+        /// Neither the bound clients nor the talkers are walked: every question below only needs
+        /// to tell none, one (which) and more than one apart, so each answers it from its index
+        /// with at most two names (`BoundClients`, `GroupTalkers`). A talker's attempt is
+        /// `current[c]`, not bound (bind ends the talking), so the two never share an attempt.
+        mutating func groupTarget(_ f: AuthDecoder.EAPOLFrame, from authenticator: String, at t: Double) -> GroupTarget {
+            refreshBound(at: t)
+            bound[authenticator]?.prepare(at: t, builders.items)
+            let pool = bound[authenticator] ?? BoundClients()
+            groupTalkers.prune(at: t)
+            groupTalkers.ripen(at: t)
+            let talkers = groupTalkers
+            let current = current
+            func attempts(_ clients: [String]) -> [Int] { clients.compactMap { current[$0] } }
+            func only(_ list: [Int]) -> GroupTarget? { list.count == 1 ? .client(builders[list[0]].client) : nil }
+            // The whole pool when it is one attempt (or none): its size is all that is asked.
+            var whole: [Int] {
+                pool.poolCount + talkers.count > 1 ? pool.inPool(2) + attempts(talkers.first(2))
+                                                   : pool.inPool(1) + attempts(talkers.first(1))
+            }
+            // Without an EAP id to go by, only where no other client could own it.
+            guard let eap = f.eap else { return only(whole) ?? .nobody }
+            if eap.isRequest {
+                let matches = pool.awaiting(eap.id) + attempts(talkers.awaiting(eap.id))
+                if matches.count == 1, contested(eap.id, from: t, to: t + 1, except: builders[matches[0]].client) {
+                    return eap.type == 1 ? .port(id: eap.id, identity: true) : .nobody
+                }
+                if let o = only(matches) { return o }
+                if matches.count > 1 { return eap.type == 1 ? .port(id: eap.id, identity: true) : .nobody }
+                if eap.type == 1 {
+                    // A new exchange: the one client that asked for it with an EAPOL-Start.
+                    if let o = only(pool.starting() + attempts(talkers.starting())) { return o }
+                    return .port(id: eap.id, identity: true)
+                }
+                // No id matched (an authenticator with random ids): the one exchange there is.
+                if let o = only(whole) { return o }
+                return pool.poolCount == 0 && talkers.count == 0 ? .port(id: eap.id, identity: false) : .nobody
+            }
+            // Success / Failure carry the id of the response they end.
+            let exact = pool.answered(eap.id) + attempts(talkers.answered(eap.id))
+            if let o = only(exact) { return o }
+            if exact.count > 1 { return .nobody }
+            let next = pool.answeredBefore(eap.id) + attempts(talkers.answeredBefore(eap.id))
+            if let o = only(next) { return o }
+            if next.count > 1 { return .nobody }
+            return only(whole) ?? .nobody
+        }
+
+        #if DEBUG
+        /// `groupTarget` as it was before round 22's indexes: every talker and every bound client
+        /// walked for every group-addressed frame, the bound lists kept as they were
+        /// (`scanBound`). Kept to check the indexes against (`buildCheckingGroupTargets`).
+        func groupTargetByScan(_ f: AuthDecoder.EAPOLFrame, from authenticator: String, at t: Double,
+                               talkers: [String: Double]) -> GroupTarget {
+            var pool = (scanBound?[authenticator] ?? []).filter { i in
                 builders[i].nasMAC == authenticator && t - builders[i].last <= AuthSessions.idleSplit
             }
-            for (c, at) in groupTalkers where t - at <= AuthSessions.idleSplit {
+            for (c, at) in talkers where t - at <= AuthSessions.idleSplit {
                 if let i = current[c], builders[i].nasMAC == nil, !pool.contains(i) { pool.append(i) }
             }
             func only(_ list: [Int]) -> GroupTarget? { list.count == 1 ? .client(builders[list[0]].client) : nil }
@@ -544,6 +1014,7 @@ nonisolated enum AuthSessions {
             if next.count > 1 { return .nobody }
             return only(pool) ?? .nobody
         }
+        #endif
 
         /// `client` answered EAP id `id`: the group-addressed request of that id waiting for its
         /// client (on `authenticator`, on the one the client is bound to, or — a reply to the
@@ -552,30 +1023,27 @@ nonisolated enum AuthSessions {
         /// two ports (the same id at the same moment), none is given to it: they are marked
         /// answered (no "no supplicant" attempt for them) and belong to nobody.
         mutating func adoptPortRequest(for client: String, answering id: UInt8, authenticator: String?, at t: Double) {
-            func candidates(_ a: String) -> [Int] {
-                guard let list = portFrames[a] else { return [] }
-                return list.indices.filter { list[$0].eapID == id && list[$0].time <= t && t - list[$0].time <= AuthSessions.idleSplit }
-            }
             var holders: [String]
             if let a = authenticator {
                 holders = [a]
             } else if let i = current[client], let a = builders[i].nasMAC, t - builders[i].last <= AuthSessions.idleSplit {
                 holders = [a]
             } else {
-                holders = Array(portFrames.keys)
+                holders = Array(portHolders[id] ?? [])
             }
-            holders = holders.filter { !candidates($0).isEmpty }
-            guard !holders.isEmpty else { return }
+            var found: [(holder: String, frames: [PortFrame])] = []
+            for a in holders {
+                let c = portCandidates(a, id, at: t)
+                if !c.isEmpty { found.append((a, c)) }
+            }
+            guard !found.isEmpty else { return }
             // One holder, and its same-id sends form one retransmission chain (each ≥ 1 s after
             // the one before): the request this reply answers.
-            if holders.count == 1, let a = holders.first, let list = portFrames[a] {
-                let idx = candidates(a)
-                let chain = zip(idx, idx.dropFirst()).allSatisfy { list[$1].time - list[$0].time >= 1 }
-                if chain, !contested(id, from: list[idx[0]].time, to: t + 1, except: client) {
-                    let frames = idx.map { list[$0] }
-                    var rest = list
-                    for k in idx.reversed() { rest.remove(at: k) }
-                    portFrames[a] = rest.isEmpty ? nil : rest
+            if found.count == 1 {
+                let (a, frames) = found[0]
+                let chain = zip(frames, frames.dropFirst()).allSatisfy { $1.time - $0.time >= 1 }
+                if chain, !contested(id, from: frames[0].time, to: t + 1, except: client) {
+                    removePortCandidates(a, id, at: t)
                     for pf in frames {
                         let i = builder(for: client, Self.trigger(pf.frame), at: pf.time, authenticator: a)
                         bind(i, to: a, at: pf.time)
@@ -585,18 +1053,64 @@ nonisolated enum AuthSessions {
                     return
                 }
             }
-            for a in holders {
-                guard var list = portFrames[a] else { continue }
-                for k in candidates(a).reversed() { list.remove(at: k) }
-                portFrames[a] = list.isEmpty ? nil : list
+            for (a, _) in found { removePortCandidates(a, id, at: t) }
+        }
+
+        /// The requests of EAP id `id` waiting on `a` that a reply at `t` can answer (sent before
+        /// it, within `idleSplit`), in time order. Those older than that never can again (times
+        /// only grow during the pass): they move to `portSettled` first, so a list is read past
+        /// once — what nobody answered still becomes the port's attempt in `finishPorts`.
+        mutating func portCandidates(_ a: String, _ id: UInt8, at t: Double) -> [PortFrame] {
+            guard var list = portFrames[a]?[id] else { return [] }
+            let stale = list.prefix { t - $0.time > AuthSessions.idleSplit }.count
+            if stale > 0 {
+                portSettled[a, default: []] += list.prefix(stale)
+                list.removeFirst(stale)
+                storePortList(list, a, id)
             }
+            return list.filter { $0.time <= t }
+        }
+
+        /// Drops the requests `portCandidates(a, id, at: t)` returned (adopted, or nobody's).
+        mutating func removePortCandidates(_ a: String, _ id: UInt8, at t: Double) {
+            guard var list = portFrames[a]?[id] else { return }
+            list.removeAll { $0.time <= t && t - $0.time <= AuthSessions.idleSplit }
+            storePortList(list, a, id)
+        }
+
+        mutating func storePortList(_ list: [PortFrame], _ a: String, _ id: UInt8) {
+            if !list.isEmpty { portFrames[a]?[id] = list; return }
+            portFrames[a]?[id] = nil
+            if portFrames[a]?.isEmpty == true { portFrames[a] = nil }
+            portHolders[id]?.remove(a)
+            if portHolders[id]?.isEmpty == true { portHolders[id] = nil }
         }
 
         /// Requests nobody answered: one attempt per authenticator port and minute-long spell,
         /// when it asked for an identity ("no supplicant answered").
         mutating func finishPorts() {
-            for a in portFrames.keys.sorted() {
-                guard let list = portFrames[a]?.sorted(by: { $0.time < $1.time }) else { continue }
+            for a in Set(portFrames.keys).union(portSettled.keys).sorted() {
+                // Capture order among requests of one moment (`packet`), as they were added.
+                let list = ((portSettled[a] ?? []) + (portFrames[a]?.values.flatMap { $0 } ?? []))
+                    .sorted { ($0.time, $0.packet) < ($1.time, $1.packet) }
+                guard !list.isEmpty else { continue }
+                // The bound list by last packet (final now), and among equal ones the earliest
+                // bound last: the end of the run at or before a time is the list's latest attempt
+                // then, the one a filter of the list and `max(by:)` named (a binary search per
+                // spell — the filter was bound clients × spells).
+                var byLast: [(last: Double, order: Int, attempt: Int)]?
+                func lastClient(before t0: Double) -> Int? {
+                    if byLast == nil {
+                        byLast = (bound[a]?.members.all ?? []).enumerated()
+                            .filter { !builders[$0.element].portOnly }
+                            .map { (builders[$0.element].last, $0.offset, $0.element) }
+                            .sorted { ($0.last, $1.order) < ($1.last, $0.order) }
+                    }
+                    guard let sorted = byLast else { return nil }
+                    var lo = 0, hi = sorted.count
+                    while lo < hi { let mid = (lo + hi) / 2; if sorted[mid].last <= t0 { lo = mid + 1 } else { hi = mid } }
+                    return lo > 0 ? sorted[lo - 1].attempt : nil
+                }
                 var spell: [PortFrame] = []
                 func flush() {
                     defer { spell = [] }
@@ -607,8 +1121,15 @@ nonisolated enum AuthSessions {
                     // A client that talked on this port before: it stopped answering (gave up
                     // after a failure, or left) — not a port with no supplicant at all.
                     let t0 = spell[0].time
-                    if let i = (bound[a] ?? []).filter({ builders[$0].last <= t0 && !builders[$0].portOnly })
-                        .max(by: { builders[$0].last < builders[$1].last }) {
+                    let found = lastClient(before: t0)
+                    #if DEBUG
+                    if let lists = scanBound {
+                        let old = (lists[a] ?? []).filter({ builders[$0].last <= t0 && !builders[$0].portOnly })
+                            .max(by: { builders[$0].last < builders[$1].last })
+                        if old != found { groupTargetMismatches += 1 }
+                    }
+                    #endif
+                    if let i = found {
                         b.portLastClient = (builders[i].client, builders[i].last, builders[i].eapFailed || builders[i].radiusRejected)
                     }
                     for pf in spell { b.eapol(pf.frame, time: pf.time, packet: pf.packet, fromAuthenticator: true) }
@@ -621,6 +1142,8 @@ nonisolated enum AuthSessions {
                 flush()
             }
             portFrames = [:]
+            portSettled = [:]
+            portHolders = [:]
         }
 
         mutating func radius(_ r: AuthDecoder.RadiusPacket, _ o: Obs, _ p: Packet) {
@@ -1266,7 +1789,7 @@ nonisolated enum AuthSessions {
                 result = .accepted
             } else if !captive, let lastRaw, silentFor >= AuthSessions.stallAfter, !(macStage == .accepted) {
                 result = .timeout("stopped")
-                bad("Stopped after \(lastRaw.label): no answer for \(Int(silentFor)) s")
+                bad("Stopped after \(lastRaw.label): no answer for \(Int(saturating: silentFor)) s")
             } else {
                 result = .inProgress
                 if captive { notes.append("Waiting at the captive portal when the capture ended.") }
@@ -1303,7 +1826,7 @@ nonisolated enum AuthSessions {
                 } else if firstDHCP == nil && !clientSide && run.sawDHCP && end - acceptAt >= AuthSessions.dhcpGrace {
                     notes.append("No DHCP from this client in the capture (other clients' DHCP is there).")
                 } else if let d = firstDHCP, d - acceptAt > AuthSessions.dhcpGrace {
-                    warn("DHCP started \(Int(d - acceptAt)) s after the accept")
+                    warn("DHCP started \(Int(saturating: d - acceptAt)) s after the accept")
                 }
             }
             if method == .macAuth, lastEAPRequestID != nil, eapResponses == 0 {
@@ -1324,7 +1847,7 @@ nonisolated enum AuthSessions {
                       let i = marked.lastIndex(where: { $0.label == "EAPOL-Start" }) {
                 marked[i].problem = "no EAP-Request from the switch / AP"
             } else if case .timeout(let why) = result, why == "stopped", !marked.isEmpty, marked[marked.count - 1].problem == nil {
-                marked[marked.count - 1].problem = "no answer for \(Int(silentFor)) s"
+                marked[marked.count - 1].problem = "no answer for \(Int(saturating: silentFor)) s"
             }
             let events = AuthSessions.events(marked, first: first, methodName: methodName)
             let userShown: String? = {

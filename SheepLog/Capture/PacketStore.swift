@@ -355,12 +355,24 @@ final class PacketStore: ObservableObject {
         let lt = linkType, snap = fileSnapLength
         saveToken += 1
         let token = saveToken
-        savingCount = filter == nil ? snapshot.count : visible.count
+        // Mid-rescan the filtered count is not known yet (the writer applies the filter); the
+        // exact number is published below, before the file is written.
+        savingCount = snapshot.count
         isSaving = true
         PendingWrites.begin()          // ⌘Q waits for the write
         Task.detached(priority: .userInitiated) { [weak self] in
             var failure: String?
             let rows = PacketStore.filter(snapshot, with: filter)
+            let wrote = rows.count
+            // Fired, not awaited: ⌘Q blocks the main thread in `PendingWrites.wait`, and a
+            // main-actor hop here would deadlock the write until its 30 s timeout (the file
+            // would never be written). The heading's count updates when the main queue is free.
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, self.saveToken == token else { return }
+                    self.savingCount = wrote
+                }
+            }
             do { try PcapFile.write(rows, linkType: lt, to: url, snapLength: snap) } catch { failure = error.localizedDescription }
             PendingWrites.end()
             let message = failure
